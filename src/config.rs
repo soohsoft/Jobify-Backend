@@ -1,0 +1,64 @@
+use std::env;
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub cors_origin: String,
+    pub mongodb_uri: String,
+    pub database_name: String,
+    pub jwt_secret: String,
+    pub jwt_issuer: String,
+    pub internal_api_key: String,
+    pub waafi_api_key: String,
+    pub waafi_account_id: String,
+    pub waafi_api_url: String,
+    pub waafi_verify_url: String,
+    pub waafi_callback_url: String,
+    pub deepseek_api_key: String,
+    pub deepseek_base_url: String,
+    pub deepseek_model: String,
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        let _ = dotenvy::dotenv();
+
+        Self {
+            host: env_var("HOST", "0.0.0.0"),
+            port: env_var("PORT", "3000").parse().unwrap_or(3000),
+            cors_origin: env_var("CORS_ORIGIN", "*"),
+            mongodb_uri: env_var("MONGODB_URI", "mongodb://127.0.0.1:27017/jobify"),
+            database_name: env_var("MONGODB_DB_NAME", "jobify"),
+            jwt_secret: env_var("JWT_SECRET", "jobify-dev-secret-change-me"),
+            jwt_issuer: env_var("JWT_ISSUER", "jobify-backend"),
+            internal_api_key: env_var(
+                "SCRAPER_INTERNAL_API_KEY",
+                "jobify-scraper-dev-key-change-me",
+            ),
+            waafi_api_key: env_var("WAAFI_API_KEY", ""),
+            waafi_account_id: env_var("WAAFI_ACCOUNT_ID", ""),
+            waafi_api_url: env_var("WAAFI_API_URL", "https://api.waafipay.net"),
+            waafi_verify_url: env_var(
+                "WAAFI_VERIFY_URL",
+                "https://api.waafipay.net/v1/payments/verify",
+            ),
+            waafi_callback_url: env_var("WAAFI_CALLBACK_URL", ""),
+            deepseek_api_key: env_var("DEEPSEEK_API_KEY", ""),
+            deepseek_base_url: env_var("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            deepseek_model: env_var("DEEPSEEK_MODEL", "deepseek-chat"),
+        }
+    }
+
+    pub fn waafi_configured(&self) -> bool {
+        !self.waafi_api_key.is_empty() && !self.waafi_account_id.is_empty()
+    }
+
+    pub fn deepseek_configured(&self) -> bool {
+        !self.deepseek_api_key.is_empty()
+    }
+}
+
+fn env_var(key: &str, default: &str) -> String {
+    env::var(key).unwrap_or_else(|_| default.to_string())
+}

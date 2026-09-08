@@ -4,6 +4,15 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Today's date (YYYY-MM-DD) in Africa/Nairobi (UTC+3, no DST).
+pub fn nairobi_today() -> String {
+    let nairobi = chrono::FixedOffset::east_opt(3 * 3600).expect("valid +03:00 offset");
+    chrono::Utc::now()
+        .with_timezone(&nairobi)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 pub fn uuid_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -94,4 +103,16 @@ pub fn merge_profile(base: &Value, incoming: &Value) -> Value {
         }
     }
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nairobi_today_is_iso_date() {
+        let today = nairobi_today();
+        assert_eq!(today.len(), 10, "expected YYYY-MM-DD, got {today}");
+        assert!(chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").is_ok());
+    }
 }

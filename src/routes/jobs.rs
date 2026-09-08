@@ -14,7 +14,7 @@ use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::models::JobInput;
 use crate::state::AppState;
-use crate::util::{now_iso, uuid_id};
+use crate::util::{nairobi_today, now_iso, uuid_id};
 
 use super::{ApiResult, common::paginate};
 
@@ -97,6 +97,21 @@ async fn list(
             ],
         );
     }
+
+    // Exclude jobs whose deadline is already in the past (computed in Nairobi
+    // time). A missing/null/empty deadline is not "in the past", so it stays.
+    let deadline_filter = doc! {
+        "$or": [
+            doc! { "deadline": null },
+            doc! { "deadline": "" },
+            doc! { "deadline": doc! { "$gte": nairobi_today() } },
+        ]
+    };
+    let filter = if filter.is_empty() {
+        deadline_filter
+    } else {
+        doc! { "$and": [filter, deadline_filter] }
+    };
 
     let page = query.page.max(1);
     let limit = query.limit.clamp(1, 100);

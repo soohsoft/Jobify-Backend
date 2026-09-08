@@ -483,3 +483,44 @@ pub struct SelectTemplateRequest {
 pub struct ChatMessageRequest {
     pub content: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usd_to_tokens_one_dollar() {
+        assert_eq!(usd_to_tokens(1.0), 1_100_000);
+    }
+
+    #[test]
+    fn usd_to_tokens_zero_and_negative_floor_to_zero() {
+        assert_eq!(usd_to_tokens(0.0), 0);
+        assert_eq!(usd_to_tokens(-5.0), 0);
+    }
+
+    #[test]
+    fn usd_to_tokens_half_dollar_is_exact() {
+        assert_eq!(usd_to_tokens(0.5), 550_000);
+    }
+
+    #[test]
+    fn tokens_to_usd_roundtrips() {
+        assert_eq!(tokens_to_usd(1_100_000), 1.0);
+        assert_eq!(tokens_to_usd(0), 0.0);
+    }
+
+    #[test]
+    fn pricing_margin_is_consistent() {
+        let expected = COST_PER_TOKEN / (1.0 - PROFIT_MARGIN);
+        assert!((PRICE_PER_TOKEN - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn template_id_validation() {
+        assert!(is_valid_template_id("modern"));
+        assert!(is_valid_template_id("professional"));
+        assert!(!is_valid_template_id("nope"));
+        assert!(!is_valid_template_id(""));
+    }
+}

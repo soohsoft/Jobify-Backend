@@ -151,3 +151,66 @@ pub async fn create_notification(
 pub fn _unused_tokens_helper(usd: f64) -> u64 {
     usd_to_tokens(usd)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    const TEST_DB: &str = "jobify_test";
+
+    async fn fresh_state() -> AppState {
+        let mut config = Config::from_env();
+        config.database_name = TEST_DB.to_string();
+        let client = mongodb::Client::with_uri_str(&config.mongodb_uri)
+            .await
+            .expect("failed to connect to test MongoDB");
+        let _ = client.database(TEST_DB).drop().await;
+        let db = client.database(TEST_DB);
+        AppState::new(db, config)
+    }
+
+    #[tokio::test]
+    async fn add_tokens_creates_credit_and_adds_balance() {
+        let state = fresh_state().await;
+        let credit = add_tokens(&state, "user-a", 500).await.unwrap();
+        assert_eq!(credit.tokens, 500);
+        assert_eq!(credit.user_id, "user-a");
+    }
+
+    #[tokio::test]
+    async fn deduct_at_zero_balance_is_payment_required() {
+        let state = fresh_state().await;
+        let result = deduct_tokens(&state, "user-b", 1).await;
+        assert!(matches!(result, Err(AppError::PaymentRequired(_))));
+        let credit = get_or_create_credit(&state, "user-b").await.unwrap();
+        assert_eq!(credit.tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn deduct_exact_balance_reaches_zero() {
+        let state = fresh_state().await;
+        add_tokens(&state, "user-c", 100).await.unwrap();
+        let credit = deduct_tokens(&state, "user-c", 100).await.unwrap();
+        assert_eq!(credit.tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn overdraw_is_refused_and_balance_unchanged() {
+        let state = fresh_state().await;
+        add_tokens(&state, "user-d", 100).await.unwrap();
+        let result = deduct_tokens(&state, "user-d", 200).await;
+        assert!(matches!(result, Err(AppError::PaymentRequired(_))));
+        let credit = get_or_create_credit(&state, "user-d").await.unwrap();
+        assert_eq!(credit.tokens, 100);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_credit_is_idempotent() {
+        let state = fresh_state().await;
+        let first = get_or_create_credit(&state, "user-e").await.unwrap();
+        let second = get_or_create_credit(&state, "user-e").await.unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.tokens, 0);
+    }
+}

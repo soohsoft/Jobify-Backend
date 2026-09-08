@@ -120,7 +120,10 @@ async fn list(
         filter,
         page,
         limit,
-        doc! { "created_at": -1 },
+        // Secondary sort on _id keeps pagination stable when many jobs share
+        // the same created_at second (batch ingest), instead of leaking or
+        // repeating rows across pages.
+        doc! { "created_at": -1, "_id": -1 },
     )
     .await?;
 

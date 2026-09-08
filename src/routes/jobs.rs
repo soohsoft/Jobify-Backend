@@ -198,6 +198,7 @@ async fn ingest_jobs(
                 "deadline": input.deadline.clone(),
                 "url": input.url.clone(),
                 "image_url": input.image_url.clone(),
+                "organization_image_url": input.organization_image_url.clone(),
                 "category": input.category.clone(),
                 "employment_type": input.employment_type.clone(),
                 "salary": input.salary.clone(),

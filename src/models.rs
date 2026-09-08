@@ -84,6 +84,10 @@ pub struct JobDoc {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    /// Logo of the employer / hiring company (e.g. UNICEF, UN) as shown in
+    /// the job listing. NOT the job board's own site branding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +125,10 @@ pub struct JobInput {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    /// Logo of the employer / hiring company (e.g. UNICEF, UN) as shown in
+    /// the job listing. NOT the job board's own site branding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +148,18 @@ pub struct SourceSelectors {
     pub posted_date: String,
     pub deadline: String,
     pub image: String,
+    /// CSS selector for the employer / hiring company logo inside each job
+    /// listing (not the job board's own site branding).
+    #[serde(default)]
+    pub organization_image: String,
+    #[serde(default)]
+    pub qualifications: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub employment_type: String,
+    #[serde(default)]
+    pub salary: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -163,7 +183,12 @@ pub fn default_job_sources() -> Vec<SourceConfig> {
                     requirements: &str,
                     posted_date: &str,
                     deadline: &str,
-                    image: &str| SourceSelectors {
+                    image: &str,
+                    organization_image: &str,
+                    qualifications: &str,
+                    category: &str,
+                    employment_type: &str,
+                    salary: &str| SourceSelectors {
         card: card.to_string(),
         title: title.to_string(),
         organization: organization.to_string(),
@@ -173,6 +198,11 @@ pub fn default_job_sources() -> Vec<SourceConfig> {
         posted_date: posted_date.to_string(),
         deadline: deadline.to_string(),
         image: image.to_string(),
+        organization_image: organization_image.to_string(),
+        qualifications: qualifications.to_string(),
+        category: category.to_string(),
+        employment_type: employment_type.to_string(),
+        salary: salary.to_string(),
     };
 
     vec![
@@ -193,6 +223,11 @@ pub fn default_job_sources() -> Vec<SourceConfig> {
                 ".posted-date",
                 ".deadline",
                 ".job-image img",
+                ".company-logo img",
+                ".qualifications li",
+                ".category",
+                ".employment-type",
+                ".salary",
             ),
         },
         SourceConfig {
@@ -201,17 +236,22 @@ pub fn default_job_sources() -> Vec<SourceConfig> {
             base_url: "https://somalijobs.com".to_string(),
             listing_url: "https://somalijobs.com/jobs".to_string(),
             source_type: "external".to_string(),
-            enabled: false,
+            enabled: true,
             selectors: selector(
-                ".job-listing",
-                ".job-title",
-                ".company",
-                ".job-location",
-                ".job-summary",
-                ".job-requirements",
-                ".job-date",
-                ".job-deadline",
-                ".company-logo",
+                "a.jobs-listing-container",
+                ".jobs-listing-title",
+                ".jobs-listing-company",
+                "",
+                ".jobs-listing-details",
+                "",
+                "",
+                "",
+                "",
+                ".jobs-listing-image img",
+                "",
+                "",
+                "",
+                "",
             ),
         },
         SourceConfig {
@@ -230,7 +270,36 @@ pub fn default_job_sources() -> Vec<SourceConfig> {
                 ".vacancy-requirements",
                 ".posted-date",
                 ".closing-date",
+                ".job-image img",
                 ".vacancy-logo img",
+                ".qualifications li",
+                ".category",
+                ".employment-type",
+                ".salary",
+            ),
+        },
+        SourceConfig {
+            id: "unjobs".to_string(),
+            name: "UNjobs".to_string(),
+            base_url: "https://unjobs.org".to_string(),
+            listing_url: "https://unjobs.org/duty_stations/somalia".to_string(),
+            source_type: "external".to_string(),
+            enabled: false,
+            selectors: selector(
+                "div.job[id]",
+                "a.jtitle",
+                "@line:1",
+                "",
+                "",
+                "",
+                "",
+                "span[id^=\"j\"]",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
             ),
         },
     ]

@@ -20,7 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/notifications", get(list))
         .route("/notifications/unread-count", get(unread_count))
         .route("/notifications/read-all", patch(read_all))
-        .route("/notifications/:id/read", patch(read_one))
+        .route("/notifications/{id}/read", patch(read_one))
 }
 
 #[derive(Deserialize)]

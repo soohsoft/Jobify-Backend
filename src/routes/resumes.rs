@@ -36,8 +36,8 @@ pub fn public_router() -> Router<AppState> {
 pub fn protected_router() -> Router<AppState> {
     Router::new()
         .route("/resumes", get(list))
-        .route("/resumes/:id", get(get_by_id).patch(update).delete(remove))
-        .route("/resumes/:id/chat", post(edit_chat))
+        .route("/resumes/{id}", get(get_by_id).patch(update).delete(remove))
+        .route("/resumes/{id}/chat", post(edit_chat))
 }
 
 #[derive(Deserialize)]

@@ -21,7 +21,7 @@ use super::{ApiResult, common::paginate};
 pub fn public_router() -> Router<AppState> {
     Router::new()
         .route("/jobs", get(list))
-        .route("/jobs/:id", get(get_by_id))
+        .route("/jobs/{id}", get(get_by_id))
 }
 
 pub fn internal_router() -> Router<AppState> {

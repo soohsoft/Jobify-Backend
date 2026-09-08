@@ -32,9 +32,9 @@ use super::common::{SseStream, SseTx, paginate, send_sse, sse_event};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chats", get(list).post(create))
-        .route("/chats/:id", get(get_by_id))
-        .route("/chats/:id/messages", post(send_message))
-        .route("/chats/:id/template", post(select_template))
+        .route("/chats/{id}", get(get_by_id))
+        .route("/chats/{id}/messages", post(send_message))
+        .route("/chats/{id}/template", post(select_template))
 }
 
 #[derive(Deserialize)]

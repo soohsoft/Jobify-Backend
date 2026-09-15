@@ -1,6 +1,6 @@
 mod auth;
-// Consumed by the upcoming job-matching endpoint and by ingest validation;
-// until then nothing outside the module calls into it.
+// Ingest validation uses `Category::from_slug`; the group/label accessors are
+// for the job-metadata endpoint and job matching still to come.
 #[allow(dead_code)]
 mod categories;
 mod config;

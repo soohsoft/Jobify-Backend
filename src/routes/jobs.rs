@@ -194,6 +194,23 @@ async fn ingest_jobs(
             continue;
         }
 
+        // A category the taxonomy doesn't know is dropped, not guessed at. The
+        // job itself is still good, so this is a warning rather than a failure.
+        if let Some(raw) = input
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            && canonical_category(&input.category).is_none()
+        {
+            tracing::warn!(
+                source = %input.source,
+                external_id = %input.external_id,
+                category = %raw,
+                "ingest: unrecognized category slug, storing null"
+            );
+        }
+
         let now = now_iso();
         let id = uuid_id();
         let set_on_insert = doc! {
@@ -217,7 +234,7 @@ async fn ingest_jobs(
                 "url": input.url.clone(),
                 "image_url": input.image_url.clone(),
                 "organization_image_url": input.organization_image_url.clone(),
-                "category": input.category.clone(),
+                "category": canonical_category(&input.category),
                 "employment_type": input.employment_type.clone(),
                 "salary": input.salary.clone(),
                 "updated_at": &now,
@@ -248,6 +265,14 @@ async fn ingest_jobs(
     ))
 }
 
+/// Only canonical taxonomy slugs are stored (`src/categories.rs`). Anything
+/// else — a board's free text, a mis-cased or hallucinated slug from the
+/// scraper's LLM — becomes null instead of polluting `GET /jobs?category=`.
+fn canonical_category(raw: &Option<String>) -> Option<&'static str> {
+    let slug = raw.as_deref()?.trim();
+    crate::categories::Category::from_slug(slug).map(|category| category.slug())
+}
+
 fn escape_regex(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() * 2);
     for c in value.chars() {
@@ -261,3 +286,44 @@ fn escape_regex(value: &str) -> String {
 
 #[allow(dead_code)]
 fn _unused_json(_: Value) {}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_category;
+
+    fn raw(value: &str) -> Option<String> {
+        Some(value.to_string())
+    }
+
+    #[test]
+    fn accepts_a_known_slug() {
+        assert_eq!(
+            canonical_category(&raw("software_engineering_and_web_development")),
+            Some("software_engineering_and_web_development")
+        );
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(canonical_category(&raw("  wash  ")), Some("wash"));
+    }
+
+    #[test]
+    fn rejects_unknown_and_free_text() {
+        assert_eq!(canonical_category(&raw("totally_made_up_slug")), None);
+        assert_eq!(canonical_category(&raw("Software Engineering")), None);
+        assert_eq!(canonical_category(&raw("IT & Networking")), None);
+    }
+
+    #[test]
+    fn rejects_absent_and_blank() {
+        assert_eq!(canonical_category(&None), None);
+        assert_eq!(canonical_category(&raw("")), None);
+        assert_eq!(canonical_category(&raw("   ")), None);
+    }
+
+    #[test]
+    fn slugs_are_strictly_lowercase() {
+        assert_eq!(canonical_category(&raw("WASH")), None);
+    }
+}

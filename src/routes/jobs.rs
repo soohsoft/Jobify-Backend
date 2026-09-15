@@ -218,27 +218,75 @@ async fn ingest_jobs(
             "created_at": &now,
         };
 
+        // Only overwrite fields the payload actually carries. The scraper is not
+        // guaranteed to send everything every cycle — enrichment can be disabled,
+        // a detail page can fail, a board can stop exposing a field — and a full
+        // `$set` would blank whatever an earlier, richer run had stored. Keys the
+        // payload always provides (identity, title, url) stay unconditional; the
+        // tradeoff is that an empty value can no longer clear a stored one.
+        let mut set = mongodb::bson::Document::new();
+        set.insert("external_id", &input.external_id);
+        set.insert("source", &input.source);
+        set.insert("title", &input.title);
+        set.insert("url", &input.url);
+        set.insert("updated_at", &now);
+
+        if !input.source_name.trim().is_empty() {
+            set.insert("source_name", &input.source_name);
+        }
+        if !input.organization.trim().is_empty() {
+            set.insert("organization", &input.organization);
+        }
+        if !input.description.trim().is_empty() {
+            set.insert("description", &input.description);
+        }
+        if let Some(value) = input.location.as_deref().filter(|s| !s.trim().is_empty()) {
+            set.insert("location", value);
+        }
+        if let Some(value) = input
+            .posted_date
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            set.insert("posted_date", value);
+        }
+        if let Some(value) = input.deadline.as_deref().filter(|s| !s.trim().is_empty()) {
+            set.insert("deadline", value);
+        }
+        if let Some(value) = input.image_url.as_deref().filter(|s| !s.trim().is_empty()) {
+            set.insert("image_url", value);
+        }
+        if let Some(value) = input
+            .organization_image_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            set.insert("organization_image_url", value);
+        }
+        // An absent, blank, or unrecognized slug is skipped rather than written,
+        // so a junk value cannot blank a category a previous run got right.
+        if let Some(canonical) = canonical_category(&input.category) {
+            set.insert("category", canonical);
+        }
+        if let Some(value) = input
+            .employment_type
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            set.insert("employment_type", value);
+        }
+        if let Some(value) = input.salary.as_deref().filter(|s| !s.trim().is_empty()) {
+            set.insert("salary", value);
+        }
+        if !input.requirements.is_empty() {
+            set.insert("requirements", &input.requirements);
+        }
+        if !input.qualifications.is_empty() {
+            set.insert("qualifications", &input.qualifications);
+        }
+
         let update = doc! {
-            "$set": {
-                "external_id": input.external_id.clone(),
-                "source": input.source.clone(),
-                "source_name": input.source_name.clone(),
-                "title": input.title.clone(),
-                "organization": input.organization.clone(),
-                "location": input.location.clone(),
-                "description": input.description.clone(),
-                "requirements": input.requirements.clone(),
-                "qualifications": input.qualifications.clone(),
-                "posted_date": input.posted_date.clone(),
-                "deadline": input.deadline.clone(),
-                "url": input.url.clone(),
-                "image_url": input.image_url.clone(),
-                "organization_image_url": input.organization_image_url.clone(),
-                "category": canonical_category(&input.category),
-                "employment_type": input.employment_type.clone(),
-                "salary": input.salary.clone(),
-                "updated_at": &now,
-            },
+            "$set": set,
             "$setOnInsert": set_on_insert,
         };
 

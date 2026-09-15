@@ -1,4 +1,8 @@
 mod auth;
+// Consumed by the upcoming job-matching endpoint and by ingest validation;
+// until then nothing outside the module calls into it.
+#[allow(dead_code)]
+mod categories;
 mod config;
 mod db;
 mod error;

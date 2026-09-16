@@ -1,6 +1,6 @@
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::auth::{AuthUser, issue_token};
 use crate::error::AppError;
-use crate::models::{AlertPrefs, JobDoc, LoginTokenDoc, RecoveryRequest, UserDoc};
+use crate::models::{AlertPrefs, JobDoc, LoginTokenDoc, NotificationDoc, RecoveryRequest, UserDoc};
 use crate::services::{add_tokens, credit_json, get_or_create_credit};
 use crate::state::AppState;
 use crate::util::{iso_seconds_from_now, nairobi_today, now_iso, secret_token, uuid_id};
@@ -21,7 +21,10 @@ use super::jobs::queue_matches_for_user;
 
 /// How many notifications one poll returns. A batch rather than the whole backlog,
 /// so a long absence does not become one enormous message.
-const DELIVERY_BATCH: i64 = 10;
+const DELIVERY_BATCH: i64 = 100;
+
+/// Hard ceiling on one delivery page, so a caller cannot ask for the whole backlog.
+const DELIVERY_PAGE_MAX: i64 = 200;
 
 /// How many matches one refresh may queue per subscriber.
 const MATCHES_PER_REFRESH: i64 = 5;
@@ -30,6 +33,216 @@ pub fn internal_router() -> Router<AppState> {
     Router::new()
         .route("/bot/session", post(session))
         .route("/internal/matches/refresh", post(refresh_matches))
+        .route("/internal/deliveries", get(deliveries))
+        .route("/internal/deliveries/sent", post(deliveries_sent))
+        .route("/internal/deliveries/failed", post(deliveries_failed))
+}
+
+/// One page of the delivery queue. Bounded so a huge backlog arrives as several pages
+/// rather than one enormous response.
+#[derive(Deserialize)]
+pub struct DeliveriesQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryIds {
+    pub ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryFailures {
+    /// id -> reason, so one request can mix a block with a transient failure.
+    pub failures: Vec<DeliveryFailure>,
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryFailure {
+    pub id: String,
+    pub reason: String,
+}
+
+/// What the bot should send next, across **every** user.
+///
+/// This exists because the per-user route (`GET /bot/notifications`) forced the bot to hold
+/// a session per user to ask on their behalf — which meant delivery only ever reached users
+/// whose token happened to be in the bot's memory. After a restart that set was empty, so
+/// alerts silently stopped for everybody until they each messaged the bot again. A push
+/// product that stops pushing on every deploy is not a push product.
+///
+/// Called with the internal key, the bot needs no per-user credentials to deliver at all.
+async fn deliveries(
+    State(state): State<AppState>,
+    Query(query): Query<DeliveriesQuery>,
+) -> ApiResult {
+    let limit = query
+        .limit
+        .unwrap_or(DELIVERY_BATCH)
+        .clamp(1, DELIVERY_PAGE_MAX);
+
+    // Over-fetch: some notifications belong to users who cannot receive (no chat id, or
+    // alerts switched off), and dropping them must not make the page look empty.
+    let mut cursor = state
+        .notifications()
+        .find(doc! { "sent_at": null })
+        .sort(doc! { "created_at": 1 })
+        .limit(limit * 3)
+        .await?;
+
+    let mut candidates: Vec<NotificationDoc> = Vec::new();
+    while let Some(doc) = cursor.try_next().await? {
+        candidates.push(doc);
+        if candidates.len() as i64 >= limit * 3 {
+            break;
+        }
+    }
+    if candidates.is_empty() {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "success", "data": { "deliveries": [], "count": 0 } })),
+        ));
+    }
+
+    // One query for the recipients rather than one per notification.
+    let user_ids: Vec<String> = candidates.iter().map(|n| n.user_id.clone()).collect();
+    let mut recipients = std::collections::HashMap::new();
+    let mut user_cursor = state
+        .users()
+        .find(doc! { "_id": { "$in": &user_ids } })
+        .await?;
+    while let Some(user) = user_cursor.try_next().await? {
+        let reachable = user
+            .telegram_chat_id
+            .as_deref()
+            .map(|id| !id.is_empty())
+            .unwrap_or(false)
+            && user.alerts.as_ref().map(|a| a.enabled).unwrap_or(false);
+        if reachable {
+            recipients.insert(user.id.clone(), user.telegram_chat_id.unwrap_or_default());
+        }
+    }
+
+    let mut page: Vec<&NotificationDoc> = candidates
+        .iter()
+        .filter(|n| recipients.contains_key(&n.user_id))
+        .take(limit as usize)
+        .collect();
+    page.truncate(limit as usize);
+
+    // One query for the jobs the cards need.
+    let job_ids: Vec<String> = page
+        .iter()
+        .filter_map(|n| n.job_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut jobs = std::collections::HashMap::new();
+    if !job_ids.is_empty() {
+        let mut job_cursor = state
+            .jobs()
+            .find(doc! { "_id": { "$in": &job_ids } })
+            .await?;
+        while let Some(job) = job_cursor.try_next().await? {
+            jobs.insert(job.id.clone(), job);
+        }
+    }
+
+    let deliveries: Vec<Value> = page
+        .iter()
+        .map(|n| {
+            json!({
+                "notificationId": &n.id,
+                "telegramChatId": recipients.get(&n.user_id),
+                "title": &n.title,
+                "body": &n.body,
+                "jobId": &n.job_id,
+                "job": n.job_id.as_ref().and_then(|id| jobs.get(id)),
+                "createdAt": &n.created_at,
+            })
+        })
+        .collect();
+
+    let count = deliveries.len();
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": { "deliveries": deliveries, "count": count } })),
+    ))
+}
+
+/// Mark a page delivered. Bulk, so a pass costs one request rather than one per message.
+async fn deliveries_sent(
+    State(state): State<AppState>,
+    Json(body): Json<DeliveryIds>,
+) -> ApiResult {
+    if body.ids.is_empty() {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "success", "data": { "marked": 0 } })),
+        ));
+    }
+    let result = state
+        .notifications()
+        .update_many(
+            doc! { "_id": { "$in": &body.ids } },
+            doc! { "$set": { "sent_at": now_iso() } },
+        )
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": { "marked": result.modified_count } })),
+    ))
+}
+
+/// Mark a page failed, with per-item reasons.
+///
+/// A refusal (`blocked`, `deactivated`, `chat_not_found`) means the user cannot be reached
+/// until they act, so alerts are paused for them — otherwise every future match is queued,
+/// attempted and refused forever, which looks exactly like a working system from outside.
+async fn deliveries_failed(
+    State(state): State<AppState>,
+    Json(body): Json<DeliveryFailures>,
+) -> ApiResult {
+    let mut marked = 0u64;
+    let mut paused = 0u64;
+
+    for failure in &body.failures {
+        let reason = failure.reason.trim().to_lowercase();
+        let notification = state
+            .notifications()
+            .find_one_and_update(
+                doc! { "_id": &failure.id },
+                doc! { "$set": { "sent_at": now_iso(), "failed_reason": &reason } },
+            )
+            .await?;
+
+        let Some(notification) = notification else {
+            continue;
+        };
+        marked += 1;
+
+        if matches!(
+            reason.as_str(),
+            "blocked" | "deactivated" | "chat_not_found"
+        ) && state
+            .users()
+            .update_one(
+                doc! { "_id": &notification.user_id },
+                doc! { "$set": { "alerts.enabled": false } },
+            )
+            .await?
+            .modified_count
+            > 0
+        {
+            paused += 1;
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": { "marked": marked, "alertsPaused": paused } })),
+    ))
 }
 
 pub fn protected_router() -> Router<AppState> {

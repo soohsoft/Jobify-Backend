@@ -299,7 +299,14 @@ async fn handle_collecting(
     let extract_messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: EXTRACT_SYSTEM_PROMPT.to_string(),
+            // The candidate list rides in the user message rather than the prompt
+            // constant, so the slugs stay defined once in categories.rs and the
+            // prompt cannot drift away from the taxonomy.
+            content: format!(
+                "{}\n\nCandidate categories for \"categories\" (use these slugs exactly):\n{}",
+                EXTRACT_SYSTEM_PROMPT,
+                crate::categories::Category::prompt_list()
+            ),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -345,6 +352,40 @@ async fn handle_collecting(
         "collecting"
     };
 
+    // Validate every slug through the taxonomy, so a hallucinated or reformatted
+    // category is dropped rather than stored, and cap it at three.
+    let categories: Vec<String> = {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(items) = extracted.get("categories").and_then(Value::as_array) {
+            for item in items {
+                if let Some(slug) = item
+                    .as_str()
+                    .and_then(|raw| crate::categories::Category::from_slug(raw.trim()))
+                {
+                    let slug = slug.slug().to_string();
+                    if !out.contains(&slug) {
+                        out.push(slug);
+                    }
+                }
+            }
+        }
+        out.truncate(3);
+        out
+    };
+    let keywords: Vec<String> = extracted
+        .get("keywords")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .take(8)
+                .collect()
+        })
+        .unwrap_or_default();
+
     chat.profile = merged.clone();
     chat.status = next_status.to_string();
     chat.updated_at = now_iso();
@@ -386,6 +427,31 @@ async fn handle_collecting(
         )
         .await?;
 
+    // What the matcher will read. Dotted paths, so a turn that yields no
+    // categories cannot wipe what an earlier turn established.
+    let mut match_set = mongodb::bson::Document::new();
+    if !categories.is_empty() {
+        match_set.insert("match_profile.categories", &categories);
+    }
+    if !keywords.is_empty() {
+        match_set.insert("match_profile.keywords", &keywords);
+    }
+    if let Some(location) = merged
+        .get("location")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match_set.insert("match_profile.locations", vec![location.to_string()]);
+    }
+    if !match_set.is_empty() {
+        match_set.insert("match_profile.updated_at", now_iso());
+        state
+            .users()
+            .update_one(doc! { "_id": user_id }, doc! { "$set": match_set })
+            .await?;
+    }
+
     send_sse(
         tx,
         "profile",
@@ -393,6 +459,8 @@ async fn handle_collecting(
             "profile": merged,
             "complete": complete,
             "missingSections": missing_sections,
+            "categories": categories,
+            "keywords": keywords,
         }),
     )
     .await;

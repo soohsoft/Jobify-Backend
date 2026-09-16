@@ -309,6 +309,20 @@ pub fn default_job_sources() -> Vec<SourceConfig> {
 // Auth
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct MatchProfile {
+    /// Canonical category slugs, validated through `categories::Category`.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Free-text role/skill signals the extraction pulled from the conversation.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub locations: Vec<String>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UserDoc {
     #[serde(rename = "_id")]
@@ -323,6 +337,11 @@ pub struct UserDoc {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// What to match this user against. Derived from the CV conversation (or a
+    /// manual category pick), and the thing a notifier reads to decide whether
+    /// the user has anything to be matched on yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_profile: Option<MatchProfile>,
     #[serde(default)]
     pub created_at: String,
 }
@@ -347,6 +366,8 @@ pub struct UserResponse {
     pub email: String,
     pub role: String,
     pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_profile: Option<MatchProfile>,
 }
 
 #[derive(Serialize)]

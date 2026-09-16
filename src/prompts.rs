@@ -39,13 +39,18 @@ Return ONLY a valid JSON object with this exact shape:
   },
   "complete": boolean,
   "nextQuestion": string,
-  "missingSections": string[]
+  "missingSections": string[],
+  "categories": string[],
+  "keywords": string[]
 }
 
 Rules:
 - Only include information the user actually provided; use null or [] for anything missing.
 - "complete" is true when personal info, education, experience, skills, references, and certifications have all been provided.
 - "missingSections" lists any of: personal, education, experience, skills, references, certifications.
+- "categories": 1 to 3 slugs chosen ONLY from the list supplied at the end of the user message. Copy each slug exactly as written. Never invent, translate, or reformat a slug, and never return a label instead of a slug. Choose from the person's job titles, field of study and skills, weighting the most recent job title most heavily. Return [] while there is not yet enough information.
+- "keywords": 3 to 8 short role, tool or field terms taken verbatim from what the person stated (e.g. "project management", "Playwright", "nursing"). No inventions, no inferred seniority. Return [] when nothing has been stated yet.
+- Once categories have been chosen, keep them unless the person's stated information contradicts them.
 - Output valid JSON only."#;
 
 pub const RESUME_EDIT_SYSTEM_PROMPT: &str = r#"You are Jobify's CV editing assistant. You receive the user's current CV profile as JSON together with their edit request. Understand what they want to change, add, remove, or improve, then apply it to the profile.

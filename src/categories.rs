@@ -520,6 +520,16 @@ impl Category {
     pub fn from_slug(slug: &str) -> Option<Category> {
         Category::ALL.iter().copied().find(|c| c.slug() == slug)
     }
+
+    /// `slug - Label` lines for an LLM prompt, so the model selects from the real
+    /// taxonomy instead of inventing slugs that get dropped on the way in.
+    pub fn prompt_list() -> String {
+        Category::ALL
+            .iter()
+            .map(|category| format!("{} - {}", category.slug(), category.label()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 #[cfg(test)]

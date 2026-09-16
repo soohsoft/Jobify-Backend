@@ -10,7 +10,7 @@ use axum::{
 use mongodb::bson::doc;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
@@ -160,7 +160,7 @@ async fn send_message(
         .await?
         .ok_or_else(|| AppError::NotFound("Chat not found".to_string()))?;
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
     let task_state = state.clone();
     let task_user = user.id.clone();
 
@@ -188,7 +188,7 @@ async fn send_message(
         }
     });
 
-    Ok(Sse::new(ReceiverStream::new(rx)))
+    Ok(Sse::new(UnboundedReceiverStream::new(rx)))
 }
 
 async fn handle_template_selection(
@@ -277,7 +277,7 @@ async fn handle_collecting(
             },
             |delta| {
                 assistant_content.push_str(delta);
-                let _ = delta_tx.blocking_send(sse_event("delta", json!({ "content": delta })));
+                let _ = delta_tx.send(sse_event("delta", json!({ "content": delta })));
             },
         )
         .await?

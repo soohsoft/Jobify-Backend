@@ -5,8 +5,8 @@ use tower_http::cors::CorsLayer;
 use crate::middleware;
 use crate::state::AppState;
 
+mod alerts;
 mod auth;
-mod bot;
 mod chats;
 mod common;
 mod credits;
@@ -42,7 +42,7 @@ pub fn app(state: AppState) -> Router {
         .merge(payments::protected_router())
         .merge(notifications::router())
         .merge(jobs::protected_router())
-        .merge(bot::protected_router())
+        .merge(alerts::protected_router())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -50,7 +50,7 @@ pub fn app(state: AppState) -> Router {
 
     let internal = Router::new()
         .merge(jobs::internal_router())
-        .merge(bot::internal_router())
+        .merge(alerts::internal_router())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_internal_api,

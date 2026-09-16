@@ -22,7 +22,7 @@ use crate::models::{
     ChatDoc, ChatMessageRequest, ChatTurn, CreateChatRequest, RESUME_TEMPLATES, ResumeDoc,
     SelectTemplateRequest, is_valid_template_id, tokens_to_usd,
 };
-use crate::prompts::{CHAT_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT};
+use crate::prompts::{CHAT_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, JOB_SEARCH_SYSTEM_PROMPT};
 use crate::services::{add_tokens, credit_json, record_usage, reserve_credit, settle_credit};
 use crate::state::AppState;
 use crate::util::{merge_profile, now_iso, uuid_id};
@@ -63,6 +63,11 @@ async fn create(
         id: uuid_id(),
         user_id: user.id.clone(),
         title: body.title.unwrap_or_else(|| "New resume chat".to_string()),
+        // Unknown or absent means the CV flow, which is the original behaviour.
+        purpose: match body.purpose.as_deref() {
+            Some("job_search") => "job_search".to_string(),
+            _ => "cv".to_string(),
+        },
         status: "collecting".to_string(),
         turns: Vec::new(),
         profile: json!({}),
@@ -260,7 +265,13 @@ async fn handle_collecting(
 
     let messages: Vec<ChatMessage> = std::iter::once(ChatMessage {
         role: "system".to_string(),
-        content: CHAT_SYSTEM_PROMPT.to_string(),
+        // Which interview this is. A job seeker and a CV writer need different
+        // questions, and reusing the CV prompt asked job seekers for their full name.
+        content: if chat.purpose == "job_search" {
+            JOB_SEARCH_SYSTEM_PROMPT.to_string()
+        } else {
+            CHAT_SYSTEM_PROMPT.to_string()
+        },
     })
     .chain(chat.turns.iter().map(|turn| ChatMessage {
         role: turn.role.clone(),

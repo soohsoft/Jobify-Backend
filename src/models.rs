@@ -591,6 +591,9 @@ pub struct ChatDoc {
     pub title: String,
     #[serde(default)]
     pub status: String,
+    /// "cv" or "job_search". Decides which system prompt the interview uses.
+    #[serde(default)]
+    pub purpose: String,
     #[serde(default)]
     pub turns: Vec<ChatTurn>,
     #[serde(default)]
@@ -612,6 +615,10 @@ pub struct ChatDoc {
 pub struct CreateChatRequest {
     #[serde(default)]
     pub title: Option<String>,
+    /// What the conversation is for: "cv" (default) or "job_search". Selects the system
+    /// prompt, so a job seeker is never interrogated like a CV writer.
+    #[serde(default)]
+    pub purpose: Option<String>,
 }
 
 #[derive(Deserialize)]

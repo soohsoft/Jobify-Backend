@@ -29,6 +29,10 @@ pub struct Config {
     /// A CV is ~60 interview turns, so an unbounded session is an unbounded cost
     /// even when every individual request is capped.
     pub chat_session_token_budget: u64,
+    /// Tokens granted to a user the Telegram bot creates. A bot user has no payment
+    /// path, so with no grant the first interview is refused with a 402 and the whole
+    /// flow dies at step one. Applied only when the account is created.
+    pub bot_signup_grant_tokens: u64,
 }
 
 impl Config {
@@ -61,6 +65,7 @@ impl Config {
             llm_max_tokens_chat: env_u64("LLM_MAX_TOKENS_CHAT", 1_500),
             llm_max_tokens_extract: env_u64("LLM_MAX_TOKENS_EXTRACT", 2_000),
             chat_session_token_budget: env_u64("CHAT_SESSION_TOKEN_BUDGET", 150_000),
+            bot_signup_grant_tokens: env_u64("BOT_SIGNUP_GRANT_TOKENS", 300_000),
         }
     }
 

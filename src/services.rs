@@ -218,6 +218,7 @@ pub async fn create_notification(
         title: title.to_string(),
         body: body.to_string(),
         read: false,
+        sent_at: None,
         created_at: now_iso(),
     };
     state.notifications().insert_one(&notification).await?;

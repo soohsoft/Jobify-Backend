@@ -45,6 +45,8 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         role: "user".to_string(),
         location: None,
         match_profile: None,
+        telegram_chat_id: None,
+        alerts: None,
         created_at: now,
     };
 
@@ -116,6 +118,7 @@ fn to_user_response(user: &UserDoc) -> UserResponse {
         role: user.role.clone(),
         location: user.location.clone(),
         match_profile: user.match_profile.clone(),
+        alerts: user.alerts.clone(),
     }
 }
 

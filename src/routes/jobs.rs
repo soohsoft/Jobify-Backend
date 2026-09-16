@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
-use crate::models::{JobDoc, JobInput, MatchProfile, NotificationDoc};
+use crate::models::{AlertPrefs, JobDoc, JobInput, MatchProfile, NotificationDoc};
 use crate::state::AppState;
 use crate::util::{nairobi_days_ago, nairobi_today, now_iso, uuid_id};
 
@@ -404,11 +404,12 @@ async fn match_jobs(
 ) -> ApiResult {
     let limit = query.limit.clamp(1, 20);
 
-    let profile = state
-        .users()
-        .find_one(doc! { "_id": &user.id })
-        .await?
-        .and_then(|doc| doc.match_profile);
+    let user_doc = state.users().find_one(doc! { "_id": &user.id }).await?;
+    let profile = user_doc.as_ref().and_then(|doc| doc.match_profile.clone());
+    let exclusions = user_doc
+        .as_ref()
+        .and_then(|doc| doc.alerts.clone())
+        .unwrap_or_default();
 
     // No profile (or no categories yet) is a normal state on the way in, not an
     // error: the caller branches on `reason` instead of parsing a failure.
@@ -423,71 +424,25 @@ async fn match_jobs(
         ));
     };
 
-    let mut filter = live_job_filter();
-    filter.insert("category", doc! { "$in": &profile.categories });
+    // Already-queued jobs are excluded only on the automated path. The manual list
+    // is a live view and keeps showing what the user has already seen.
+    let exclude = if query.record {
+        queued_job_ids(&state, &user.id).await?
+    } else {
+        Vec::new()
+    };
 
-    // Already-queued jobs are excluded only on the automated path. The manual
-    // list is a live view and keeps showing what the user has already seen.
-    if query.record {
-        let mut cursor = state
-            .notifications()
-            .find(doc! { "user_id": &user.id, "job_id": { "$exists": true } })
-            .await?;
-        let mut queued: Vec<String> = Vec::new();
-        while let Some(notification) = cursor.try_next().await? {
-            if let Some(job_id) = notification.job_id {
-                queued.push(job_id);
-            }
-        }
-        if !queued.is_empty() {
-            filter.insert("_id", doc! { "$nin": queued });
-        }
-    }
+    let scored = ranked_candidates(&state, &profile, &exclusions, &exclude, limit as i64).await?;
+    let queued_count = if query.record {
+        queue_notifications(&state, &user.id, &scored).await?
+    } else {
+        0
+    };
 
-    let options = FindOptions::builder().limit(300).build();
-    let mut cursor = state.jobs().find(filter).with_options(options).await?;
-    let mut scored: Vec<(f64, JobDoc)> = Vec::new();
-    while let Some(job) = cursor.try_next().await? {
-        scored.push((score_job(&job, &profile), job));
-    }
-
-    // Recency, then id, as the tie-breakers so paging is stable.
-    scored.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.1.created_at.cmp(&a.1.created_at))
-            .then_with(|| b.1.id.cmp(&a.1.id))
-    });
-    scored.truncate(limit as usize);
-
-    let now = now_iso();
-    let mut queued_count = 0u64;
-    let mut data = Vec::with_capacity(scored.len());
-    for (score, job) in &scored {
-        if query.record {
-            let notification = NotificationDoc {
-                id: uuid_id(),
-                user_id: user.id.clone(),
-                notification_type: "job_match".to_string(),
-                job_id: Some(job.id.clone()),
-                title: job.title.clone(),
-                body: job.description.clone(),
-                read: false,
-                created_at: now.clone(),
-            };
-            // A duplicate-key error means the partial unique index caught a
-            // repeat, which is the intended outcome rather than a failure.
-            if state
-                .notifications()
-                .insert_one(&notification)
-                .await
-                .is_ok()
-            {
-                queued_count += 1;
-            }
-        }
-        data.push(json!({ "job": job, "matchScore": score }));
-    }
+    let data: Vec<Value> = scored
+        .iter()
+        .map(|(score, job)| json!({ "job": job, "matchScore": score }))
+        .collect();
 
     let total = data.len();
     Ok((
@@ -503,6 +458,136 @@ async fn match_jobs(
             }
         })),
     ))
+}
+
+/// Job ids already queued for a user, so the automated path never repeats one.
+async fn queued_job_ids(state: &AppState, user_id: &str) -> Result<Vec<String>, AppError> {
+    let mut cursor = state
+        .notifications()
+        .find(doc! { "user_id": user_id, "job_id": { "$exists": true } })
+        .await?;
+    let mut ids: Vec<String> = Vec::new();
+    while let Some(notification) = cursor.try_next().await? {
+        if let Some(job_id) = notification.job_id {
+            ids.push(job_id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Candidates for a profile, scored and sorted.
+///
+/// The single place that decides what is eligible: the live-job rule, the profile's
+/// categories, the user's own rejections, and what has already been queued. The feed
+/// and the automated alert path both come through here, so they cannot disagree.
+async fn ranked_candidates(
+    state: &AppState,
+    profile: &MatchProfile,
+    exclusions: &AlertPrefs,
+    exclude_job_ids: &[String],
+    limit: i64,
+) -> Result<Vec<(f64, JobDoc)>, AppError> {
+    let mut filter = live_job_filter();
+
+    let mut categories = doc! { "$in": &profile.categories };
+    // A rejected category is applied to the query rather than filtered after
+    // scoring, so it cannot occupy one of the returned slots.
+    if !exclusions.excluded_categories.is_empty() {
+        categories.insert("$nin", &exclusions.excluded_categories);
+    }
+    filter.insert("category", categories);
+
+    if !exclude_job_ids.is_empty() {
+        filter.insert("_id", doc! { "$nin": exclude_job_ids });
+    }
+
+    // "Not a fit" on an employer, case-insensitive, built from escaped literals so a
+    // company name containing regex metacharacters cannot corrupt the pattern.
+    if !exclusions.excluded_employers.is_empty() {
+        let names: Vec<String> = exclusions
+            .excluded_employers
+            .iter()
+            .map(|name| escape_regex(name))
+            .collect();
+        filter.insert(
+            "organization",
+            doc! { "$not": { "$regex": format!("^({})$", names.join("|")), "$options": "i" } },
+        );
+    }
+
+    let options = FindOptions::builder().limit(300).build();
+    let mut cursor = state.jobs().find(filter).with_options(options).await?;
+    let mut scored: Vec<(f64, JobDoc)> = Vec::new();
+    while let Some(job) = cursor.try_next().await? {
+        scored.push((score_job(&job, profile), job));
+    }
+
+    // Recency, then id, as the tie-breakers so paging is stable.
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.created_at.cmp(&a.1.created_at))
+            .then_with(|| b.1.id.cmp(&a.1.id))
+    });
+    scored.truncate(limit as usize);
+    Ok(scored)
+}
+
+/// Queue one job_match notification per job. A duplicate-key error means the partial
+/// unique index caught a repeat, which is the intended outcome rather than a failure.
+async fn queue_notifications(
+    state: &AppState,
+    user_id: &str,
+    scored: &[(f64, JobDoc)],
+) -> Result<u64, AppError> {
+    let now = now_iso();
+    let mut queued = 0u64;
+    for (_score, job) in scored {
+        let notification = NotificationDoc {
+            id: uuid_id(),
+            user_id: user_id.to_string(),
+            notification_type: "job_match".to_string(),
+            job_id: Some(job.id.clone()),
+            title: job.title.clone(),
+            body: job.description.clone(),
+            read: false,
+            sent_at: None,
+            created_at: now.clone(),
+        };
+        if state
+            .notifications()
+            .insert_one(&notification)
+            .await
+            .is_ok()
+        {
+            queued += 1;
+        }
+    }
+    Ok(queued)
+}
+
+/// The automated path for one user, with no HTTP caller — the alert refresh runs this
+/// per subscriber. Returns how many notifications were newly queued.
+pub async fn queue_matches_for_user(
+    state: &AppState,
+    user_id: &str,
+    limit: i64,
+) -> Result<u64, AppError> {
+    let Some(user) = state.users().find_one(doc! { "_id": user_id }).await? else {
+        return Ok(0);
+    };
+    // No profile means nothing to match on yet: a normal state, not an error.
+    let Some(profile) = user
+        .match_profile
+        .clone()
+        .filter(|p| !p.categories.is_empty())
+    else {
+        return Ok(0);
+    };
+    let exclusions = user.alerts.clone().unwrap_or_default();
+    let exclude = queued_job_ids(state, user_id).await?;
+    let scored = ranked_candidates(state, &profile, &exclusions, &exclude, limit).await?;
+    queue_notifications(state, user_id, &scored).await
 }
 
 fn escape_regex(value: &str) -> String {

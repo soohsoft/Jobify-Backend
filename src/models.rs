@@ -342,8 +342,36 @@ pub struct UserDoc {
     /// the user has anything to be matched on yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_profile: Option<MatchProfile>,
+    /// The Telegram chat this account belongs to, when the account was created by
+    /// the bot. This is the identity link: the bot has no database of its own, so
+    /// it resolves a chat_id to a user through the backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_chat_id: Option<String>,
+    /// Whether and how this user wants job alerts. Absent means never asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<AlertPrefs>,
     #[serde(default)]
     pub created_at: String,
+}
+
+/// A user's job-alert subscription, and the negative signals that shape it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AlertPrefs {
+    #[serde(default)]
+    pub enabled: bool,
+    /// "instant" or "daily".
+    #[serde(default)]
+    pub mode: String,
+    /// When the last batch was queued, so a daily run happens at most once a day.
+    #[serde(default)]
+    pub last_sent_at: String,
+    /// Employers the user rejected with "not a fit". Matched case-insensitively
+    /// against `organization`, and kept here rather than inferred so the signal is
+    /// visible and reversible.
+    #[serde(default)]
+    pub excluded_employers: Vec<String>,
+    #[serde(default)]
+    pub excluded_categories: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -368,6 +396,8 @@ pub struct UserResponse {
     pub location: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub match_profile: Option<MatchProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<AlertPrefs>,
 }
 
 #[derive(Serialize)]
@@ -532,6 +562,11 @@ pub struct NotificationDoc {
     pub body: String,
     #[serde(default)]
     pub read: bool,
+    /// When the bot handed this to the user. `read` is not the same thing: the bot
+    /// must be able to ask for what it has not delivered yet, or it either re-sends
+    /// or silently misses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<String>,
     #[serde(default)]
     pub created_at: String,
 }

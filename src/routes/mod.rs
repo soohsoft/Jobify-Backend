@@ -6,6 +6,7 @@ use crate::middleware;
 use crate::state::AppState;
 
 mod auth;
+mod bot;
 mod chats;
 mod common;
 mod credits;
@@ -41,14 +42,19 @@ pub fn app(state: AppState) -> Router {
         .merge(payments::protected_router())
         .merge(notifications::router())
         .merge(jobs::protected_router())
+        .merge(bot::protected_router())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
         ));
 
-    let internal = Router::new().merge(jobs::internal_router()).route_layer(
-        axum_middleware::from_fn_with_state(state.clone(), middleware::require_internal_api),
-    );
+    let internal = Router::new()
+        .merge(jobs::internal_router())
+        .merge(bot::internal_router())
+        .route_layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::require_internal_api,
+        ));
 
     Router::new()
         .merge(public)

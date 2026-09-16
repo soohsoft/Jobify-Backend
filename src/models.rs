@@ -439,6 +439,11 @@ pub struct CreditDoc {
     pub user_id: String,
     #[serde(default)]
     pub tokens: u64,
+    /// Tokens a delivered-but-unpaid request consumed. Recorded instead of letting
+    /// the balance go negative, so the shortfall stays visible in reporting rather
+    /// than silently vanishing.
+    #[serde(default)]
+    pub debt_tokens: u64,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -557,6 +562,11 @@ pub struct ChatDoc {
     pub profile: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_id: Option<String>,
+    /// Tokens this session has consumed, counted from real provider usage. Bounded
+    /// by `CHAT_SESSION_TOKEN_BUDGET`: capping each request still leaves a session
+    /// unbounded, because a CV is many turns rather than one call.
+    #[serde(default)]
+    pub tokens_used: u64,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]

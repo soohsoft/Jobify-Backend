@@ -16,13 +16,14 @@ use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::llm::{
     ChatMessage, ChatOptions, LlmClient, TokenUsage, estimate_prompt_tokens, estimate_tokens,
+    reserve_estimate,
 };
 use crate::models::{
     PatchResumeRequest, RESUME_TEMPLATES, ResumeChatRequest, ResumeDoc, is_valid_template_id,
     tokens_to_usd,
 };
 use crate::prompts::{EDIT_EXTRACT_SYSTEM_PROMPT, RESUME_EDIT_SYSTEM_PROMPT};
-use crate::services::{deduct_tokens, ensure_credit, record_usage};
+use crate::services::{add_tokens, record_usage, reserve_credit, settle_credit};
 use crate::state::AppState;
 use crate::util::now_iso;
 
@@ -210,19 +211,28 @@ async fn run_resume_edit(
     content: &str,
     tx: &SseTx,
 ) -> Result<(), AppError> {
-    ensure_credit(state, user_id).await?;
-
     let mut turns: Vec<ChatMessage> = Vec::new();
+    let mut session_tokens_used: u64 = 0;
     if let Some(chat_id) = resume.chat_id.as_ref()
         && let Some(chat) = state
             .chats()
             .find_one(doc! { "_id": chat_id, "user_id": user_id })
             .await?
     {
+        // The CV editor shares the interview's session budget: it draws on the same
+        // conversation, so counting only its own turns would leave the session open.
+        session_tokens_used = chat.tokens_used;
         turns.extend(chat.turns.iter().map(|turn| ChatMessage {
             role: turn.role.clone(),
             content: turn.content.clone(),
         }));
+    }
+
+    if session_tokens_used >= state.config.chat_session_token_budget {
+        return Err(AppError::PaymentRequired(format!(
+            "This CV session has reached its {}-token budget. Start a new chat to continue.",
+            state.config.chat_session_token_budget
+        )));
     }
 
     turns.push(ChatMessage {
@@ -243,6 +253,13 @@ async fn run_resume_edit(
     }];
     messages.extend(turns.iter().cloned());
 
+    // Same hold as the interview turn: reply plus extraction, both capped, taken
+    // before anything is sent so a 402 lands before the user sees any output.
+    let reserved = reserve_estimate(&messages, state.config.llm_max_tokens_chat).saturating_add(
+        reserve_estimate(&messages, state.config.llm_max_tokens_extract),
+    );
+    reserve_credit(state, user_id, reserved).await?;
+
     send_sse(
         tx,
         "meta",
@@ -259,13 +276,22 @@ async fn run_resume_edit(
             ChatOptions {
                 temperature: 0.4,
                 json_mode: false,
+                max_tokens: state.config.llm_max_tokens_chat,
             },
             |delta| {
                 assistant_content.push_str(delta);
                 let _ = delta_tx.send(sse_event("delta", json!({ "content": delta })));
             },
         )
-        .await?
+        .await
+    };
+    let stream_result = match stream_result {
+        Ok(result) => result,
+        Err(err) => {
+            // Nothing was delivered, so the hold is released in full.
+            let _ = add_tokens(state, user_id, reserved).await;
+            return Err(err);
+        }
     };
 
     let assistant_message = ChatMessage {
@@ -298,9 +324,21 @@ async fn run_resume_edit(
             ChatOptions {
                 temperature: 0.0,
                 json_mode: true,
+                max_tokens: state.config.llm_max_tokens_extract,
             },
         )
-        .await?;
+        .await;
+    let extraction = match extraction {
+        Ok(result) => result,
+        Err(err) => {
+            // The reply was already streamed, so it is charged for what it cost
+            // rather than refunded. Only the extraction is lost.
+            let stream_usage = stream_result.usage.unwrap_or_default();
+            let _ = record_usage(state, user_id, &stream_usage).await;
+            let _ = settle_credit(state, user_id, reserved, stream_usage.total_tokens).await;
+            return Err(err);
+        }
+    };
 
     let extracted = crate::util::extract_json(&extraction.content)?;
     let updated_profile = extracted
@@ -314,22 +352,30 @@ async fn run_resume_edit(
         prompt_tokens: stream_usage.prompt_tokens + extraction_usage.prompt_tokens,
         completion_tokens: stream_usage.completion_tokens + extraction_usage.completion_tokens,
         total_tokens: stream_usage.total_tokens + extraction_usage.total_tokens,
+        prompt_cache_hit_tokens: stream_usage.prompt_cache_hit_tokens
+            + extraction_usage.prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens: stream_usage.prompt_cache_miss_tokens
+            + extraction_usage.prompt_cache_miss_tokens,
+        reasoning_tokens: stream_usage.reasoning_tokens + extraction_usage.reasoning_tokens,
     };
 
     if usage.total_tokens == 0 {
+        // Nothing came back from the provider, so fall back to an estimate. The
+        // cache/reasoning split is unknowable here and stays zero.
         let prompt_tokens = estimate_prompt_tokens(&messages);
         let completion_tokens = estimate_tokens(&assistant_content);
         usage = TokenUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            ..Default::default()
         };
     }
 
     record_usage(state, user_id, &usage).await?;
-    let credit = deduct_tokens(state, user_id, usage.total_tokens).await?;
-    let balance_usd = tokens_to_usd(credit.tokens);
 
+    // Persisted before settling, for the same reason as the interview turn: the reply
+    // is already with the user, so a bookkeeping failure must not discard the edit.
     let updated_at = now_iso();
     state
         .resumes()
@@ -338,6 +384,21 @@ async fn run_resume_edit(
             doc! { "$set": { "profile": mongodb::bson::to_bson(&updated_profile).map_err(|e| AppError::BadRequest(e.to_string()))?, "updated_at": &updated_at } },
         )
         .await?;
+
+    // Charged against the same session budget the interview used, since this edit
+    // draws on that conversation.
+    if let Some(chat_id) = resume.chat_id.as_ref() {
+        let _ = state
+            .chats()
+            .update_one(
+                doc! { "_id": chat_id, "user_id": user_id },
+                doc! { "$inc": { "tokens_used": usage.total_tokens as i64 } },
+            )
+            .await;
+    }
+
+    let credit = settle_credit(state, user_id, reserved, usage.total_tokens).await?;
+    let balance_usd = tokens_to_usd(credit.tokens);
 
     send_sse(tx, "profile", json!({ "profile": updated_profile })).await;
     send_sse(

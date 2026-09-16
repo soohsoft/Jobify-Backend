@@ -16,13 +16,14 @@ use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::llm::{
     ChatMessage, ChatOptions, LlmClient, TokenUsage, estimate_prompt_tokens, estimate_tokens,
+    reserve_estimate,
 };
 use crate::models::{
     ChatDoc, ChatMessageRequest, ChatTurn, CreateChatRequest, RESUME_TEMPLATES, ResumeDoc,
     SelectTemplateRequest, is_valid_template_id, tokens_to_usd,
 };
 use crate::prompts::{CHAT_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT};
-use crate::services::{credit_json, deduct_tokens, ensure_credit, record_usage};
+use crate::services::{add_tokens, credit_json, record_usage, reserve_credit, settle_credit};
 use crate::state::AppState;
 use crate::util::{merge_profile, now_iso, uuid_id};
 
@@ -66,6 +67,7 @@ async fn create(
         turns: Vec::new(),
         profile: json!({}),
         template_id: None,
+        tokens_used: 0,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -238,7 +240,15 @@ async fn handle_collecting(
     content: &str,
     tx: &SseTx,
 ) -> Result<(), AppError> {
-    ensure_credit(state, user_id).await?;
+    // A chat session is many turns, and every turn is two LLM calls for every chat
+    // type — CV interview, job-search intake, follow-ups. Capping each request still
+    // leaves the session unbounded, so the budget is checked before anything runs.
+    if chat.tokens_used >= state.config.chat_session_token_budget {
+        return Err(AppError::PaymentRequired(format!(
+            "This chat has reached its {}-token session budget. Start a new chat to continue.",
+            state.config.chat_session_token_budget
+        )));
+    }
 
     let now = now_iso();
     let user_turn = ChatTurn {
@@ -258,6 +268,17 @@ async fn handle_collecting(
     }))
     .collect();
 
+    // Hold the worst case for BOTH calls of this turn before anything is sent: the
+    // reply, and the extraction that runs on the same conversation afterwards. The
+    // extraction prompt is the conversation again plus the reply, so counting the
+    // chat prompt a second time is a deliberate over-estimate — the unused part is
+    // refunded by settle_credit. Holding here is what makes the 402 land before the
+    // user sees any output.
+    let reserved = reserve_estimate(&messages, state.config.llm_max_tokens_chat).saturating_add(
+        reserve_estimate(&messages, state.config.llm_max_tokens_extract),
+    );
+    reserve_credit(state, user_id, reserved).await?;
+
     send_sse(
         tx,
         "meta",
@@ -274,13 +295,22 @@ async fn handle_collecting(
             ChatOptions {
                 temperature: 0.4,
                 json_mode: false,
+                max_tokens: state.config.llm_max_tokens_chat,
             },
             |delta| {
                 assistant_content.push_str(delta);
                 let _ = delta_tx.send(sse_event("delta", json!({ "content": delta })));
             },
         )
-        .await?
+        .await
+    };
+    let stream_result = match stream_result {
+        Ok(result) => result,
+        Err(err) => {
+            // Nothing was delivered, so the hold is released in full.
+            let _ = add_tokens(state, user_id, reserved).await;
+            return Err(err);
+        }
     };
 
     let assistant_turn = ChatTurn {
@@ -321,9 +351,21 @@ async fn handle_collecting(
             ChatOptions {
                 temperature: 0.0,
                 json_mode: true,
+                max_tokens: state.config.llm_max_tokens_extract,
             },
         )
-        .await?;
+        .await;
+    let extraction = match extraction {
+        Ok(result) => result,
+        Err(err) => {
+            // The reply was already streamed, so it is charged for what it cost
+            // rather than refunded. Only the extraction is lost.
+            let stream_usage = stream_result.usage.unwrap_or_default();
+            let _ = record_usage(state, user_id, &stream_usage).await;
+            let _ = settle_credit(state, user_id, reserved, stream_usage.total_tokens).await;
+            return Err(err);
+        }
+    };
 
     let extracted = crate::util::extract_json(&extraction.content)?;
     let incoming_profile = extracted
@@ -396,22 +438,31 @@ async fn handle_collecting(
         prompt_tokens: stream_usage.prompt_tokens + extraction_usage.prompt_tokens,
         completion_tokens: stream_usage.completion_tokens + extraction_usage.completion_tokens,
         total_tokens: stream_usage.total_tokens + extraction_usage.total_tokens,
+        prompt_cache_hit_tokens: stream_usage.prompt_cache_hit_tokens
+            + extraction_usage.prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens: stream_usage.prompt_cache_miss_tokens
+            + extraction_usage.prompt_cache_miss_tokens,
+        reasoning_tokens: stream_usage.reasoning_tokens + extraction_usage.reasoning_tokens,
     };
 
     if usage.total_tokens == 0 {
+        // Nothing came back from the provider, so fall back to an estimate. The
+        // cache/reasoning split is unknowable here and stays zero.
         let prompt_tokens = estimate_prompt_tokens(&messages);
         let completion_tokens = estimate_tokens(&assistant_content);
         usage = TokenUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            ..Default::default()
         };
     }
 
     record_usage(state, user_id, &usage).await?;
-    let credit = deduct_tokens(state, user_id, usage.total_tokens).await?;
-    let balance_usd = tokens_to_usd(credit.tokens);
 
+    // Persisted before settling: the user already has the reply, so their data must
+    // never be lost to a bookkeeping failure. The reservation is already the ceiling
+    // on the charge, so settling second cannot undercharge.
     state
         .chats()
         .update_one(
@@ -422,10 +473,16 @@ async fn handle_collecting(
                     "profile": mongodb::bson::to_bson(&chat.profile).map_err(|e| AppError::BadRequest(e.to_string()))?,
                     "status": &chat.status,
                     "updated_at": &chat.updated_at,
-                }
+                },
+                "$inc": { "tokens_used": usage.total_tokens as i64 },
             },
         )
         .await?;
+
+    // Refunds the unused hold, so the user is charged the real cost of the turn
+    // rather than the worst case that was reserved for it.
+    let credit = settle_credit(state, user_id, reserved, usage.total_tokens).await?;
+    let balance_usd = tokens_to_usd(credit.tokens);
 
     // What the matcher will read. Dotted paths, so a turn that yields no
     // categories cannot wipe what an earlier turn established.

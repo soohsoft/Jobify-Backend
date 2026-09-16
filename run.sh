@@ -38,6 +38,12 @@ export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"
 if [ "${1:-}" = "--build" ]; then
   shift
   (cd "$REPO_DIR" && cargo build)
+elif [ -x "$REPO_DIR/target/debug/jobify-backend" ] &&
+  [ -n "$(find "$REPO_DIR/src" -name '*.rs' -newer "$REPO_DIR/target/debug/jobify-backend" 2>/dev/null | head -1)" ]; then
+  # This script runs the existing binary unless --build is passed, so a plain restart
+  # can silently serve stale code: the server reports healthy while running an older
+  # build, and any test against it validates the wrong code. Warn instead.
+  echo "run.sh: WARNING the binary is OLDER than src/*.rs — run './run.sh --build'." >&2
 fi
 
 cd "$REPO_DIR"

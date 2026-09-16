@@ -19,6 +19,17 @@ pub struct TokenUsage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    /// Input served from DeepSeek's prefix cache. Billed ~50x cheaper than a miss,
+    /// so without this field the real cost of a turn is unknowable — and caching
+    /// is the difference between ~37% and ~60% margin at peak rates.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: u64,
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: u64,
+    /// Reasoning tokens. These bill as OUTPUT, the expensive side, so they must be
+    /// counted separately from the visible reply.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 impl TokenUsage {
@@ -30,6 +41,9 @@ impl TokenUsage {
             out.prompt_tokens += part.prompt_tokens;
             out.completion_tokens += part.completion_tokens;
             out.total_tokens += part.total_tokens;
+            out.prompt_cache_hit_tokens += part.prompt_cache_hit_tokens;
+            out.prompt_cache_miss_tokens += part.prompt_cache_miss_tokens;
+            out.reasoning_tokens += part.reasoning_tokens;
         }
         out
     }
@@ -45,13 +59,21 @@ pub struct ChatResult {
 pub struct ChatOptions {
     pub temperature: f64,
     pub json_mode: bool,
+    /// Hard output cap sent to the provider. Not a preference: it is what bounds
+    /// the cost of a single request, and therefore what makes a pre-flight
+    /// balance reservation correct.
+    pub max_tokens: u64,
 }
+
+/// Used when a caller does not name a cap of its own.
+pub const DEFAULT_MAX_TOKENS: u64 = 1_500;
 
 impl Default for ChatOptions {
     fn default() -> Self {
         Self {
             temperature: 0.3,
             json_mode: false,
+            max_tokens: DEFAULT_MAX_TOKENS,
         }
     }
 }
@@ -86,6 +108,18 @@ struct ApiUsage {
     completion_tokens: u64,
     #[serde(default)]
     total_tokens: u64,
+    #[serde(default)]
+    prompt_cache_hit_tokens: u64,
+    #[serde(default)]
+    prompt_cache_miss_tokens: u64,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionDetails>,
+}
+
+#[derive(Deserialize)]
+struct CompletionDetails {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 pub struct LlmClient {
@@ -118,6 +152,7 @@ impl LlmClient {
             "messages": messages,
             "temperature": options.temperature,
             "stream": false,
+            "max_tokens": options.max_tokens,
         });
 
         if options.json_mode {
@@ -258,6 +293,12 @@ fn usage_from_api(usage: ApiUsage) -> TokenUsage {
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         total_tokens: usage.total_tokens,
+        prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
+        reasoning_tokens: usage
+            .completion_tokens_details
+            .map(|details| details.reasoning_tokens)
+            .unwrap_or(0),
     }
 }
 
@@ -271,4 +312,12 @@ pub fn estimate_prompt_tokens(messages: &[ChatMessage]) -> u64 {
         .iter()
         .map(|message| estimate_tokens(&message.content) + 4)
         .sum()
+}
+
+/// Upper bound on what a single request can consume: the prompt we are about to
+/// send plus the output cap. The prompt is estimated (no local tokeniser), so the
+/// caller must treat this as a hold to be refunded, not a charge — see
+/// `settle_credit`.
+pub fn reserve_estimate(messages: &[ChatMessage], max_tokens: u64) -> u64 {
+    estimate_prompt_tokens(messages).saturating_add(max_tokens)
 }

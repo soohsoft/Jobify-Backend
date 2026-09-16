@@ -1,5 +1,5 @@
-/// The job-search intake: what the Telegram bot uses when the user wants to be matched
-/// to work rather than to build a CV.
+/// The job-search intake: used when the user wants to be matched to work rather than to
+/// build a CV.
 ///
 /// Deliberately a different prompt from the CV interview, because the two jobs are
 /// different: a resume builder needs a full history, a matcher only needs enough to

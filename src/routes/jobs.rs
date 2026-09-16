@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use mongodb::options::FindOptions;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +15,7 @@ use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::models::{JobDoc, JobInput, MatchProfile, NotificationDoc};
 use crate::state::AppState;
-use crate::util::{nairobi_today, now_iso, uuid_id};
+use crate::util::{nairobi_days_ago, nairobi_today, now_iso, uuid_id};
 
 use super::{ApiResult, common::paginate};
 
@@ -33,6 +33,36 @@ pub fn internal_router() -> Router<AppState> {
 
 pub fn protected_router() -> Router<AppState> {
     Router::new().route("/jobs/match", get(match_jobs))
+}
+
+/// How long a job with no closing date stays visible, counted from `posted_date` and
+/// falling back to `created_at` when the board never showed a posting date.
+pub const UNDATED_JOB_LIFETIME_DAYS: i64 = 14;
+
+/// The single definition of "live" for the feed and the matcher, so the two can never
+/// disagree about what a user is allowed to see.
+///
+/// A job is live when:
+///   - it has a closing date that has not passed, or
+///   - it has no closing date and was posted within 14 days — or, when no posting date
+///     is known, was first recorded within 14 days.
+///
+/// This is a VISIBILITY rule and nothing more. It deliberately does not write or
+/// derive a closing date: an undated job keeps `deadline: null` in every response, so
+/// no client can render a deadline the board never published. Do not turn
+/// `UNDATED_JOB_LIFETIME_DAYS` into a synthetic deadline — that is exactly the sort of
+/// thing that misleads a user into thinking an application window exists.
+pub fn live_job_filter() -> Document {
+    let today = nairobi_today();
+    let cutoff = nairobi_days_ago(UNDATED_JOB_LIFETIME_DAYS);
+    doc! {
+        "$or": [
+            doc! { "deadline": { "$gte": &today } },
+            // `null` matches both an explicit null and a missing field.
+            doc! { "deadline": null, "$or": [ doc! { "posted_date": { "$gte": &cutoff } }, doc! { "posted_date": null, "created_at": { "$gte": &cutoff } } ] },
+            doc! { "deadline": "", "$or": [ doc! { "posted_date": { "$gte": &cutoff } }, doc! { "posted_date": null, "created_at": { "$gte": &cutoff } } ] },
+        ]
+    }
 }
 
 #[derive(Deserialize)]
@@ -103,15 +133,8 @@ async fn list(
         );
     }
 
-    // Exclude jobs whose deadline is already in the past (computed in Nairobi
-    // time). A missing/null/empty deadline is not "in the past", so it stays.
-    let deadline_filter = doc! {
-        "$or": [
-            doc! { "deadline": null },
-            doc! { "deadline": "" },
-            doc! { "deadline": doc! { "$gte": nairobi_today() } },
-        ]
-    };
+    // What counts as live (see `live_job_filter`).
+    let deadline_filter = live_job_filter();
     let filter = if filter.is_empty() {
         deadline_filter
     } else {
@@ -400,14 +423,8 @@ async fn match_jobs(
         ));
     };
 
-    let mut filter = doc! {
-        "category": { "$in": &profile.categories },
-        "$or": [
-            doc! { "deadline": null },
-            doc! { "deadline": "" },
-            doc! { "deadline": { "$gte": nairobi_today() } },
-        ],
-    };
+    let mut filter = live_job_filter();
+    filter.insert("category", doc! { "$in": &profile.categories });
 
     // Already-queued jobs are excluded only on the automated path. The manual
     // list is a live view and keeps showing what the user has already seen.
@@ -540,5 +557,74 @@ mod tests {
     #[test]
     fn slugs_are_strictly_lowercase() {
         assert_eq!(canonical_category(&raw("WASH")), None);
+    }
+
+    // The visibility rule is the one thing standing between a user and a job that
+    // closed weeks ago, so it is tested against a real collection rather than by
+    // re-stating the filter in Rust.
+    #[tokio::test]
+    async fn live_filter_keeps_open_jobs_and_expires_undated_ones_after_fourteen_days() {
+        use super::{UNDATED_JOB_LIFETIME_DAYS, live_job_filter};
+        use crate::util::{nairobi_days_ago, nairobi_today};
+        use futures_util::TryStreamExt;
+        use mongodb::bson::doc;
+
+        let config = crate::config::Config::from_env();
+        let client = mongodb::Client::with_uri_str(&config.mongodb_uri)
+            .await
+            .expect("failed to connect to test MongoDB");
+        let db = client.database("jobify_test_live_filter");
+        let _ = db.drop().await;
+        let jobs = db.collection::<mongodb::bson::Document>("jobs");
+
+        let day = |n: i64| nairobi_days_ago(n);
+        let stamp = |n: i64| format!("{}T09:00:00Z", nairobi_days_ago(n));
+        let cases: Vec<(&str, mongodb::bson::Document)> = vec![
+            ("open", doc! { "deadline": nairobi_days_ago(-5) }),
+            ("closed", doc! { "deadline": day(1) }),
+            ("closes-today", doc! { "deadline": nairobi_today() }),
+            (
+                "undated-posted-recently",
+                doc! { "deadline": null, "posted_date": day(3) },
+            ),
+            (
+                "undated-posted-too-long-ago",
+                doc! { "deadline": null, "posted_date": day(UNDATED_JOB_LIFETIME_DAYS + 1) },
+            ),
+            (
+                "undated-blank-deadline-recent",
+                doc! { "deadline": "", "posted_date": day(3) },
+            ),
+            (
+                "undated-no-posting-date-recorded-recently",
+                doc! { "deadline": null, "created_at": stamp(3) },
+            ),
+            (
+                "undated-no-posting-date-recorded-long-ago",
+                doc! { "deadline": null, "created_at": stamp(UNDATED_JOB_LIFETIME_DAYS + 1) },
+            ),
+        ];
+        for (title, extra) in &cases {
+            let mut doc = doc! { "_id": *title, "title": *title };
+            doc.extend(extra.clone());
+            jobs.insert_one(&doc).await.unwrap();
+        }
+
+        let mut cursor = jobs.find(live_job_filter()).await.unwrap();
+        let mut live: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.unwrap() {
+            live.push(doc.get_str("title").unwrap().to_string());
+        }
+        live.sort();
+
+        let mut expected = vec![
+            "closes-today",
+            "open",
+            "undated-blank-deadline-recent",
+            "undated-no-posting-date-recorded-recently",
+            "undated-posted-recently",
+        ];
+        expected.sort();
+        assert_eq!(live, expected);
     }
 }

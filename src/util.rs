@@ -13,6 +13,16 @@ pub fn nairobi_today() -> String {
         .to_string()
 }
 
+/// The Nairobi calendar date `days` days before today, as YYYY-MM-DD. Used as a
+/// lexicographic lower bound: an ISO date and an ISO timestamp sort the same way by
+/// date, so `created_at >= cutoff` works without parsing.
+pub fn nairobi_days_ago(days: i64) -> String {
+    let nairobi = chrono::FixedOffset::east_opt(3 * 3600).expect("valid +03:00 offset");
+    (chrono::Utc::now().with_timezone(&nairobi) - chrono::Duration::days(days))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 pub fn uuid_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }

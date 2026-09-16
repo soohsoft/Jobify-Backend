@@ -7,12 +7,13 @@ use axum::{
     routing::{get, post},
 };
 use mongodb::bson::doc;
+use mongodb::options::FindOptions;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
-use crate::models::JobInput;
+use crate::models::{JobDoc, JobInput, MatchProfile, NotificationDoc};
 use crate::state::AppState;
 use crate::util::{nairobi_today, now_iso, uuid_id};
 
@@ -28,6 +29,10 @@ pub fn internal_router() -> Router<AppState> {
     Router::new()
         .route("/internal/sources", get(sources))
         .route("/internal/jobs", post(ingest_jobs))
+}
+
+pub fn protected_router() -> Router<AppState> {
+    Router::new().route("/jobs/match", get(match_jobs))
 }
 
 #[derive(Deserialize)]
@@ -319,6 +324,168 @@ async fn ingest_jobs(
 fn canonical_category(raw: &Option<String>) -> Option<&'static str> {
     let slug = raw.as_deref()?.trim();
     crate::categories::Category::from_slug(slug).map(|category| category.slug())
+}
+
+#[derive(Deserialize)]
+pub struct MatchQuery {
+    #[serde(default = "default_match_limit")]
+    limit: u64,
+    /// When true, also queue notifications for what is returned (the automated
+    /// path). The manual path leaves it false, so asking twice for "my jobs"
+    /// never consumes alert state.
+    #[serde(default)]
+    record: bool,
+}
+
+fn default_match_limit() -> u64 {
+    5
+}
+
+// Weighted toward what actually predicts fit. The category is the gate and is
+// already applied by the query filter, so it is scored as a constant; location
+// is the strongest remaining signal and keywords break ties.
+fn score_job(job: &JobDoc, profile: &MatchProfile) -> f64 {
+    let mut score = 3.0;
+
+    let location = job.location.clone().unwrap_or_default().to_lowercase();
+    if !location.is_empty()
+        && profile.locations.iter().any(|want| {
+            let want = want.trim().to_lowercase();
+            !want.is_empty() && location.contains(&want)
+        })
+    {
+        score += 2.0;
+    }
+
+    let title = job.title.to_lowercase();
+    let description = job.description.to_lowercase();
+    for keyword in &profile.keywords {
+        let keyword = keyword.trim().to_lowercase();
+        if keyword.is_empty() {
+            continue;
+        }
+        if title.contains(&keyword) {
+            score += 1.0;
+        } else if description.contains(&keyword) {
+            score += 0.5;
+        }
+    }
+
+    score
+}
+
+async fn match_jobs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<MatchQuery>,
+) -> ApiResult {
+    let limit = query.limit.clamp(1, 20);
+
+    let profile = state
+        .users()
+        .find_one(doc! { "_id": &user.id })
+        .await?
+        .and_then(|doc| doc.match_profile);
+
+    // No profile (or no categories yet) is a normal state on the way in, not an
+    // error: the caller branches on `reason` instead of parsing a failure.
+    let Some(profile) = profile.filter(|p| !p.categories.is_empty()) else {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "data": [],
+                "meta": { "reason": "no_match_profile", "total": 0, "queued": 0 }
+            })),
+        ));
+    };
+
+    let mut filter = doc! {
+        "category": { "$in": &profile.categories },
+        "$or": [
+            doc! { "deadline": null },
+            doc! { "deadline": "" },
+            doc! { "deadline": { "$gte": nairobi_today() } },
+        ],
+    };
+
+    // Already-queued jobs are excluded only on the automated path. The manual
+    // list is a live view and keeps showing what the user has already seen.
+    if query.record {
+        let mut cursor = state
+            .notifications()
+            .find(doc! { "user_id": &user.id, "job_id": { "$exists": true } })
+            .await?;
+        let mut queued: Vec<String> = Vec::new();
+        while let Some(notification) = cursor.try_next().await? {
+            if let Some(job_id) = notification.job_id {
+                queued.push(job_id);
+            }
+        }
+        if !queued.is_empty() {
+            filter.insert("_id", doc! { "$nin": queued });
+        }
+    }
+
+    let options = FindOptions::builder().limit(300).build();
+    let mut cursor = state.jobs().find(filter).with_options(options).await?;
+    let mut scored: Vec<(f64, JobDoc)> = Vec::new();
+    while let Some(job) = cursor.try_next().await? {
+        scored.push((score_job(&job, &profile), job));
+    }
+
+    // Recency, then id, as the tie-breakers so paging is stable.
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.created_at.cmp(&a.1.created_at))
+            .then_with(|| b.1.id.cmp(&a.1.id))
+    });
+    scored.truncate(limit as usize);
+
+    let now = now_iso();
+    let mut queued_count = 0u64;
+    let mut data = Vec::with_capacity(scored.len());
+    for (score, job) in &scored {
+        if query.record {
+            let notification = NotificationDoc {
+                id: uuid_id(),
+                user_id: user.id.clone(),
+                notification_type: "job_match".to_string(),
+                job_id: Some(job.id.clone()),
+                title: job.title.clone(),
+                body: job.description.clone(),
+                read: false,
+                created_at: now.clone(),
+            };
+            // A duplicate-key error means the partial unique index caught a
+            // repeat, which is the intended outcome rather than a failure.
+            if state
+                .notifications()
+                .insert_one(&notification)
+                .await
+                .is_ok()
+            {
+                queued_count += 1;
+            }
+        }
+        data.push(json!({ "job": job, "matchScore": score }));
+    }
+
+    let total = data.len();
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": data,
+            "meta": {
+                "reason": "ok",
+                "total": total,
+                "queued": queued_count,
+                "categories": profile.categories,
+            }
+        })),
+    ))
 }
 
 fn escape_regex(value: &str) -> String {

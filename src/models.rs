@@ -518,6 +518,11 @@ pub struct NotificationDoc {
     pub user_id: String,
     #[serde(default)]
     pub notification_type: String,
+    /// The job this notification refers to, for job matches. Paired with
+    /// `user_id` in a partial unique index so the same job is never queued
+    /// twice for one user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     pub title: String,
     pub body: String,
     #[serde(default)]

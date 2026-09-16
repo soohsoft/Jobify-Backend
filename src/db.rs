@@ -41,5 +41,30 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
+    // One notification per (user, job). Partial, so the payment notifications
+    // that carry no job_id are not all treated as the same null key.
+    db.collection::<crate::models::NotificationDoc>("notifications")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "job_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "job_id": { "$exists": true } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // The matcher filters candidates by category and orders by recency.
+    db.collection::<crate::models::JobDoc>("jobs")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "category": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

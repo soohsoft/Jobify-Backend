@@ -138,6 +138,7 @@ pub async fn create_notification(
         id: uuid_id(),
         user_id: user_id.to_string(),
         notification_type: notification_type.to_string(),
+        job_id: None,
         title: title.to_string(),
         body: body.to_string(),
         read: false,

@@ -40,6 +40,7 @@ pub fn app(state: AppState) -> Router {
         .merge(credits::router())
         .merge(payments::protected_router())
         .merge(notifications::router())
+        .merge(jobs::protected_router())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_auth,

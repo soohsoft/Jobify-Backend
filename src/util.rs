@@ -27,6 +27,22 @@ pub fn uuid_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// A single-use secret: 256 bits of v4 UUID entropy as hex.
+pub fn secret_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// `seconds` from now, in the same fixed-width format as `now_iso`, so an expiry check is
+/// a plain string comparison and nothing at the call site touches the clock.
+pub fn iso_seconds_from_now(seconds: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::seconds(seconds))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 /// Recursively merge `incoming` into `base`. Arrays and primitives in
 /// `incoming` replace the corresponding value in `base`.
 #[allow(dead_code)]

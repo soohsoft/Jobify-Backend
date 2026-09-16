@@ -47,6 +47,13 @@ impl AppState {
         self.db.collection::<crate::models::ChatDoc>("chats")
     }
 
+    /// One-time website login tickets. Separate from the user document so they expire out
+    /// of existence instead of accumulating inside an account.
+    pub fn login_tokens(&self) -> mongodb::Collection<crate::models::LoginTokenDoc> {
+        self.db
+            .collection::<crate::models::LoginTokenDoc>("login_tokens")
+    }
+
     pub fn sources(&self) -> mongodb::Collection<crate::models::SourceConfig> {
         self.db.collection::<crate::models::SourceConfig>("sources")
     }

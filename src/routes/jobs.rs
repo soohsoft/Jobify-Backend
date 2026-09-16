@@ -552,6 +552,7 @@ async fn queue_notifications(
             body: job.description.clone(),
             read: false,
             sent_at: None,
+            failed_reason: None,
             created_at: now.clone(),
         };
         if state

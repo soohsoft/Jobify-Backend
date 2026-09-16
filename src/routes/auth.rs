@@ -9,7 +9,10 @@ use serde_json::{Value, json};
 
 use crate::auth::{AuthUser, hash_password, issue_token, verify_password};
 use crate::error::AppError;
-use crate::models::{AuthResult, LoginRequest, RegisterRequest, UserDoc, UserResponse};
+use crate::models::{
+    AuthResult, LoginRequest, LoginTokenRequest, RegisterRequest, UserDoc, UserResponse,
+};
+use crate::services::{credit_json, get_or_create_credit};
 use crate::state::AppState;
 use crate::util::{now_iso, uuid_id};
 
@@ -19,6 +22,7 @@ pub fn public_router() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
+        .route("/auth/login-link", post(login_link))
 }
 
 pub fn protected_router() -> Router<AppState> {
@@ -46,6 +50,8 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         location: None,
         match_profile: None,
         telegram_chat_id: None,
+        recovery_email: None,
+        recovery_phone: None,
         alerts: None,
         created_at: now,
     };
@@ -93,6 +99,77 @@ async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) ->
         Json(json!({
             "status": "success",
             "data": AuthResult { user: to_user_response(&user), token }
+        })),
+    ))
+}
+
+/// Exchange a one-time ticket from the bot for a session.
+///
+/// Public on purpose: the site calls this before any session exists, so the ticket *is*
+/// the credential. That is why it is single-use, short-lived, and claimed with one
+/// conditional update — two browsers racing the same link must not both get in, and a
+/// used or expired ticket must never work again.
+///
+/// This is the whole reason the bot hands out no password: the user is already
+/// authenticated to Telegram, so the only thing needed is a way to transfer that proof
+/// once, in the open, without a durable secret living in a chat history.
+async fn login_link(
+    State(state): State<AppState>,
+    Json(body): Json<LoginTokenRequest>,
+) -> ApiResult {
+    let token = body.token.trim().to_string();
+    if token.is_empty() {
+        return Err(AppError::BadRequest("token is required".into()));
+    }
+
+    let now = now_iso();
+    let claimed = state
+        .login_tokens()
+        .find_one_and_update(
+            doc! { "_id": &token, "used_at": null, "expires_at": { "$gt": &now } },
+            doc! { "$set": { "used_at": &now } },
+        )
+        .await?;
+
+    let record = claimed.ok_or_else(|| {
+        AppError::Unauthorized(
+            "That link has expired or was already used. Ask the bot for a new one.".into(),
+        )
+    })?;
+
+    let user = state
+        .users()
+        .find_one(doc! { "_id": &record.user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+
+    let jwt = issue_token(
+        &state.config.jwt_secret,
+        &state.config.jwt_issuer,
+        &user.id,
+        &user.role,
+    )?;
+    let credit = get_or_create_credit(&state, &user.id).await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": {
+                "token": jwt,
+                "user": {
+                    "id": &user.id,
+                    "name": &user.name,
+                    "email": &user.email,
+                    "role": &user.role,
+                    "location": &user.location,
+                    "matchProfile": &user.match_profile,
+                    "alerts": &user.alerts,
+                    "recoveryEmail": &user.recovery_email,
+                    "recoveryPhone": &user.recovery_phone,
+                },
+                "credits": credit_json(&credit),
+            }
         })),
     ))
 }

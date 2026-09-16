@@ -11,10 +11,10 @@ use serde_json::{Value, json};
 
 use crate::auth::{AuthUser, issue_token};
 use crate::error::AppError;
-use crate::models::{AlertPrefs, JobDoc, UserDoc};
+use crate::models::{AlertPrefs, JobDoc, LoginTokenDoc, RecoveryRequest, UserDoc};
 use crate::services::{add_tokens, credit_json, get_or_create_credit};
 use crate::state::AppState;
-use crate::util::{nairobi_today, now_iso, uuid_id};
+use crate::util::{iso_seconds_from_now, nairobi_today, now_iso, secret_token, uuid_id};
 
 use super::ApiResult;
 use super::jobs::queue_matches_for_user;
@@ -38,6 +38,9 @@ pub fn protected_router() -> Router<AppState> {
         .route("/bot/jobs/{id}/not-a-fit", post(not_a_fit))
         .route("/bot/notifications", get(pending_notifications))
         .route("/bot/notifications/{id}/sent", post(mark_sent))
+        .route("/bot/notifications/{id}/failed", post(delivery_failed))
+        .route("/bot/login-link", post(login_link))
+        .route("/bot/recovery", axum::routing::put(set_recovery))
 }
 
 #[derive(Deserialize)]
@@ -87,6 +90,10 @@ async fn session(State(state): State<AppState>, Json(body): Json<BotSessionReque
                 location: None,
                 match_profile: None,
                 telegram_chat_id: Some(telegram_id.clone()),
+                // Nothing here yet: a recovery identifier is only ever set by the user,
+                // and only on the website.
+                recovery_email: None,
+                recovery_phone: None,
                 alerts: Some(AlertPrefs {
                     enabled: false,
                     mode: "daily".to_string(),
@@ -133,6 +140,153 @@ async fn session(State(state): State<AppState>, Json(body): Json<BotSessionReque
                 },
                 "credits": credit_json(&credit),
             }
+        })),
+    ))
+}
+
+async fn login_link(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+) -> ApiResult {
+    let ttl = state.config.login_token_ttl_seconds as i64;
+    let token = secret_token();
+
+    state
+        .login_tokens()
+        .insert_one(LoginTokenDoc {
+            id: token.clone(),
+            user_id: auth.id.clone(),
+            created_at: now_iso(),
+            expires_at: iso_seconds_from_now(ttl),
+            used_at: None,
+            via: "telegram".to_string(),
+        })
+        .await?;
+
+    let url = format!("{}/login?t={}", state.config.web_base_url, token);
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "url": url, "expiresInSeconds": ttl }
+        })),
+    ))
+}
+
+/// Attach an optional recovery identifier.
+///
+/// Not a login and not a password: the bot hands out no credentials. This exists because
+/// deleting a Telegram account issues a brand-new id, which orphans the account with no
+/// way to find it again. Stored unverified — there is no mail or SMS channel yet, and
+/// pretending otherwise would be worse than saying so.
+async fn set_recovery(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<RecoveryRequest>,
+) -> ApiResult {
+    let mut set = doc! {};
+
+    if let Some(email) = body
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        let email = email.to_lowercase();
+        // Deliberately shallow: the address is unusable until it can be verified, so a
+        // strict parser here would only reject valid edge cases with no benefit.
+        if !email.contains('@') || email.contains(char::is_whitespace) || email.len() > 254 {
+            return Err(AppError::BadRequest(
+                "That doesn't look like an email address.".into(),
+            ));
+        }
+        set.insert("recovery_email", email);
+    }
+
+    if let Some(phone) = body
+        .phone
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let digits: String = phone.chars().filter(char::is_ascii_digit).collect();
+        if !(7..=15).contains(&digits.len()) {
+            return Err(AppError::BadRequest(
+                "That doesn't look like a phone number.".into(),
+            ));
+        }
+        set.insert("recovery_phone", phone.to_string());
+    }
+
+    if set.is_empty() {
+        return Err(AppError::BadRequest(
+            "Send an email or a phone number.".into(),
+        ));
+    }
+
+    state
+        .users()
+        .update_one(doc! { "_id": &auth.id }, doc! { "$set": set })
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "verified": false, "note": "Stored for recovery. Not verified yet." }
+        })),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryFailedRequest {
+    pub reason: String,
+}
+
+/// Record that delivery failed, and stop pretending it will succeed.
+///
+/// Without this, a user who blocked the bot (or deleted the account) stays in the pending
+/// list and is retried on every pass forever — a loop indistinguishable from a healthy one
+/// from the outside, and one that also reinstates the match as "new" every time.
+async fn delivery_failed(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path(id): Path<String>,
+    Json(body): Json<DeliveryFailedRequest>,
+) -> ApiResult {
+    let reason = body.reason.trim().to_lowercase();
+
+    state
+        .notifications()
+        .update_one(
+            doc! { "_id": &id, "user_id": &auth.id },
+            doc! { "$set": { "sent_at": now_iso(), "failed_reason": &reason } },
+        )
+        .await?;
+
+    // A block or a deleted account refuses every retry until the user acts, so pause rather
+    // than burn a request per match per pass. The next message the user sends can offer to
+    // turn them back on.
+    let paused = matches!(
+        reason.as_str(),
+        "blocked" | "deactivated" | "chat_not_found"
+    );
+    if paused {
+        state
+            .users()
+            .update_one(
+                doc! { "_id": &auth.id },
+                doc! { "$set": { "alerts.enabled": false } },
+            )
+            .await?;
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "reason": reason, "alertsPaused": paused }
         })),
     ))
 }

@@ -345,8 +345,19 @@ pub struct UserDoc {
     /// The Telegram chat this account belongs to, when the account was created by
     /// the bot. This is the identity link: the bot has no database of its own, so
     /// it resolves a chat_id to a user through the backend.
+    ///
+    /// A link, never a login name: the id is a sequential integer, so publishing it
+    /// would invite enumeration, and it disappears if the Telegram account is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram_chat_id: Option<String>,
+    /// Optional recovery identifier, set by the user. Not a login — it exists because
+    /// deleting a Telegram account yields a brand-new id and orphans the link above, and
+    /// because a bot-only account otherwise has nothing to be found by. Unverified until
+    /// a verification channel (mail or SMS) exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_phone: Option<String>,
     /// Whether and how this user wants job alerts. Absent means never asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<AlertPrefs>,
@@ -545,6 +556,46 @@ pub struct WaafiCallback {
 // Notifications
 // ---------------------------------------------------------------------------
 
+/// A one-time, short-lived ticket that lets a Telegram-authenticated user open the
+/// website as themselves.
+///
+/// There is deliberately no bot-issued password. A credential delivered over the very
+/// channel that authenticates the user is compromised by construction: it lives in the
+/// chat history, in Telegram's cloud, on every synced device, and it is one screenshot
+/// away from being phished. Instead the user asks the bot for a ticket, opens the site
+/// with it once, and the site issues its own session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginTokenDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    pub created_at: String,
+    /// ISO timestamp, compared as a string — `now_iso` is fixed width, so this needs no
+    /// parsing and cannot be skewed by a timezone.
+    pub expires_at: String,
+    /// Set the moment the ticket is redeemed. Single use: a second browser presenting the
+    /// same link must not get a session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<String>,
+    /// How the ticket was obtained, so a future login path can be told apart in an audit.
+    #[serde(default)]
+    pub via: String,
+}
+
+#[derive(Deserialize)]
+pub struct LoginTokenRequest {
+    pub token: String,
+}
+
+/// The recovery identifier a user may attach to a bot-created account.
+#[derive(Deserialize)]
+pub struct RecoveryRequest {
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub phone: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct NotificationDoc {
     #[serde(rename = "_id")]
@@ -567,6 +618,11 @@ pub struct NotificationDoc {
     /// or silently misses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<String>,
+    /// Why delivery failed, when it did. Set instead of leaving the notification pending
+    /// forever: a blocked bot or a deleted account will refuse every retry, and an
+    /// endless retry loop looks identical to a working one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_reason: Option<String>,
     #[serde(default)]
     pub created_at: String,
 }

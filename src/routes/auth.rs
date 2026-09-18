@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use crate::auth::{AuthUser, hash_password, issue_token, verify_password};
 use crate::error::AppError;
 use crate::models::{
-    AuthResult, EmailOtpDoc, LoginRequest, RegisterRequest, ResendOtpRequest, UpdateProfileRequest,
-    UserDoc, UserResponse, VerifyEmailRequest,
+    AuthResult, EmailOtpDoc, ForgotPasswordRequest, LoginRequest, RegisterRequest,
+    ResendOtpRequest, ResetPasswordRequest, UpdateProfileRequest, UserDoc, UserResponse,
+    VerifyEmailRequest,
 };
 use crate::otp;
 use crate::services::add_tokens;
@@ -24,6 +25,10 @@ pub fn public_router() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
+        // Both are public by necessity: the user cannot authenticate, that is the problem.
+        // Neither confirms whether an address has an account.
+        .route("/auth/forgot-password", post(forgot_password))
+        .route("/auth/reset-password", post(reset_password))
 }
 
 /// Both verification routes are AUTHENTICATED, not keyed on an email in the body. Register
@@ -53,15 +58,18 @@ async fn issue_otp(
     user_id: &str,
     email: &str,
     name: &str,
+    purpose: &str,
 ) -> Result<(), AppError> {
     let now = chrono::Utc::now();
     let code = otp::generate_code();
+    let key = otp::otp_key(user_id, purpose);
     let record = EmailOtpDoc {
-        id: user_id.to_string(),
+        id: key.clone(),
         user_id: user_id.to_string(),
+        purpose: purpose.to_string(),
         email: email.to_string(),
         code_hash: otp::hash_code(&code),
-        expires_at: otp::expires_at(now),
+        expires_at: otp::expires_in(now, otp::ttl_minutes(purpose)),
         attempts: 0,
         last_sent_at: now.to_rfc3339(),
         created_at: now.to_rfc3339(),
@@ -69,25 +77,28 @@ async fn issue_otp(
 
     state
         .email_otps()
-        .replace_one(doc! { "_id": user_id }, &record)
+        .replace_one(doc! { "_id": &key }, &record)
         .upsert(true)
         .await?;
 
-    let (subject, body) = crate::mail::verification_email(&code, name);
+    let (subject, body) = match purpose {
+        otp::PURPOSE_RESET => crate::mail::password_reset_email(&code, name),
+        _ => crate::mail::verification_email(&code, name),
+    };
     if let Err(err) = state.mailer.send(email, &subject, &body).await {
         // The code is stored either way, so a transient mail failure is recoverable with
         // "resend" instead of leaving the account in a state it cannot leave.
-        tracing::warn!(email = %otp::mask_email(email), error = %err, "verification email could not be sent");
+        tracing::warn!(email = %otp::mask_email(email), purpose, error = %err, "email could not be sent");
         return Err(AppError::Internal(
-            "Your account was created, but the verification email could not be sent. Use resend in a moment."
-                .to_string(),
+            "The email could not be sent just now. Please try again in a moment.".to_string(),
         ));
     }
-    tracing::info!(email = %otp::mask_email(email), "verification code sent");
+    tracing::info!(email = %otp::mask_email(email), purpose, "code sent");
     Ok(())
 }
 
 async fn register(State(state): State<AppState>, Json(body): Json<RegisterRequest>) -> ApiResult {
+    otp::validate_password(&body.password).map_err(AppError::BadRequest)?;
     let email = body.email.trim().to_lowercase();
     let existing = state.users().find_one(doc! { "email": &email }).await?;
 
@@ -136,7 +147,7 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
     // A failure to mail is reported in the response, not thrown: the account and its token
     // are already valid, and losing them would be worse than an inbox the user has to
     // re-request. The client shows the code screen either way and offers "resend".
-    let delivery = match issue_otp(&state, &id, &email, &user.name).await {
+    let delivery = match issue_otp(&state, &id, &email, &user.name, otp::PURPOSE_VERIFY).await {
         Ok(()) => {
             json!({ "sent": true, "to": otp::mask_email(&email), "expires_in_minutes": otp::OTP_TTL_MINUTES })
         }
@@ -388,9 +399,10 @@ async fn verify_email(
         ));
     }
 
+    let verify_key = otp::otp_key(&user.id, otp::PURPOSE_VERIFY);
     let stored = state
         .email_otps()
-        .find_one(doc! { "_id": &user.id })
+        .find_one(doc! { "_id": &verify_key })
         .await?
         .ok_or_else(|| {
             AppError::BadRequest(
@@ -426,16 +438,16 @@ async fn verify_email(
     }
 
     state
-        .users()
+        .email_otps()
         .update_one(
-            doc! { "_id": &user.id },
-            doc! { "$set": { "email_verified": true } },
+            doc! { "_id": &verify_key },
+            doc! { "$inc": { "attempts": 1 } },
         )
         .await?;
     // Burn the code: a verified address is the point, and a live code is a live secret.
     state
         .email_otps()
-        .delete_one(doc! { "_id": &user.id })
+        .delete_one(doc! { "_id": &verify_key })
         .await?;
 
     let user_doc = state
@@ -477,9 +489,10 @@ async fn resend_otp(
         ));
     }
 
+    let verify_key = otp::otp_key(&user.id, otp::PURPOSE_VERIFY);
     if let Some(existing) = state
         .email_otps()
-        .find_one(doc! { "_id": &user.id })
+        .find_one(doc! { "_id": &verify_key })
         .await?
     {
         let wait = otp::resend_wait_seconds(&existing.last_sent_at, chrono::Utc::now());
@@ -490,7 +503,14 @@ async fn resend_otp(
         }
     }
 
-    issue_otp(&state, &user.id, &user_doc.email, &user_doc.name).await?;
+    issue_otp(
+        &state,
+        &user.id,
+        &user_doc.email,
+        &user_doc.name,
+        otp::PURPOSE_VERIFY,
+    )
+    .await?;
 
     Ok((
         StatusCode::OK,
@@ -500,6 +520,154 @@ async fn resend_otp(
                 "sent": true,
                 "to": otp::mask_email(&user_doc.email),
                 "expires_in_minutes": otp::OTP_TTL_MINUTES
+            }
+        })),
+    ))
+}
+
+/// Sends a reset code. The response is identical whether or not the address has an account:
+/// an endpoint that answers "no such user" is an account-existence oracle, and this one is
+/// unauthenticated.
+async fn forgot_password(
+    State(state): State<AppState>,
+    Json(body): Json<ForgotPasswordRequest>,
+) -> ApiResult {
+    let email = body.email.trim().to_lowercase();
+    let generic = "If that email has a Jobify account, a reset code is on its way.";
+
+    let Some(user) = state.users().find_one(doc! { "email": &email }).await? else {
+        tracing::info!(email = %otp::mask_email(&email), "password reset requested for an address with no account");
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "success", "data": { "message": generic } })),
+        ));
+    };
+
+    // An account created through Google/Apple has no password to reset.
+    if user.provider != "password" {
+        tracing::info!(user_id = %user.id, provider = %user.provider, "password reset requested for a non-password account");
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "success", "data": { "message": generic } })),
+        ));
+    }
+
+    // Same cooldown as the signup code, for the same reason: without it this endpoint is a
+    // mail bomb aimed at any address a stranger can type.
+    let key = otp::otp_key(&user.id, otp::PURPOSE_RESET);
+    if let Some(existing) = state.email_otps().find_one(doc! { "_id": &key }).await? {
+        let wait = otp::resend_wait_seconds(&existing.last_sent_at, chrono::Utc::now());
+        if wait > 0 {
+            return Err(AppError::TooManyRequests(format!(
+                "Please wait {wait} second(s) before requesting another code."
+            )));
+        }
+    }
+
+    // A mail failure is reported as a failure only in the log: telling the caller would
+    // reveal that the account exists.
+    if let Err(err) = issue_otp(
+        &state,
+        &user.id,
+        &user.email,
+        &user.name,
+        otp::PURPOSE_RESET,
+    )
+    .await
+    {
+        tracing::warn!(user_id = %user.id, error = %err.message(), "reset email could not be sent");
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": {
+                "message": generic,
+                "expires_in_minutes": otp::RESET_TTL_MINUTES
+            }
+        })),
+    ))
+}
+
+/// Completes a reset with the mailed code. Public by necessity, so the code is what proves
+/// identity — which is why it is single-use, attempt-limited and purpose-scoped.
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(body): Json<ResetPasswordRequest>,
+) -> ApiResult {
+    otp::validate_password(&body.new_password).map_err(AppError::BadRequest)?;
+    let email = body.email.trim().to_lowercase();
+
+    // One message for "no such account", "no code waiting" and "wrong code": the endpoint is
+    // unauthenticated, so anything more specific is a probe.
+    let invalid = || {
+        AppError::BadRequest(
+            "That reset code is not valid or has expired. Request a new one.".to_string(),
+        )
+    };
+
+    let user = state
+        .users()
+        .find_one(doc! { "email": &email })
+        .await?
+        .ok_or_else(invalid)?;
+
+    if user.provider != "password" {
+        return Err(invalid());
+    }
+
+    let key = otp::otp_key(&user.id, otp::PURPOSE_RESET);
+    let stored = state
+        .email_otps()
+        .find_one(doc! { "_id": &key })
+        .await?
+        .ok_or_else(invalid)?;
+
+    let now = chrono::Utc::now();
+    if stored.attempts >= otp::OTP_MAX_ATTEMPTS || otp::is_expired(&stored.expires_at, now) {
+        return Err(AppError::BadRequest(
+            "That reset code has expired or is used up. Request a new one.".to_string(),
+        ));
+    }
+
+    if !otp::code_matches(&stored.code_hash, body.code.trim()) {
+        state
+            .email_otps()
+            .update_one(doc! { "_id": &key }, doc! { "$inc": { "attempts": 1 } })
+            .await?;
+        let left = otp::OTP_MAX_ATTEMPTS - (stored.attempts + 1);
+        return Err(AppError::BadRequest(if left > 0 {
+            format!("That reset code is not correct. {left} attempt(s) left.")
+        } else {
+            "That reset code is not correct, and it is now used up. Request a new one.".to_string()
+        }));
+    }
+
+    state
+        .users()
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! { "$set": { "password_hash": hash_password(&body.new_password) } },
+        )
+        .await?;
+    // Burn it: a used reset code is a standing key to the account otherwise.
+    state.email_otps().delete_one(doc! { "_id": &key }).await?;
+    // A pending signup code is moot now — the address is proven by the reset mail.
+    state
+        .email_otps()
+        .delete_one(doc! { "_id": otp::otp_key(&user.id, otp::PURPOSE_VERIFY) })
+        .await?;
+
+    tracing::info!(user_id = %user.id, "password reset completed");
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": {
+                "message": "Your password has been changed. You can sign in with it now.",
+                "email": email
             }
         })),
     ))

@@ -4,9 +4,32 @@
 //! exactly once — in the email. Everything here is a pure function so the rules can be
 //! tested without a database or an SMTP server.
 
-/// How long a code stays valid. Long enough to fetch a mail, short enough that a leaked
-/// mailbox is not a standing key.
+/// How long a signup code stays valid. Long enough to fetch a mail, short enough that a
+/// leaked mailbox is not a standing key.
 pub const OTP_TTL_MINUTES: i64 = 10;
+
+/// A reset code gets longer: the user has to remember they asked for one, find the mail,
+/// and choose a new password, and a reset mail often sits unread for a while. The extra
+/// window is paid for by the code still being single-use and attempt-limited.
+pub const RESET_TTL_MINUTES: i64 = 30;
+
+/// Codes are per purpose, never shared: a code that verifies an address must not be able to
+/// change a password, or a leaked signup mail becomes an account takeover.
+pub const PURPOSE_VERIFY: &str = "verify_email";
+pub const PURPOSE_RESET: &str = "reset_password";
+
+/// The storage key. One row per (user, purpose), so issuing a new code of a kind replaces
+/// that kind only — asking for a reset does not invalidate a pending signup code.
+pub fn otp_key(user_id: &str, purpose: &str) -> String {
+    format!("{user_id}:{purpose}")
+}
+
+pub fn ttl_minutes(purpose: &str) -> i64 {
+    match purpose {
+        PURPOSE_RESET => RESET_TTL_MINUTES,
+        _ => OTP_TTL_MINUTES,
+    }
+}
 
 /// Wrong guesses allowed before the code is burned. A 6-digit code has 10^6 values; five
 /// attempts keeps guessing hopeless while leaving room for a typo.
@@ -46,7 +69,24 @@ pub fn code_matches(stored_hash: &str, candidate: &str) -> bool {
 }
 
 pub fn expires_at(now: chrono::DateTime<chrono::Utc>) -> String {
-    (now + chrono::Duration::minutes(OTP_TTL_MINUTES)).to_rfc3339()
+    expires_in(now, OTP_TTL_MINUTES)
+}
+
+pub fn expires_in(now: chrono::DateTime<chrono::Utc>, minutes: i64) -> String {
+    (now + chrono::Duration::minutes(minutes)).to_rfc3339()
+}
+
+/// Passwords arrive from a public form, so the server enforces a floor rather than trusting
+/// the client's own check. 8 characters matches what the signup screen already requires.
+pub const MIN_PASSWORD_LENGTH: usize = 8;
+
+pub fn validate_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(format!(
+            "Password must be at least {MIN_PASSWORD_LENGTH} characters"
+        ));
+    }
+    Ok(())
 }
 
 pub fn is_expired(expires_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -151,6 +191,33 @@ mod tests {
             0,
             "a bad timestamp must not block the user"
         );
+    }
+
+    #[test]
+    fn a_reset_code_lives_longer_than_a_signup_code() {
+        assert_eq!(ttl_minutes(PURPOSE_VERIFY), OTP_TTL_MINUTES);
+        assert_eq!(ttl_minutes(PURPOSE_RESET), RESET_TTL_MINUTES);
+        assert!(RESET_TTL_MINUTES > OTP_TTL_MINUTES);
+        let now = chrono::Utc::now();
+        assert!(!is_expired(&expires_at(now), now));
+        assert!(!is_expired(&expires_in(now, RESET_TTL_MINUTES), now));
+    }
+
+    #[test]
+    fn purposes_get_separate_storage_keys() {
+        let verify = otp_key("user-1", PURPOSE_VERIFY);
+        let reset = otp_key("user-1", PURPOSE_RESET);
+        assert_ne!(verify, reset, "one purpose must not overwrite the other");
+        assert_eq!(verify, "user-1:verify_email");
+        assert_eq!(reset, "user-1:reset_password");
+    }
+
+    #[test]
+    fn password_floor_is_enforced() {
+        assert!(validate_password("12345678").is_ok());
+        assert!(validate_password("1234567").is_err());
+        assert!(validate_password("").is_err());
+        assert!(validate_password("a-very-long-passphrase").is_ok());
     }
 
     #[test]

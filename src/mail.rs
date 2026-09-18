@@ -213,6 +213,32 @@ pub fn verification_email(code: &str, name: &str) -> (String, String) {
     (subject, body)
 }
 
+/// The password-reset mail. Deliberately says a reset was requested and nothing about the
+/// account: this mail can land in a shared inbox, and "someone tried to reset your Jobify
+/// password" is a warning, not a disclosure.
+pub fn password_reset_email(code: &str, name: &str) -> (String, String) {
+    let subject = format!("Reset your Jobify password: {code}");
+    let greeting = if name.trim().is_empty() {
+        "Hi,".to_string()
+    } else {
+        format!("Hi {},", name.trim())
+    };
+    let body = format!(
+        "{greeting}\n\n\
+         Someone asked to reset the password for your Jobify account.\n\n\
+         Your reset code is:\n\n\
+         {code}\n\n\
+         Enter it in the app with your new password. The code expires in {ttl} minutes, can be \
+         used once, and nothing has changed yet — your current password still works until you \
+         finish.\n\n\
+         If this was not you, ignore this email and consider changing your password; no one can \
+         use this code without access to this inbox.\n\n\
+         — Jobify",
+        ttl = crate::otp::RESET_TTL_MINUTES
+    );
+    (subject, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +328,25 @@ mod tests {
         assert!(
             body.contains("10 minutes"),
             "the TTL must be stated: {body}"
+        );
+    }
+
+    #[test]
+    fn reset_mail_does_not_disclose_the_account_and_states_nothing_changed() {
+        let (subject, body) = password_reset_email("654321", "");
+        assert!(subject.contains("654321"));
+        assert!(body.contains("654321"));
+        assert!(
+            body.contains("30 minutes"),
+            "the reset TTL must be stated: {body}"
+        );
+        assert!(
+            body.contains("nothing has changed yet"),
+            "the user must know it is not live yet: {body}"
+        );
+        assert!(
+            !body.contains("https"),
+            "no links: a link cannot be attempt-limited like a code"
         );
     }
 

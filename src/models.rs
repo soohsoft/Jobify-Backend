@@ -323,14 +323,18 @@ pub struct MatchProfile {
     pub updated_at: String,
 }
 
-/// One live email verification code per user, `_id` = the user id so the uniqueness that
-/// "only the newest code can be used" needs comes from the primary key rather than an extra
-/// index. Only the hash is stored: the code itself exists once, in the email.
+/// One live code per (user, purpose), `_id` = "user_id:purpose" so the uniqueness that "only
+/// the newest code of this kind can be used" needs comes from the primary key rather than an
+/// extra index. Only the hash is stored: the code itself exists once, in the email.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EmailOtpDoc {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    /// `verify_email` or `reset_password` (see `otp::PURPOSE_*`). Kept explicit so a code
+    /// issued for one flow can never satisfy the other.
+    #[serde(default = "default_otp_purpose")]
+    pub purpose: String,
     pub email: String,
     pub code_hash: String,
     pub expires_at: String,
@@ -346,6 +350,22 @@ pub struct EmailOtpDoc {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VerifyEmailRequest {
     pub code: String,
+}
+
+fn default_otp_purpose() -> String {
+    crate::otp::PURPOSE_VERIFY.to_string()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ForgotPasswordRequest {
+    pub email: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ResetPasswordRequest {
+    pub email: String,
+    pub code: String,
+    pub new_password: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

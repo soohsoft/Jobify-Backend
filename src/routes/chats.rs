@@ -636,6 +636,18 @@ async fn handle_collecting(
             .await?;
     }
 
+    // Keep the user's memory record current. Done here, at the end of a turn, because
+    // this is the moment the service learns the most — and it means a fact survives even
+    // if the user never saves a CV from this conversation or deletes the chat later.
+    if let Err(reason) =
+        memory::refresh(state, user_id, &format!("chat:{}", chat.id), Some(&merged)).await
+    {
+        // The turn already succeeded and was billed; failing it now would charge the
+        // user for a reply they have and no memory write. A memory that lags one turn is
+        // better than a 500 after the answer.
+        tracing::warn!(error = ?reason, "memory refresh failed after a chat turn");
+    }
+
     send_sse(
         tx,
         "profile",
@@ -705,6 +717,17 @@ async fn finalize_chat(
     };
 
     state.resumes().insert_one(&resume).await?;
+    // Saving a CV is the user accepting a version of themselves: it is a memory event.
+    if let Err(reason) = memory::refresh(
+        state,
+        user_id,
+        &format!("resume:{}", resume.id),
+        Some(&resume.profile),
+    )
+    .await
+    {
+        tracing::warn!(error = ?reason, "memory refresh failed after saving a CV");
+    }
     state
         .chats()
         .update_one(

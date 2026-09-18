@@ -47,6 +47,11 @@ impl AppState {
         self.db.collection::<crate::models::ChatDoc>("chats")
     }
 
+    pub fn user_memory(&self) -> mongodb::Collection<crate::models::UserMemoryDoc> {
+        self.db
+            .collection::<crate::models::UserMemoryDoc>("user_memory")
+    }
+
     pub fn saved_jobs(&self) -> mongodb::Collection<crate::models::SavedJobDoc> {
         self.db
             .collection::<crate::models::SavedJobDoc>("saved_jobs")

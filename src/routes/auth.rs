@@ -25,7 +25,9 @@ pub fn public_router() -> Router<AppState> {
 }
 
 pub fn protected_router() -> Router<AppState> {
-    Router::new().route("/auth/me", get(me).patch(update_me))
+    Router::new()
+        .route("/auth/me", get(me).patch(update_me))
+        .route("/me/memory", get(get_memory))
 }
 
 async fn register(State(state): State<AppState>, Json(body): Json<RegisterRequest>) -> ApiResult {
@@ -207,10 +209,43 @@ async fn update_me(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    // The account is the authority on identity, so an edit here has to reach the memory
+    // record too — otherwise the assistant keeps greeting the user by their old name.
+    if let Err(reason) = crate::memory::refresh(&state, &user.id, "account", None).await {
+        tracing::warn!(error = ?reason, "memory refresh failed after a profile edit");
+    }
+
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": to_user_response(&updated) })),
     ))
+}
+
+/// `GET /me/memory` — who the service thinks this user is.
+///
+/// Exposed because the record is not only prompt fuel: a future consumer (a digest, a
+/// bot, a support screen) needs the same answer without re-deriving it. It fills in a
+/// record when none exists yet, which is a read-through of data the user already owns.
+async fn get_memory(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> ApiResult {
+    let stored = crate::memory::load_stored(&state, &user.id).await?;
+    match stored {
+        Some(record) => Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "success", "data": record, "meta": { "source": "stored" } })),
+        )),
+        None => {
+            let record = crate::memory::refresh(&state, &user.id, "account", None).await?;
+            Ok((
+                StatusCode::OK,
+                Json(
+                    json!({ "status": "success", "data": record, "meta": { "source": "rebuilt" } }),
+                ),
+            ))
+        }
+    }
 }
 
 fn provider_label(provider: &str) -> &str {

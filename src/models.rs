@@ -394,6 +394,80 @@ pub struct AlertPrefs {
     pub excluded_categories: Vec<String>,
 }
 
+/// One role the user has held, compacted for the memory record: no description, no
+/// dates-as-strings mess, just enough to say what they have done.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryExperience {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub organization: String,
+    /// Free text as given ("2023-2026", "3 years"). Not parsed: the memory is prose.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub period: String,
+}
+
+/// The compacted, durable answer to "who is this user?", one document per user.
+///
+/// Separate from `UserDoc` on purpose. The user document carries what the ACCOUNT needs
+/// (credentials, role, alert prefs) and is read on every `/auth/me` and every `/jobs`
+/// location fallback, so it must stay small and boring. This record carries what a
+/// CONVERSATION needs — skills, history, what they are looking for, what they refused —
+/// and it has to survive the things that are only context: a deleted chat, a deleted CV,
+/// a reset conversation. Recomputing it per turn from those sources means the memory dies
+/// with them, which is exactly what a "memory" must not do.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserMemoryDoc {
+    /// The user id, so one user has exactly one record.
+    #[serde(rename = "_id")]
+    pub id: String,
+    // Identity. Taken from the account, because that is what the user themselves chose.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline: Option<String>,
+    // Professional shape, from their CVs and conversations.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub experience: Vec<MemoryExperience>,
+    /// Highest education as one line ("BSc, Public Health — University of Hargeisa").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub education: Option<String>,
+    #[serde(default)]
+    pub languages: Vec<String>,
+    // Preferences and negative signals.
+    #[serde(default)]
+    pub preferred_locations: Vec<String>,
+    /// Employers the user asked not to see. A memory that keeps offering a rejected
+    /// employer is worse than having no memory at all.
+    #[serde(default)]
+    pub avoid_employers: Vec<String>,
+    /// The compacted "who is this user" paragraph, bounded. This is the field a future
+    /// consumer (a bot, a digest mailer, a support screen) reads first.
+    #[serde(default)]
+    pub memo: String,
+    /// What fed this record, oldest first: `account`, `resume:<id>`, `chat:<id>`.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub revision: u32,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
 /// One job saved by one user.
 ///
 /// A collection rather than an array on the user document: the user document is

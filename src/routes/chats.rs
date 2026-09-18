@@ -33,7 +33,7 @@ use super::common::{SseStream, SseTx, paginate, send_sse, sse_event};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chats", get(list).post(create))
-        .route("/chats/{id}", get(get_by_id).patch(rename))
+        .route("/chats/{id}", get(get_by_id).patch(rename).delete(remove))
         .route("/chats/{id}/messages", post(send_message))
         .route("/chats/{id}/template", post(select_template))
 }
@@ -68,6 +68,51 @@ async fn rename(
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": chat })),
+    ))
+}
+
+/// Delete a conversation.
+///
+/// The CV the conversation produced is a separate document and is KEPT: a user who
+/// deletes a chat has thrown away the interview, not the CV that came out of it.
+/// The link is cleared instead (`chat_id` removed) so no resume dangles at a chat
+/// that no longer exists, and the count of detached CVs comes back in the response
+/// so the client can say what happened.
+///
+/// Consequence worth knowing: the CV editor counts its edits against its linked
+/// chat's session budget. A detached CV is therefore no longer capped by that
+/// budget — the per-request token cap and the credit gate still apply, so nothing
+/// becomes free, but a very long editing session is no longer bounded.
+async fn remove(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    // Owner-checked in the filter: another user's id deletes nothing and is a 404,
+    // never a silent success.
+    let deleted = state
+        .chats()
+        .delete_one(doc! { "_id": &id, "user_id": &user.id })
+        .await?;
+
+    if deleted.deleted_count == 0 {
+        return Err(AppError::NotFound("Chat not found".to_string()));
+    }
+
+    let detached = state
+        .resumes()
+        .update_many(
+            doc! { "chat_id": &id, "user_id": &user.id },
+            doc! { "$unset": { "chat_id": "" } },
+        )
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "deleted": true, "id": id, "detachedResumes": detached.modified_count }
+        })),
     ))
 }
 

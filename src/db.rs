@@ -31,6 +31,22 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
+    // One account per external identity. Partial, because password accounts
+    // carry no external_id and would otherwise all be the same null key.
+    db.collection::<crate::models::UserDoc>("users")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "provider": 1, "external_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "external_id": { "$exists": true } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // Matches the ingest upsert filter, so job upserts stay idempotent per source.
     db.collection::<crate::models::JobDoc>("jobs")
         .create_index(

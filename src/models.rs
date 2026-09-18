@@ -333,6 +333,25 @@ pub struct UserDoc {
     pub email: String,
     #[serde(default)]
     pub password_hash: String,
+    /// How this account signs in: `"password"` today, `"google"`/`"apple"` once
+    /// those land. An OAuth account carries no `password_hash`, so password
+    /// login must refuse it rather than compare against an empty hash.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// The provider's own subject id (Google/Apple `sub`). Absent for password
+    /// accounts, which is why the uniqueness index on it is partial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub email_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    /// Settings-screen fields. Separate from the CV profile, which the
+    /// interview extracts per chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline: Option<String>,
     #[serde(default)]
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -347,6 +366,12 @@ pub struct UserDoc {
     pub alerts: Option<AlertPrefs>,
     #[serde(default)]
     pub created_at: String,
+}
+
+/// Accounts created before provider tracking existed are password accounts,
+/// and so is every account this service creates itself.
+pub fn default_provider() -> String {
+    "password".to_string()
 }
 
 /// A user's job-alert subscription, and the negative signals that shape it.
@@ -382,13 +407,39 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// PATCH /auth/me body. Every field is optional; a field that is present but
+/// blank clears the stored value, and an absent field is left alone.
+#[derive(Deserialize)]
+pub struct UpdateProfileRequest {
+    pub name: Option<String>,
+    pub phone: Option<String>,
+    pub location: Option<String>,
+    pub headline: Option<String>,
+    /// Accepted only so a change can be refused with a reason. Email is the
+    /// sign-in address and there is no verification mail to prove ownership of
+    /// a new one, so letting it be edited here would let anyone claim an
+    /// address they do not own.
+    #[allow(dead_code)]
+    pub email: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct UserResponse {
     pub id: String,
     pub name: String,
     pub email: String,
     pub role: String,
+    /// So a client can tell a password account from an OAuth one before it
+    /// offers a password form it would be refused.
+    pub provider: String,
+    pub email_verified: bool,
     pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub match_profile: Option<MatchProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]

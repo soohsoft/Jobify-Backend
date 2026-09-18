@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 
 use crate::auth::{AuthUser, hash_password, issue_token, verify_password};
 use crate::error::AppError;
-use crate::models::{AuthResult, LoginRequest, RegisterRequest, UserDoc, UserResponse};
+use crate::models::{
+    AuthResult, LoginRequest, RegisterRequest, UpdateProfileRequest, UserDoc, UserResponse,
+};
 use crate::services::add_tokens;
 use crate::state::AppState;
 use crate::util::{now_iso, uuid_id};
@@ -23,7 +25,7 @@ pub fn public_router() -> Router<AppState> {
 }
 
 pub fn protected_router() -> Router<AppState> {
-    Router::new().route("/auth/me", get(me))
+    Router::new().route("/auth/me", get(me).patch(update_me))
 }
 
 async fn register(State(state): State<AppState>, Json(body): Json<RegisterRequest>) -> ApiResult {
@@ -43,6 +45,12 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         name: body.name.trim().to_string(),
         email: email.clone(),
         password_hash: hash_password(&body.password),
+        provider: "password".to_string(),
+        external_id: None,
+        email_verified: false,
+        avatar_url: None,
+        phone: None,
+        headline: None,
         role: "user".to_string(),
         location: None,
         match_profile: None,
@@ -83,6 +91,16 @@ async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) ->
         .await?
         .ok_or_else(|| AppError::Unauthorized("Invalid email or password".to_string()))?;
 
+    // An account created through Google/Apple has no password_hash. Comparing
+    // against the empty string would fail anyway, but saying so is the
+    // difference between a user retrying and a user finding the right button.
+    if user.provider != "password" {
+        return Err(AppError::Unauthorized(format!(
+            "This account signs in with {}. Use that option instead.",
+            provider_label(&user.provider)
+        )));
+    }
+
     if !verify_password(&body.password, &user.password_hash) {
         return Err(AppError::Unauthorized(
             "Invalid email or password".to_string(),
@@ -118,13 +136,103 @@ async fn me(State(state): State<AppState>, Extension(user): Extension<AuthUser>)
     ))
 }
 
+/// PATCH /auth/me — what the Settings screen saves. The account is taken from
+/// the token, never from the body, so this can only ever edit the caller.
+///
+/// Absent fields are left alone; a present-but-blank field is cleared. Name is
+/// refused when blank because every screen falls back to it, and `""` would
+/// render as an empty header rather than a missing one.
+async fn update_me(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<UpdateProfileRequest>,
+) -> ApiResult {
+    if body.email.is_some() {
+        return Err(AppError::BadRequest(
+            "Email cannot be changed here — it is your sign-in address.".to_string(),
+        ));
+    }
+
+    let mut set = doc! {};
+    let mut unset = doc! {};
+
+    if let Some(name) = body.name.as_deref() {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::BadRequest("Name cannot be empty".to_string()));
+        }
+        if name.chars().count() > 120 {
+            return Err(AppError::BadRequest(
+                "Name is too long (120 characters maximum)".to_string(),
+            ));
+        }
+        set.insert("name", name.to_string());
+    }
+
+    for (field, value) in [
+        ("phone", body.phone),
+        ("location", body.location),
+        ("headline", body.headline),
+    ] {
+        match value {
+            Some(value) if value.trim().is_empty() => {
+                unset.insert(field, "");
+            }
+            Some(value) => {
+                set.insert(field, value.trim().to_string());
+            }
+            None => {}
+        }
+    }
+
+    if !set.is_empty() || !unset.is_empty() {
+        let mut update = doc! {};
+        if !set.is_empty() {
+            update.insert("$set", set);
+        }
+        if !unset.is_empty() {
+            update.insert("$unset", unset);
+        }
+        state
+            .users()
+            .update_one(doc! { "_id": &user.id }, update)
+            .await?;
+    }
+
+    // Read back rather than echo the request: the response is then the stored
+    // document, so a client can trust it as the new state.
+    let updated = state
+        .users()
+        .find_one(doc! { "_id": &user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": to_user_response(&updated) })),
+    ))
+}
+
+fn provider_label(provider: &str) -> &str {
+    match provider {
+        "google" => "Google",
+        "apple" => "Apple",
+        other => other,
+    }
+}
+
 fn to_user_response(user: &UserDoc) -> UserResponse {
     UserResponse {
         id: user.id.clone(),
         name: user.name.clone(),
         email: user.email.clone(),
         role: user.role.clone(),
+        provider: user.provider.clone(),
+        email_verified: user.email_verified,
         location: user.location.clone(),
+        phone: user.phone.clone(),
+        headline: user.headline.clone(),
+        avatar_url: user.avatar_url.clone(),
         match_profile: user.match_profile.clone(),
         alerts: user.alerts.clone(),
     }

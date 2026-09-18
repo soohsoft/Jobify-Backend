@@ -376,6 +376,15 @@ async fn handle_collecting(
         system.push_str(&memory.context);
     }
 
+    // The opening intake, only while the work the user wants is unknown. The signal is
+    // the ACCOUNT's match profile, because that is where the extractor writes categories
+    // (the chat's own profile is CV-shaped and never carries them). Once they are known
+    // the block disappears — no interrogation, and no tokens spent asking again.
+    if !memory.has_categories {
+        system.push_str("\n\n");
+        system.push_str(crate::prompts::OPENING_INTAKE_PROMPT);
+    }
+
     let messages: Vec<ChatMessage> = std::iter::once(ChatMessage {
         role: "system".to_string(),
         content: system,

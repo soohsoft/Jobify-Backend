@@ -34,6 +34,10 @@ const MAX_EXCLUSIONS: usize = 5;
 
 #[derive(Debug, Default)]
 pub struct UserMemory {
+    /// Whether the account already has match categories. The opening intake prompt is
+    /// only appended while this is false — once we know the work they want, asking
+    /// again would be the interrogation this replaced.
+    pub has_categories: bool,
     /// Fields the account already knows, in the shape a CV profile uses. Empty when
     /// nothing is known.
     pub fields: Value,
@@ -176,8 +180,17 @@ pub fn build(user: &UserDoc, previous: Option<&Value>) -> UserMemory {
         return UserMemory {
             fields: json!({}),
             context: String::new(),
+            has_categories: user
+                .match_profile
+                .as_ref()
+                .is_some_and(|profile| !profile.categories.is_empty()),
         };
     }
+
+    let has_categories = user
+        .match_profile
+        .as_ref()
+        .is_some_and(|profile| !profile.categories.is_empty());
 
     let mut context = String::from(
         "What you already know about this user, from their account and their previous CVs. \
@@ -195,6 +208,7 @@ pub fn build(user: &UserDoc, previous: Option<&Value>) -> UserMemory {
     UserMemory {
         fields: Value::Object(fields),
         context,
+        has_categories,
     }
 }
 

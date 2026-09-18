@@ -425,9 +425,15 @@ async fn verify_email(
     }
 
     if !otp::code_matches(&stored.code_hash, code) {
+        // Keyed on the CODE document ("user_id:purpose"). Keying it on the user id silently
+        // matches nothing, which leaves the counter at zero forever: wrong guesses never lock
+        // the code, and the attempt limit becomes decorative.
         state
             .email_otps()
-            .update_one(doc! { "_id": &user.id }, doc! { "$inc": { "attempts": 1 } })
+            .update_one(
+                doc! { "_id": &verify_key },
+                doc! { "$inc": { "attempts": 1 } },
+            )
             .await?;
         let left = otp::OTP_MAX_ATTEMPTS - (stored.attempts + 1);
         return Err(AppError::BadRequest(if left > 0 {
@@ -438,13 +444,16 @@ async fn verify_email(
     }
 
     state
-        .email_otps()
+        .users()
         .update_one(
-            doc! { "_id": &verify_key },
-            doc! { "$inc": { "attempts": 1 } },
+            doc! { "_id": &user.id },
+            doc! { "$set": { "email_verified": true } },
         )
         .await?;
     // Burn the code: a verified address is the point, and a live code is a live secret.
+    // The account update comes FIRST: burning the code without flipping the flag leaves the
+    // user verified in the response and unverified in the database, with no code left to
+    // retry — the exact state this order prevents.
     state
         .email_otps()
         .delete_one(doc! { "_id": &verify_key })

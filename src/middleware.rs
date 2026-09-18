@@ -53,8 +53,15 @@ pub async fn require_internal_api(
 
 fn user_from_headers(state: &AppState, headers: &HeaderMap) -> Result<AuthUser, AppError> {
     let token = bearer_token(headers)
-        .ok_or_else(|| AppError::Unauthorized("Missing bearer token".to_string()))?;
-    decode_token(&state.config.jwt_secret, token).map_err(AppError::from)
+        .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".to_string()))?;
+    // Deliberately not AppError::from: jsonwebtoken's own text ("Base64 error:
+    // Invalid last symbol 101", "ExpiredSignature") is decoder internals, and it
+    // was reaching the sign-in screen verbatim because the client displays the
+    // message the server sends. Every rejection here means the same thing to a
+    // user — the token is no longer usable — so they all get that one sentence.
+    decode_token(&state.config.jwt_secret, token).map_err(|_| {
+        AppError::Unauthorized("Your session has expired. Please sign in again.".to_string())
+    })
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

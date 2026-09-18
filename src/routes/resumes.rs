@@ -184,6 +184,8 @@ async fn edit_chat(
     Path(id): Path<String>,
     Json(body): Json<ResumeChatRequest>,
 ) -> Result<SseStream, AppError> {
+    // The CV editor spends tokens like the chat does, so it is behind the same gate.
+    super::auth::require_verified_email(&state, &user.id).await?;
     let resume = state
         .resumes()
         .find_one(doc! { "_id": &id, "user_id": &user.id })

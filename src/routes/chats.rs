@@ -137,6 +137,7 @@ async fn create(
     Extension(user): Extension<AuthUser>,
     Json(body): Json<CreateChatRequest>,
 ) -> ApiResult {
+    super::auth::require_verified_email(&state, &user.id).await?;
     let now = now_iso();
     // Unknown or absent means the CV flow, which is the original behaviour.
     let purpose = match body.purpose.as_deref() {
@@ -255,6 +256,9 @@ async fn send_message(
     Path(id): Path<String>,
     Json(body): Json<ChatMessageRequest>,
 ) -> Result<SseStream, AppError> {
+    // Checked before the stream opens, so the refusal arrives as an HTTP status the client
+    // can branch on rather than an error inside an SSE body.
+    super::auth::require_verified_email(&state, &user.id).await?;
     let chat = state
         .chats()
         .find_one(doc! { "_id": &id, "user_id": &user.id })

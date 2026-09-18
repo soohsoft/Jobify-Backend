@@ -323,6 +323,39 @@ pub struct MatchProfile {
     pub updated_at: String,
 }
 
+/// One live email verification code per user, `_id` = the user id so the uniqueness that
+/// "only the newest code can be used" needs comes from the primary key rather than an extra
+/// index. Only the hash is stored: the code itself exists once, in the email.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EmailOtpDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    pub email: String,
+    pub code_hash: String,
+    pub expires_at: String,
+    /// Wrong guesses so far. At `otp::OTP_MAX_ATTEMPTS` the code is dead and only a resend
+    /// can produce a working one.
+    #[serde(default)]
+    pub attempts: i32,
+    /// When a code was last sent, for the resend cooldown.
+    pub last_sent_at: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct VerifyEmailRequest {
+    pub code: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ResendOtpRequest {
+    /// Accepted but ignored: the account comes from the token, never from the body, so this
+    /// endpoint cannot be aimed at somebody else's mailbox.
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UserDoc {
     #[serde(rename = "_id")]

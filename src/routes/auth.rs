@@ -10,8 +10,10 @@ use serde_json::{Value, json};
 use crate::auth::{AuthUser, hash_password, issue_token, verify_password};
 use crate::error::AppError;
 use crate::models::{
-    AuthResult, LoginRequest, RegisterRequest, UpdateProfileRequest, UserDoc, UserResponse,
+    AuthResult, EmailOtpDoc, LoginRequest, RegisterRequest, ResendOtpRequest, UpdateProfileRequest,
+    UserDoc, UserResponse, VerifyEmailRequest,
 };
+use crate::otp;
 use crate::services::add_tokens;
 use crate::state::AppState;
 use crate::util::{now_iso, uuid_id};
@@ -24,10 +26,65 @@ pub fn public_router() -> Router<AppState> {
         .route("/auth/login", post(login))
 }
 
+/// Both verification routes are AUTHENTICATED, not keyed on an email in the body. Register
+/// and login already return a token for an unverified account, so the client always has
+/// one, and binding the code to the caller means this cannot be pointed at someone else's
+/// mailbox to probe or spam it.
+pub fn verification_router() -> Router<AppState> {
+    Router::new()
+        .route("/auth/verify-email", post(verify_email))
+        .route("/auth/resend-otp", post(resend_otp))
+}
+
 pub fn protected_router() -> Router<AppState> {
     Router::new()
         .route("/auth/me", get(me).patch(update_me))
         .route("/me/memory", get(get_memory))
+}
+
+/// Creates (or replaces) the account's code, stores only its hash, and mails it.
+///
+/// Replacing rather than accumulating is deliberate: with one row per user, an older code
+/// stops working the moment a newer one is issued, so a resend cannot leave two live keys.
+/// A mail failure is returned but never fatal to the caller's own operation — the account
+/// already exists by then, and the user can ask for another code.
+async fn issue_otp(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    name: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now();
+    let code = otp::generate_code();
+    let record = EmailOtpDoc {
+        id: user_id.to_string(),
+        user_id: user_id.to_string(),
+        email: email.to_string(),
+        code_hash: otp::hash_code(&code),
+        expires_at: otp::expires_at(now),
+        attempts: 0,
+        last_sent_at: now.to_rfc3339(),
+        created_at: now.to_rfc3339(),
+    };
+
+    state
+        .email_otps()
+        .replace_one(doc! { "_id": user_id }, &record)
+        .upsert(true)
+        .await?;
+
+    let (subject, body) = crate::mail::verification_email(&code, name);
+    if let Err(err) = state.mailer.send(email, &subject, &body).await {
+        // The code is stored either way, so a transient mail failure is recoverable with
+        // "resend" instead of leaving the account in a state it cannot leave.
+        tracing::warn!(email = %otp::mask_email(email), error = %err, "verification email could not be sent");
+        return Err(AppError::Internal(
+            "Your account was created, but the verification email could not be sent. Use resend in a moment."
+                .to_string(),
+        ));
+    }
+    tracing::info!(email = %otp::mask_email(email), "verification code sent");
+    Ok(())
 }
 
 async fn register(State(state): State<AppState>, Json(body): Json<RegisterRequest>) -> ApiResult {
@@ -76,11 +133,31 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         "user",
     )?;
 
+    // A failure to mail is reported in the response, not thrown: the account and its token
+    // are already valid, and losing them would be worse than an inbox the user has to
+    // re-request. The client shows the code screen either way and offers "resend".
+    let delivery = match issue_otp(&state, &id, &email, &user.name).await {
+        Ok(()) => {
+            json!({ "sent": true, "to": otp::mask_email(&email), "expires_in_minutes": otp::OTP_TTL_MINUTES })
+        }
+        Err(err) => json!({
+            "sent": false,
+            "to": otp::mask_email(&email),
+            "expires_in_minutes": otp::OTP_TTL_MINUTES,
+            "error": err.message().to_string()
+        }),
+    };
+
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "status": "success",
-            "data": AuthResult { user: to_user_response(&user), token }
+            "data": {
+                "user": to_user_response(&user),
+                "token": token,
+                "verification": delivery
+            },
+            "meta": { "email_verification_required": true }
         })),
     ))
 }
@@ -275,3 +352,155 @@ fn to_user_response(user: &UserDoc) -> UserResponse {
 
 #[allow(dead_code)]
 fn _unused_json(_: Value) {}
+
+/// Gate for the routes that spend money. An unverified email is how one person farms the
+/// signup grant with disposable addresses: each new address mints a fresh balance, and the
+/// token grant is worth real money (~$0.27 at current rates). Requiring a real mailbox
+/// before the balance can be spent makes that cost a mailbox per account.
+///
+/// This is checked against the database rather than a claim in the token, because the
+/// token outlives the verification: a user who confirms their code mid-session must be able
+/// to keep going without logging in again.
+pub async fn require_verified_email(state: &AppState, user_id: &str) -> Result<(), AppError> {
+    let user = state
+        .users()
+        .find_one(doc! { "_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    if user.email_verified {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(
+        "Confirm your email address to continue — we sent a 6-digit code to your inbox."
+            .to_string(),
+    ))
+}
+
+async fn verify_email(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<VerifyEmailRequest>,
+) -> ApiResult {
+    let code = body.code.trim();
+    if code.is_empty() {
+        return Err(AppError::BadRequest(
+            "Enter the 6-digit code from your email".to_string(),
+        ));
+    }
+
+    let stored = state
+        .email_otps()
+        .find_one(doc! { "_id": &user.id })
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "No code is waiting for this account. Request a new one.".to_string(),
+            )
+        })?;
+
+    let now = chrono::Utc::now();
+
+    // Already used: a verified account stays verified, and the old code must not work again.
+    if stored.attempts >= otp::OTP_MAX_ATTEMPTS {
+        return Err(AppError::TooManyRequests(
+            "Too many incorrect codes. Request a new one.".to_string(),
+        ));
+    }
+    if otp::is_expired(&stored.expires_at, now) {
+        return Err(AppError::BadRequest(
+            "That code has expired. Request a new one.".to_string(),
+        ));
+    }
+
+    if !otp::code_matches(&stored.code_hash, code) {
+        state
+            .email_otps()
+            .update_one(doc! { "_id": &user.id }, doc! { "$inc": { "attempts": 1 } })
+            .await?;
+        let left = otp::OTP_MAX_ATTEMPTS - (stored.attempts + 1);
+        return Err(AppError::BadRequest(if left > 0 {
+            format!("That code is not correct. {left} attempt(s) left.")
+        } else {
+            "That code is not correct, and this code is now used up. Request a new one.".to_string()
+        }));
+    }
+
+    state
+        .users()
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! { "$set": { "email_verified": true } },
+        )
+        .await?;
+    // Burn the code: a verified address is the point, and a live code is a live secret.
+    state
+        .email_otps()
+        .delete_one(doc! { "_id": &user.id })
+        .await?;
+
+    let user_doc = state
+        .users()
+        .find_one(doc! { "_id": &user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    tracing::info!(user_id = %user.id, "email verified");
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "user": to_user_response(&user_doc), "email_verified": true }
+        })),
+    ))
+}
+
+/// Sends a fresh code. Cooldown applies so this cannot be turned into a mail bomb aimed at
+/// an address the caller does not own.
+async fn resend_otp(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(_body): Json<ResendOtpRequest>,
+) -> ApiResult {
+    let user_doc = state
+        .users()
+        .find_one(doc! { "_id": &user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    if user_doc.email_verified {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "data": { "sent": false, "already_verified": true }
+            })),
+        ));
+    }
+
+    if let Some(existing) = state
+        .email_otps()
+        .find_one(doc! { "_id": &user.id })
+        .await?
+    {
+        let wait = otp::resend_wait_seconds(&existing.last_sent_at, chrono::Utc::now());
+        if wait > 0 {
+            return Err(AppError::TooManyRequests(format!(
+                "Please wait {wait} second(s) before requesting another code."
+            )));
+        }
+    }
+
+    issue_otp(&state, &user.id, &user_doc.email, &user_doc.name).await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": {
+                "sent": true,
+                "to": otp::mask_email(&user_doc.email),
+                "expires_in_minutes": otp::OTP_TTL_MINUTES
+            }
+        })),
+    ))
+}

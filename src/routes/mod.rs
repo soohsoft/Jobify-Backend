@@ -35,6 +35,7 @@ pub fn app(state: AppState) -> Router {
         .merge(payments::public_router());
 
     let protected = Router::new()
+        .merge(auth::verification_router())
         .merge(auth::protected_router())
         .merge(chats::router())
         .merge(resumes::protected_router())

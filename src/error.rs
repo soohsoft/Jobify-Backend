@@ -9,9 +9,16 @@ pub enum AppError {
     Unauthorized(String),
     NotFound(String),
     Conflict(String),
+    /// 403. Recognised, but not allowed to do this yet — deliberately distinct from 401, so
+    /// a client does not sign the user out over a state they can fix by verifying an email.
+    Forbidden(String),
     #[allow(dead_code)]
     NotImplemented(String),
     PaymentRequired(String),
+    /// 429. Rate limits are their own answer, not a bad request: the caller did nothing
+    /// wrong, they simply have to wait, and a client that cannot tell those apart either
+    /// retries into the limit or shows the user a validation error they cannot fix.
+    TooManyRequests(String),
     BadGateway(String),
     Internal(String),
 }
@@ -23,8 +30,10 @@ impl AppError {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             AppError::PaymentRequired(_) => StatusCode::PAYMENT_REQUIRED,
+            AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             AppError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -36,8 +45,10 @@ impl AppError {
             | AppError::Unauthorized(m)
             | AppError::NotFound(m)
             | AppError::Conflict(m)
+            | AppError::Forbidden(m)
             | AppError::NotImplemented(m)
             | AppError::PaymentRequired(m)
+            | AppError::TooManyRequests(m)
             | AppError::BadGateway(m)
             | AppError::Internal(m) => m,
         }

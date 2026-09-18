@@ -77,9 +77,21 @@ impl MailConfig {
         }
     }
 
-    /// No host means console mode, which is a deliberate state rather than a mistake.
+    /// Live SMTP needs host *and* credentials. Requiring all three is what stops a
+    /// half-filled .env — host stored, password not yet — from switching the app into a mode
+    /// where every send fails: signup would then mail nothing and log nothing, and the only
+    /// symptom would be a code that never arrives. Anything missing keeps console mode,
+    /// where the code is at least readable in the log.
     pub fn enabled(&self) -> bool {
         !self.host.trim().is_empty()
+            && !self.username.trim().is_empty()
+            && !self.password.trim().is_empty()
+    }
+
+    /// True when a host is configured but the credentials are not — a state worth saying out
+    /// loud, because it is almost always an unfinished .env rather than a deliberate choice.
+    pub fn awaiting_credentials(&self) -> bool {
+        !self.host.trim().is_empty() && !self.enabled()
     }
 }
 
@@ -135,7 +147,8 @@ impl Mailer {
             tracing::info!(
                 to = %to,
                 subject = %subject,
-                "mail (console mode, SMTP_HOST empty) — body follows on the next line"
+                awaiting_credentials = self.config.awaiting_credentials(),
+                "mail (console mode) — body follows on the next line"
             );
             for line in body.lines() {
                 tracing::info!("mail> {}", line);
@@ -156,11 +169,25 @@ impl Mailer {
             .body(body.to_string())
             .map_err(|e| format!("build message: {e}"))?;
 
-        self.transport()?
-            .send(message)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("smtp send to {to}: {e}"))
+        match self.transport()?.send(message).await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                // Outside production, the code still has to be findable — otherwise a wrong
+                // password means nobody can sign up and nothing says why. The body goes to
+                // the log in the same shape as console mode, clearly marked as a fallback.
+                if std::env::var("RUST_ENV").unwrap_or_default() != "production" {
+                    tracing::warn!(
+                        to = %to,
+                        error = %err,
+                        "SMTP send failed — logging the message so development is not blocked"
+                    );
+                    for line in body.lines() {
+                        tracing::warn!("mail-fallback> {}", line);
+                    }
+                }
+                Err(format!("smtp send to {to}: {err}"))
+            }
+        }
     }
 }
 
@@ -217,6 +244,36 @@ mod tests {
     fn no_host_means_console_mode() {
         assert!(!Mailer::new(config("")).is_live());
         assert!(Mailer::new(config("smtp.gmail.com")).is_live());
+    }
+
+    #[test]
+    fn host_without_credentials_stays_in_console_mode() {
+        // The exact half-filled state a .env passes through: host stored, app password not
+        // yet. Staying in console mode is what keeps signup working while that is true.
+        let mut no_password = config("smtp.gmail.com");
+        no_password.password = String::new();
+        let mailer = Mailer::new(no_password.clone());
+        assert!(!mailer.is_live(), "a blank password must not enable SMTP");
+        assert!(mailer.config().awaiting_credentials());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            assert!(mailer.send("a@b.com", "s", "code 123456").await.is_ok());
+        });
+
+        let mut no_username = config("smtp.gmail.com");
+        no_username.username = String::new();
+        assert!(!Mailer::new(no_username).is_live());
+    }
+
+    #[test]
+    fn awaiting_credentials_is_false_for_both_finished_states() {
+        assert!(!Mailer::new(config("")).config().awaiting_credentials());
+        assert!(
+            !Mailer::new(config("smtp.gmail.com"))
+                .config()
+                .awaiting_credentials()
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Two levels, mirroring how the list was specified:
 //! - [`CategoryGroup`] — the 8 top-level buckets
-//! - [`Category`] — the 53 selectable categories
+//! - [`Category`] — the 54 selectable categories
 //!
 //! **Slugs are the wire and database contract.** They are what the scraper
 //! sends in `JobInput.category` and what `GET /jobs?category=` matches
@@ -28,6 +28,7 @@ pub enum CategoryGroup {
 #[serde(rename_all = "snake_case")]
 pub enum Category {
     // Administration & Operations
+    ManagementAndLeadership,
     Administration,
     Operations,
     HumanResources,
@@ -98,6 +99,7 @@ pub enum Category {
 }
 
 const ADMINISTRATION_AND_OPERATIONS: &[Category] = &[
+    Category::ManagementAndLeadership,
     Category::Administration,
     Category::Operations,
     Category::HumanResources,
@@ -239,6 +241,7 @@ impl CategoryGroup {
 impl Category {
     /// Every category, in group order.
     pub const ALL: &'static [Category] = &[
+        Category::ManagementAndLeadership,
         Category::Administration,
         Category::Operations,
         Category::HumanResources,
@@ -297,6 +300,7 @@ impl Category {
     /// Stable machine slug (wire + database contract).
     pub fn slug(self) -> &'static str {
         match self {
+            Category::ManagementAndLeadership => "management_and_leadership",
             Category::Administration => "administration",
             Category::Operations => "operations",
             Category::HumanResources => "human_resources",
@@ -376,6 +380,7 @@ impl Category {
     /// Human-facing display name.
     pub fn label(self) -> &'static str {
         match self {
+            Category::ManagementAndLeadership => "Management & Leadership",
             Category::Administration => "Administration",
             Category::Operations => "Operations",
             Category::HumanResources => "Human Resources",
@@ -452,7 +457,8 @@ impl Category {
 
     pub fn group(self) -> CategoryGroup {
         match self {
-            Category::Administration
+            Category::ManagementAndLeadership
+            | Category::Administration
             | Category::Operations
             | Category::HumanResources
             | Category::LogisticsAndSupplyChain
@@ -540,7 +546,7 @@ mod tests {
     #[test]
     fn taxonomy_is_8_groups_and_53_categories() {
         assert_eq!(CategoryGroup::ALL.len(), 8);
-        assert_eq!(Category::ALL.len(), 53);
+        assert_eq!(Category::ALL.len(), 54);
     }
 
     #[test]

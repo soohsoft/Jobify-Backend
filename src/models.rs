@@ -397,6 +397,10 @@ pub struct UserDoc {
     pub external_id: Option<String>,
     #[serde(default)]
     pub email_verified: bool,
+    /// "en" or "so". Remembered so a returning user is not asked for their language on every
+    /// new chat — the whole point of the session state the assistant reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
     /// Settings-screen fields. Separate from the CV profile, which the
@@ -785,9 +789,15 @@ pub struct ChatDoc {
     pub title: String,
     #[serde(default)]
     pub status: String,
-    /// "cv" or "job_search". Decides which system prompt the interview uses.
+    /// "assistant" (the sequenced conversation: language, then intent, then jobs),
+    /// "job_search" or "cv". Decides which system prompt the turn uses.
     #[serde(default)]
     pub purpose: String,
+    /// "en" or "so" — the language chosen inside this conversation. Held on the chat so a
+    /// mid-conversation switch sticks, and copied from the account so a returning user is
+    /// not asked again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     #[serde(default)]
     pub turns: Vec<ChatTurn>,
     #[serde(default)]

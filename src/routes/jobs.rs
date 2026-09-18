@@ -605,7 +605,7 @@ async fn queued_job_ids(state: &AppState, user_id: &str) -> Result<Vec<String>, 
 /// The single place that decides what is eligible: the live-job rule, the profile's
 /// categories, the user's own rejections, and what has already been queued. The feed
 /// and the automated alert path both come through here, so they cannot disagree.
-async fn ranked_candidates(
+pub(crate) async fn ranked_candidates(
     state: &AppState,
     profile: &MatchProfile,
     exclusions: &AlertPrefs,

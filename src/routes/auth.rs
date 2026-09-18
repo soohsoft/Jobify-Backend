@@ -118,6 +118,7 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         provider: "password".to_string(),
         external_id: None,
         email_verified: false,
+        preferred_language: None,
         avatar_url: None,
         phone: None,
         headline: None,

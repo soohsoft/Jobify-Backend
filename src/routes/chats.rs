@@ -23,7 +23,9 @@ use crate::models::{
     ChatDoc, ChatMessageRequest, ChatTurn, CreateChatRequest, RESUME_TEMPLATES, ResumeDoc,
     SelectTemplateRequest, is_valid_template_id, tokens_to_usd,
 };
-use crate::prompts::{CHAT_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, JOB_SEARCH_SYSTEM_PROMPT};
+use crate::prompts::{
+    ASSISTANT_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, JOB_SEARCH_SYSTEM_PROMPT,
+};
 use crate::services::{add_tokens, credit_json, record_usage, reserve_credit, settle_credit};
 use crate::state::AppState;
 use crate::util::{merge_profile, now_iso, uuid_id};
@@ -139,10 +141,14 @@ async fn create(
 ) -> ApiResult {
     super::auth::require_verified_email(&state, &user.id).await?;
     let now = now_iso();
-    // Unknown or absent means the CV flow, which is the original behaviour.
+    // Unknown or absent means the SEQUENCED assistant — the flow the product is built
+    // around. It used to default to "cv", which is why every conversation behaved like a CV
+    // interview whatever the user wanted: the client never sends a purpose, so the default
+    // decided everything. "cv" is now opt-in, for the CV studio when it reopens.
     let purpose = match body.purpose.as_deref() {
         Some("job_search") => "job_search".to_string(),
-        _ => "cv".to_string(),
+        Some("cv") => "cv".to_string(),
+        _ => "assistant".to_string(),
     };
 
     // A CV interview starts from what the account knows, so a returning user is not
@@ -158,11 +164,19 @@ async fn create(
         memory::UserMemory::default()
     };
 
+    // The language is remembered on the account, so a returning user is not asked again.
+    let account = state.users().find_one(doc! { "_id": &user.id }).await?;
+    let language = account
+        .as_ref()
+        .and_then(|doc| doc.preferred_language.clone())
+        .filter(|value| value == "en" || value == "so");
+
     let chat = ChatDoc {
         id: uuid_id(),
         user_id: user.id.clone(),
         title: body.title.unwrap_or_else(|| "New resume chat".to_string()),
         purpose,
+        language,
         status: "collecting".to_string(),
         turns: Vec::new(),
         profile: memory.fields.clone(),
@@ -368,13 +382,30 @@ async fn handle_collecting(
     // nothing is appended.
     let memory = memory::load(state, user_id).await?;
 
-    let mut system = if chat.purpose == "job_search" {
-        // Which interview this is. A job seeker and a CV writer need different
-        // questions, and reusing the CV prompt asked job seekers for their full name.
-        JOB_SEARCH_SYSTEM_PROMPT.to_string()
-    } else {
-        CHAT_SYSTEM_PROMPT.to_string()
+    let mut system = match chat.purpose.as_str() {
+        // The sequenced conversation: language, then intent, then jobs. Unknown purposes land
+        // here too, so a chat created before this existed behaves like a new one.
+        "job_search" => JOB_SEARCH_SYSTEM_PROMPT.to_string(),
+        "cv" => CHAT_SYSTEM_PROMPT.to_string(),
+        _ => ASSISTANT_SYSTEM_PROMPT.to_string(),
     };
+    // What the assistant cannot see for itself: which language to speak, and whether the work
+    // area is already known. Both come from the database, so the prompt asks only for what is
+    // genuinely missing — the difference between a short conversation and an interrogation.
+    system.push_str("\n\n--- SESSION STATE ---\n");
+    system.push_str(&match chat.language.as_deref() {
+        Some("so") => "LANGUAGE: Somali. Reply in Somali.".to_string(),
+        Some(_) => "LANGUAGE: English. Reply in English.".to_string(),
+        None => "LANGUAGE: not chosen yet. Ask first, offering English or Somali.".to_string(),
+    });
+    system.push_str(&format!(
+        "\nWORK AREA: {}\n",
+        if memory.has_categories {
+            "known — do not ask about their background again"
+        } else {
+            "not known yet — ask the two questions in STEP 3"
+        }
+    ));
     if !memory.context.is_empty() {
         system.push_str("\n\n");
         system.push_str(&memory.context);
@@ -384,7 +415,11 @@ async fn handle_collecting(
     // the ACCOUNT's match profile, because that is where the extractor writes categories
     // (the chat's own profile is CV-shaped and never carries them). Once they are known
     // the block disappears — no interrogation, and no tokens spent asking again.
-    if !memory.has_categories {
+    // Only the legacy job_search prompt needs the ladder appended: it has no ordering of its
+    // own. The sequenced assistant carries the same areas inside its STEP 2/3, and appending
+    // this as well made it ask "what kind of work?" BEFORE it had asked whether the user
+    // wants jobs or a CV at all — two prompts, one of them winning at the wrong moment.
+    if chat.purpose == "job_search" && !memory.has_categories {
         system.push_str("\n\n");
         system.push_str(crate::prompts::OPENING_INTAKE_PROMPT);
     }
@@ -518,6 +553,19 @@ async fn handle_collecting(
         })
         .unwrap_or_default();
 
+    // The two fields that drive the sequence rather than the profile. Parsed here so the
+    // language sticks even on a turn that carried no other information ("Somali please").
+    let chosen_language = extracted
+        .get("language")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| *value == "en" || *value == "so")
+        .map(String::from);
+    let wants_jobs = extracted
+        .get("wantsJobs")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     let merged = merge_profile(&chat.profile, &incoming_profile);
     let next_status = if complete {
         "template_selection"
@@ -640,6 +688,26 @@ async fn handle_collecting(
             .await?;
     }
 
+    // The language lives in two places on purpose: the chat, so a switch sticks for this
+    // conversation, and the account, so the next chat does not ask again. Written on the turn
+    // that carried the choice ("Somali please") and nowhere else.
+    if let Some(language) = chosen_language.as_deref() {
+        state
+            .chats()
+            .update_one(
+                doc! { "_id": &chat.id },
+                doc! { "$set": { "language": language } },
+            )
+            .await?;
+        state
+            .users()
+            .update_one(
+                doc! { "_id": user_id },
+                doc! { "$set": { "preferred_language": language } },
+            )
+            .await?;
+    }
+
     // Keep the user's memory record current. Done here, at the end of a turn, because
     // this is the moment the service learns the most — and it means a fact survives even
     // if the user never saves a CV from this conversation or deletes the chat later.
@@ -664,6 +732,55 @@ async fn handle_collecting(
         }),
     )
     .await;
+    // The in-chat job list. The assistant only PROMISES ("I'll look for X"); only the server
+    // knows what is actually live, so the list is assembled here and travels as its own event.
+    // Sent only when the turn asked for jobs, or every turn would repaint the same list.
+    if wants_jobs {
+        let account = state.users().find_one(doc! { "_id": user_id }).await?;
+        let profile = account
+            .as_ref()
+            .and_then(|doc| doc.match_profile.clone())
+            .filter(|p| !p.categories.is_empty());
+
+        match profile {
+            Some(profile) => {
+                // Same eligibility rule as /jobs/match — one code path, so the list in the
+                // chat and the list on the screen cannot disagree about what is live.
+                let exclusions = account
+                    .as_ref()
+                    .and_then(|doc| doc.alerts.clone())
+                    .unwrap_or_default();
+                let scored =
+                    super::jobs::ranked_candidates(state, &profile, &exclusions, &[], 5).await?;
+                let list: Vec<Value> = scored
+                    .iter()
+                    .map(|(score, job)| json!({ "job": job, "matchScore": score }))
+                    .collect();
+                // An empty list is a real answer, not an error: 21 of the 53 categories have
+                // no live postings, so `reason` tells the assistant what to say about it.
+                send_sse(
+                    tx,
+                    "jobs",
+                    json!({
+                        "jobs": list,
+                        "total": list.len(),
+                        "categories": profile.categories,
+                        "reason": if list.is_empty() { "no_live_jobs" } else { "ok" }
+                    }),
+                )
+                .await;
+            }
+            None => {
+                send_sse(
+                    tx,
+                    "jobs",
+                    json!({ "jobs": [], "total": 0, "reason": "no_match_profile" }),
+                )
+                .await;
+            }
+        }
+    }
+
     send_sse(
         tx,
         "usage",

@@ -10,6 +10,7 @@ use mongodb::bson::{Document, doc};
 use mongodb::options::FindOptions;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
@@ -32,7 +33,10 @@ pub fn internal_router() -> Router<AppState> {
 }
 
 pub fn protected_router() -> Router<AppState> {
-    Router::new().route("/jobs/match", get(match_jobs))
+    Router::new()
+        .route("/jobs/match", get(match_jobs))
+        .route("/jobs/saved", get(list_saved))
+        .route("/jobs/{id}/save", post(save_job).delete(unsave_job))
 }
 
 /// How long a job with no closing date stays visible, counted from `posted_date` and
@@ -176,6 +180,127 @@ async fn get_by_id(State(state): State<AppState>, Path(id): Path<String>) -> Api
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": job })),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct SavedQuery {
+    #[serde(default = "default_page")]
+    page: u64,
+    #[serde(default = "default_saved_limit")]
+    limit: u64,
+}
+
+fn default_saved_limit() -> u64 {
+    30
+}
+
+/// The user's saved jobs, newest save first.
+///
+/// Deliberately NOT filtered by the live-job rule. That rule exists so nobody is
+/// shown a job that closed weeks ago while browsing; a job the user chose to keep
+/// is theirs, and dropping it from their own list is silent data loss — the one
+/// failure mode worse than showing an old listing. Each job carries its own
+/// `deadline` untouched (never derived), so a client can mark one that has closed.
+async fn list_saved(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<SavedQuery>,
+) -> ApiResult {
+    let page = query.page.max(1);
+    let limit = query.limit.clamp(1, 100);
+    let (rows, total) = paginate(
+        &state.saved_jobs(),
+        doc! { "user_id": &user.id },
+        page,
+        limit,
+        doc! { "created_at": -1, "_id": -1 },
+    )
+    .await?;
+
+    let ids: Vec<String> = rows.iter().map(|row| row.job_id.clone()).collect();
+    let mut cursor = state.jobs().find(doc! { "_id": { "$in": &ids } }).await?;
+    let mut by_id: HashMap<String, JobDoc> = HashMap::new();
+    while let Some(job) = cursor.try_next().await? {
+        by_id.insert(job.id.clone(), job);
+    }
+
+    // Walk the save order, not the job order: `$in` returns jobs in index order,
+    // which would quietly undo the newest-first sort the page just made.
+    let data: Vec<Value> = rows
+        .iter()
+        .filter_map(|row| {
+            by_id
+                .remove(&row.job_id)
+                .map(|job| json!({ "job": job, "savedAt": row.created_at }))
+        })
+        .collect();
+
+    let total_pages = (total as f64 / limit as f64).ceil() as u64;
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": data,
+            "meta": { "page": page, "limit": limit, "total": total, "totalPages": total_pages }
+        })),
+    ))
+}
+
+/// Save a job. Idempotent: saving twice is one save, and the response says which
+/// of the two happened so a client can report it honestly.
+async fn save_job(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    // A save of something that does not exist is a client bug, not an empty list
+    // to be discovered later from a saved row pointing at nothing.
+    if state.jobs().find_one(doc! { "_id": &id }).await?.is_none() {
+        return Err(AppError::NotFound("Job not found".to_string()));
+    }
+
+    let result = state
+        .saved_jobs()
+        .update_one(
+            doc! { "user_id": &user.id, "job_id": &id },
+            doc! { "$setOnInsert": {
+                "_id": uuid_id(),
+                "user_id": &user.id,
+                "job_id": &id,
+                "created_at": now_iso(),
+            } },
+        )
+        .upsert(true)
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "saved": true, "alreadySaved": result.upserted_id.is_none(), "job_id": id }
+        })),
+    ))
+}
+
+/// Remove a saved job. Also idempotent: removing something already gone succeeds,
+/// because the caller's intent ("this should not be saved") is satisfied either way.
+async fn unsave_job(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let result = state
+        .saved_jobs()
+        .delete_one(doc! { "user_id": &user.id, "job_id": &id })
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "saved": false, "removed": result.deleted_count > 0, "job_id": id }
+        })),
     ))
 }
 

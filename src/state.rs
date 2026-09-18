@@ -47,6 +47,11 @@ impl AppState {
         self.db.collection::<crate::models::ChatDoc>("chats")
     }
 
+    pub fn saved_jobs(&self) -> mongodb::Collection<crate::models::SavedJobDoc> {
+        self.db
+            .collection::<crate::models::SavedJobDoc>("saved_jobs")
+    }
+
     pub fn sources(&self) -> mongodb::Collection<crate::models::SourceConfig> {
         self.db.collection::<crate::models::SourceConfig>("sources")
     }

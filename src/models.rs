@@ -394,6 +394,22 @@ pub struct AlertPrefs {
     pub excluded_categories: Vec<String>,
 }
 
+/// One job saved by one user.
+///
+/// A collection rather than an array on the user document: the user document is
+/// read by every `/auth/me` and by every `/jobs` call that falls back to the
+/// profile location, and a list that grows with browsing does not belong in the
+/// document every request already reads.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedJobDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    pub job_id: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     pub name: String,

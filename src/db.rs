@@ -47,6 +47,27 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
+    // One row per (user, job). The unique index is what makes saving idempotent
+    // by construction: the second save upserts onto the same row instead of
+    // stacking a duplicate, so no client has to check first.
+    db.collection::<crate::models::SavedJobDoc>("saved_jobs")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "job_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // The saved list is always read newest-first for one user.
+    db.collection::<crate::models::SavedJobDoc>("saved_jobs")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
     // Matches the ingest upsert filter, so job upserts stay idempotent per source.
     db.collection::<crate::models::JobDoc>("jobs")
         .create_index(

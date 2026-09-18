@@ -170,7 +170,19 @@ impl Mailer {
             .map_err(|e| format!("build message: {e}"))?;
 
         match self.transport()?.send(message).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                // Outside production the body is echoed to the log even on success, because
+                // a developer testing the signup flow has no way to read the mailbox the
+                // mail went to. In production nothing is logged: the code is a secret and
+                // only the recipient should see it.
+                if std::env::var("RUST_ENV").unwrap_or_default() != "production" {
+                    tracing::info!(to = %to, "mail sent (dev: body logged below)");
+                    for line in body.lines() {
+                        tracing::info!("mail-dev> {}", line);
+                    }
+                }
+                Ok(())
+            }
             Err(err) => {
                 // Outside production, the code still has to be findable — otherwise a wrong
                 // password means nobody can sign up and nothing says why. The body goes to

@@ -240,6 +240,9 @@ async fn run_resume_edit(
         content: content.to_string(),
     });
 
+    // The CV profile below IS the context for this flow, and it is authoritative:
+    // it is what the user accepted. The account's memory block is deliberately NOT
+    // appended here — two sources for "full name" would leave the model choosing.
     let system_content = format!(
         "{}\n\nCurrent CV profile JSON:\n{}",
         RESUME_EDIT_SYSTEM_PROMPT,

@@ -7,6 +7,7 @@ mod config;
 mod db;
 mod error;
 mod llm;
+mod memory;
 mod middleware;
 mod models;
 mod prompts;

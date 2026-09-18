@@ -18,6 +18,7 @@ use crate::llm::{
     ChatMessage, ChatOptions, LlmClient, TokenUsage, estimate_prompt_tokens, estimate_tokens,
     reserve_estimate,
 };
+use crate::memory;
 use crate::models::{
     ChatDoc, ChatMessageRequest, ChatTurn, CreateChatRequest, RESUME_TEMPLATES, ResumeDoc,
     SelectTemplateRequest, is_valid_template_id, tokens_to_usd,
@@ -137,18 +138,33 @@ async fn create(
     Json(body): Json<CreateChatRequest>,
 ) -> ApiResult {
     let now = now_iso();
+    // Unknown or absent means the CV flow, which is the original behaviour.
+    let purpose = match body.purpose.as_deref() {
+        Some("job_search") => "job_search".to_string(),
+        _ => "cv".to_string(),
+    };
+
+    // A CV interview starts from what the account knows, so a returning user is not
+    // asked for their name and contact details again. Seeded at creation rather than
+    // in the prompt alone: the profile is the artifact, and a fact the assistant was
+    // told but the extractor never hears would be missing from the CV.
+    //
+    // Not done for job_search: that flow's profile is categories and keywords, not a
+    // person's contact details.
+    let memory = if purpose == "cv" {
+        memory::load(&state, &user.id).await?
+    } else {
+        memory::UserMemory::default()
+    };
+
     let chat = ChatDoc {
         id: uuid_id(),
         user_id: user.id.clone(),
         title: body.title.unwrap_or_else(|| "New resume chat".to_string()),
-        // Unknown or absent means the CV flow, which is the original behaviour.
-        purpose: match body.purpose.as_deref() {
-            Some("job_search") => "job_search".to_string(),
-            _ => "cv".to_string(),
-        },
+        purpose,
         status: "collecting".to_string(),
         turns: Vec::new(),
-        profile: json!({}),
+        profile: memory.fields.clone(),
         template_id: None,
         tokens_used: 0,
         created_at: now.clone(),
@@ -341,15 +357,28 @@ async fn handle_collecting(
     };
     chat.turns.push(user_turn);
 
-    let messages: Vec<ChatMessage> = std::iter::once(ChatMessage {
-        role: "system".to_string(),
+    // What the service already knows about this user, appended to the system prompt.
+    // Loaded per turn rather than cached on the chat: the account can be edited in
+    // between (Settings writes a name), and a stale memory is how the assistant
+    // insists on an old job title. Empty for a user with nothing known, in which case
+    // nothing is appended.
+    let memory = memory::load(state, user_id).await?;
+
+    let mut system = if chat.purpose == "job_search" {
         // Which interview this is. A job seeker and a CV writer need different
         // questions, and reusing the CV prompt asked job seekers for their full name.
-        content: if chat.purpose == "job_search" {
-            JOB_SEARCH_SYSTEM_PROMPT.to_string()
-        } else {
-            CHAT_SYSTEM_PROMPT.to_string()
-        },
+        JOB_SEARCH_SYSTEM_PROMPT.to_string()
+    } else {
+        CHAT_SYSTEM_PROMPT.to_string()
+    };
+    if !memory.context.is_empty() {
+        system.push_str("\n\n");
+        system.push_str(&memory.context);
+    }
+
+    let messages: Vec<ChatMessage> = std::iter::once(ChatMessage {
+        role: "system".to_string(),
+        content: system,
     })
     .chain(chat.turns.iter().map(|turn| ChatMessage {
         role: turn.role.clone(),

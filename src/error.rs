@@ -61,7 +61,7 @@ impl AppError {
             | AppError::BadGateway(m)
             | AppError::Internal(m) => m,
             AppError::InsufficientCredits { .. } => {
-                "You have run out of credits. Top up your balance to keep chatting."
+                "Your credit balance is too low for this message. Please recharge to continue."
             }
         }
     }
@@ -114,8 +114,8 @@ impl AppError {
                 "topUpPath": "/account",
                 // The sentence the chat puts in the bubble, so the wording lives here and
                 // not in three client surfaces.
-                "message": "You are out of credits for this message.",
-                "actionLabel": "Add credits",
+                "message": "Your credit balance is too low for this message. Please recharge to continue.",
+                "actionLabel": "Recharge",
             });
         }
 

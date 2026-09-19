@@ -28,7 +28,9 @@ use crate::models::{
 use crate::prompts::{
     ASSISTANT_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, JOB_SEARCH_SYSTEM_PROMPT,
 };
-use crate::services::{add_tokens, credit_json, record_usage, reserve_credit, settle_credit};
+use crate::services::{
+    add_tokens, credit_json, get_or_create_credit, record_usage, reserve_credit, settle_credit,
+};
 use crate::state::AppState;
 use crate::util::{merge_profile, now_iso, uuid_id};
 
@@ -299,6 +301,24 @@ async fn send_message(
         .find_one(doc! { "_id": &id, "user_id": &user.id })
         .await?
         .ok_or_else(|| AppError::NotFound("Chat not found".to_string()))?;
+
+    // Refuse BEFORE the stream opens when the balance cannot cover even the smallest possible
+    // turn. An empty balance used to produce a 200 whose stream died with an error event, so a
+    // client watching the status code saw a successful response and no reply, and could not tell
+    // a drained account from a broken one. Now it is a 402 carrying `code: "insufficient_credits"`.
+    //
+    // This holds nothing, so it cannot double-charge, and it deliberately does not try to price
+    // the real turn: that needs the full prompt, which is built inside the task, where the
+    // authoritative hold is taken. This only catches what is certain to fail.
+    let credit = get_or_create_credit(&state, &user.id).await?;
+    let floor = reserve_estimate(&[], state.config.llm_max_tokens_chat)
+        .saturating_add(reserve_estimate(&[], state.config.llm_max_tokens_extract));
+    if credit.tokens < floor {
+        return Err(AppError::InsufficientCredits {
+            balance_tokens: credit.tokens,
+            required_tokens: floor,
+        });
+    }
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
     let task_state = state.clone();

@@ -324,7 +324,9 @@ async fn send_message(
         };
 
         if let Err(err) = result {
-            send_sse(&tx, "error", json!({ "message": err.message() })).await;
+            // Structured, not just a sentence: a credit refusal carries the balance and the
+            // price so the chat can offer a top-up button instead of a dead end.
+            send_sse(&tx, "error", err.payload()).await;
         }
     });
 

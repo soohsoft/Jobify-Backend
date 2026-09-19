@@ -92,6 +92,15 @@ pub async fn reserve_credit(
     user_id: &str,
     amount: u64,
 ) -> Result<CreditDoc, AppError> {
+    // Read first so the refusal can carry the balance and the price. The deduct below is
+    // still the authority — a balance that moved between the two reads is refused there.
+    let credit = get_or_create_credit(state, user_id).await?;
+    if credit.tokens < amount {
+        return Err(AppError::InsufficientCredits {
+            balance_tokens: credit.tokens,
+            required_tokens: amount,
+        });
+    }
     deduct_tokens(state, user_id, amount).await
 }
 
@@ -297,8 +306,22 @@ mod tests {
     async fn reserve_beyond_the_balance_is_refused() {
         let state = fresh_state().await;
         add_tokens(&state, "user-u", 100).await.unwrap();
-        let result = reserve_credit(&state, "user-u", 101).await;
-        assert!(matches!(result, Err(AppError::PaymentRequired(_))));
+        // The refusal carries the numbers the client needs to offer a top-up, so it is the
+        // richer 402 rather than the message-only one.
+        match reserve_credit(&state, "user-u", 101).await {
+            Err(AppError::InsufficientCredits {
+                balance_tokens,
+                required_tokens,
+            }) => {
+                assert_eq!(balance_tokens, 100);
+                assert_eq!(required_tokens, 101);
+            }
+            Err(other) => panic!("expected InsufficientCredits, got {}", other.message()),
+            Ok(_) => panic!("expected the reservation to be refused"),
+        }
+        // A refused reservation must not touch the balance.
+        let credit = get_or_create_credit(&state, "user-u").await.unwrap();
+        assert_eq!(credit.tokens, 100);
     }
 
     #[tokio::test]

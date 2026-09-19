@@ -14,7 +14,7 @@ mod models;
 mod otp;
 mod prompts;
 mod routes;
-mod services;
+pub(crate) mod services;
 mod state;
 mod util;
 

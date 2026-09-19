@@ -238,6 +238,24 @@ impl CategoryGroup {
     }
 }
 
+/// Slugs of the OTHER categories in the same group as `slug`.
+///
+/// Used to widen a search that found nothing: a WASH officer's own category can be empty
+/// while its group (Humanitarian & Development) has live roles, and "here is what is close"
+/// beats an empty screen. Returns an empty list for an unknown slug.
+pub fn sibling_slugs(slug: &str) -> Vec<String> {
+    let Some(category) = Category::from_slug(slug) else {
+        return Vec::new();
+    };
+    category
+        .group()
+        .categories()
+        .iter()
+        .filter(|other| other.slug() != category.slug())
+        .map(|other| other.slug().to_string())
+        .collect()
+}
+
 impl Category {
     /// Every category, in group order.
     pub const ALL: &'static [Category] = &[

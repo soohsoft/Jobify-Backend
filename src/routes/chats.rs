@@ -12,6 +12,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use futures_util::TryStreamExt;
+
 use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::llm::{
@@ -741,44 +743,125 @@ async fn handle_collecting(
             .as_ref()
             .and_then(|doc| doc.match_profile.clone())
             .filter(|p| !p.categories.is_empty());
+        let exclusions = account
+            .as_ref()
+            .and_then(|doc| doc.alerts.clone())
+            .unwrap_or_default();
 
-        match profile {
+        // Read what the result line needs BEFORE the profile is moved into the match below.
+        let area_slugs: Vec<String> = profile
+            .as_ref()
+            .map(|p| p.categories.clone())
+            .unwrap_or_default();
+        let area_label = area_slugs
+            .first()
+            .and_then(|slug| crate::categories::Category::from_slug(slug))
+            .map(|category| category.label().to_string())
+            .unwrap_or_else(|| "your area".to_string());
+
+        let (list, reason, fallback) = match profile {
             Some(profile) => {
-                // Same eligibility rule as /jobs/match — one code path, so the list in the
-                // chat and the list on the screen cannot disagree about what is live.
-                let exclusions = account
-                    .as_ref()
-                    .and_then(|doc| doc.alerts.clone())
-                    .unwrap_or_default();
-                let scored =
+                let primary =
                     super::jobs::ranked_candidates(state, &profile, &exclusions, &[], 5).await?;
-                let list: Vec<Value> = scored
-                    .iter()
-                    .map(|(score, job)| json!({ "job": job, "matchScore": score }))
-                    .collect();
-                // An empty list is a real answer, not an error: 21 of the 53 categories have
-                // no live postings, so `reason` tells the assistant what to say about it.
-                send_sse(
-                    tx,
-                    "jobs",
-                    json!({
-                        "jobs": list,
-                        "total": list.len(),
-                        "categories": profile.categories,
-                        "reason": if list.is_empty() { "no_live_jobs" } else { "ok" }
-                    }),
-                )
-                .await;
+                if !primary.is_empty() {
+                    (primary, "ok".to_string(), false)
+                } else {
+                    // Nothing in their own work area. Widening to the rest of that GROUP is
+                    // the difference between an empty screen and something they can actually
+                    // apply for: a WASH officer's own category can be empty on a day when
+                    // Humanitarian & Development has fifteen live roles.
+                    let mut widened = Vec::new();
+                    let siblings: Vec<String> = profile
+                        .categories
+                        .iter()
+                        .flat_map(|slug| crate::categories::sibling_slugs(slug))
+                        .collect();
+                    if !siblings.is_empty() {
+                        let mut wider = profile.clone();
+                        wider.categories = siblings;
+                        widened =
+                            super::jobs::ranked_candidates(state, &wider, &exclusions, &[], 5)
+                                .await?;
+                    }
+
+                    if !widened.is_empty() {
+                        (widened, "no_live_jobs".to_string(), true)
+                    } else {
+                        // Still nothing anywhere near it. Rather than an empty screen, show
+                        // the newest live postings and say plainly that they are not a match.
+                        let found: Vec<crate::models::JobDoc> = state
+                            .jobs()
+                            .find(super::jobs::live_job_filter())
+                            .sort(doc! { "created_at": -1, "_id": -1 })
+                            .limit(5)
+                            .await?
+                            .try_collect()
+                            .await?;
+                        let newest: Vec<(f64, crate::models::JobDoc)> =
+                            found.into_iter().map(|job| (0.0_f64, job)).collect();
+                        if newest.is_empty() {
+                            (newest, "no_jobs_at_all".to_string(), true)
+                        } else {
+                            (newest, "no_live_jobs".to_string(), true)
+                        }
+                    }
+                }
             }
-            None => {
-                send_sse(
-                    tx,
-                    "jobs",
-                    json!({ "jobs": [], "total": 0, "reason": "no_match_profile" }),
-                )
-                .await;
+            None => (Vec::new(), "no_match_profile".to_string(), false),
+        };
+
+        // The assistant cannot see the result — it spoke before the search ran — so the result
+        // line is written HERE, deterministically, and appended to the same message. It is the
+        // difference between "the jobs are below" (a promise that can be empty) and the truth
+        // about what was found. Two languages, because the conversation has one.
+        let somali = chat.language.as_deref() == Some("so");
+        let total = list.len();
+        let area = area_label.clone();
+        let line = if total > 0 && !fallback {
+            if somali {
+                format!("Waxaan kuu helay {total} shaqo — waa kuwan.")
+            } else {
+                format!("I found {total} — here they are.")
             }
-        }
+        } else if total > 0 {
+            if somali {
+                format!(
+                    "Ma jiro wax {area} ah oo furan hadda, laakiin waa kuwan {total} oo ugu dhow."
+                )
+            } else {
+                format!("Nothing live in {area} today, so here are {total} close ones.")
+            }
+        } else if reason == "no_jobs_at_all" {
+            if somali {
+                "Ma jiro shaqo furan hadda. Dib u soo eeg dhawaan.".to_string()
+            } else {
+                "There are no live jobs right now. Do check back soon.".to_string()
+            }
+        } else {
+            if somali {
+                "Weli ma aanan ogeyn waxa aad rabto, markaa aan wax yar weydiiyo.".to_string()
+            } else {
+                "I don't know your area yet — let me ask you one thing first.".to_string()
+            }
+        };
+        send_sse(tx, "delta", json!({ "content": format!(" {line}") })).await;
+
+        let payload: Vec<Value> = list
+            .iter()
+            .map(|(score, job)| json!({ "job": job, "matchScore": score }))
+            .collect();
+        send_sse(
+            tx,
+            "jobs",
+            json!({
+                "jobs": payload,
+                "total": total,
+                "categories": area_slugs,
+                "reason": reason,
+                "fallback": fallback
+            }),
+        )
+        .await;
     }
 
     send_sse(

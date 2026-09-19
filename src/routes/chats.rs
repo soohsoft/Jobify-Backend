@@ -168,10 +168,29 @@ async fn create(
 
     // The language is remembered on the account, so a returning user is not asked again.
     let account = state.users().find_one(doc! { "_id": &user.id }).await?;
-    let language = account
-        .as_ref()
-        .and_then(|doc| doc.preferred_language.clone())
-        .filter(|value| value == "en" || value == "so");
+    // Priority: what the language tab sent, then what the account already chose, then English.
+    let language = body
+        .language
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| value == "en" || value == "so")
+        .map(String::from)
+        .or_else(|| {
+            account
+                .as_ref()
+                .and_then(|doc| doc.preferred_language.clone())
+                .filter(|value| value == "en" || value == "so")
+        });
+    // A tab choice is a standing preference, not just a property of this chat.
+    if let Some(chosen) = language.as_deref() {
+        state
+            .users()
+            .update_one(
+                doc! { "_id": &user.id },
+                doc! { "$set": { "preferred_language": chosen } },
+            )
+            .await?;
+    }
 
     let chat = ChatDoc {
         id: uuid_id(),
@@ -395,10 +414,11 @@ async fn handle_collecting(
     // area is already known. Both come from the database, so the prompt asks only for what is
     // genuinely missing — the difference between a short conversation and an interrogation.
     system.push_str("\n\n--- SESSION STATE ---\n");
-    system.push_str(&match chat.language.as_deref() {
-        Some("so") => "LANGUAGE: Somali. Reply in Somali.".to_string(),
-        Some(_) => "LANGUAGE: English. Reply in English.".to_string(),
-        None => "LANGUAGE: not chosen yet. Ask first, offering English or Somali.".to_string(),
+    // Always concrete. The client's language tab is the control, so there is no "not chosen"
+    // state to ask about — an unset value means English.
+    system.push_str(match chat.language.as_deref() {
+        Some("so") => "LANGUAGE: Somali. Write every reply in Somali.",
+        _ => "LANGUAGE: English. Write every reply in English.",
     });
     system.push_str(&format!(
         "\nWORK AREA: {}\n",

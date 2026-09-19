@@ -817,6 +817,10 @@ pub struct ChatDoc {
 
 #[derive(Deserialize)]
 pub struct CreateChatRequest {
+    /// "en" or "so" from the client's language tab. Optional: absent means English, and a
+    /// mid-chat switch is still picked up from what the user writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     /// What the conversation is for: "cv" (default) or "job_search". Selects the system

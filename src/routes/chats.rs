@@ -393,6 +393,70 @@ async fn handle_template_selection(
     Ok(())
 }
 
+/// A message that cannot change a profile: a greeting or an acknowledgement.
+///
+/// This is the one gate that lets the turn skip its second LLM call. The list is deliberately
+/// tiny and the veto list below is deliberately broad, because the failure modes are not
+/// symmetric: running the extractor needlessly costs tokens, while skipping a turn that
+/// mattered would silently lose a fact the user stated. Anything ambiguous runs the extractor.
+fn is_low_signal(text: &str) -> bool {
+    // Multi-word entries are split into their words ("thank" + "you"), because matching is
+    // per word: two words or fewer, every one of them in this list.
+    const SMALL_TALK: &[&str] = &[
+        "hi",
+        "hello",
+        "hey",
+        "thanks",
+        "thank",
+        "you",
+        "thx",
+        // "ok", "yes", "no" and friends are deliberately NOT here. They are answers to a
+        // question this agent just asked — "Would you like to see the jobs I have for finance?"
+        // is answered with "yes" — and the flag that decides whether jobs are shown is set by
+        // the extractor. Skipping it there would make the agent ask, the user agree, and
+        // nothing happen. A greeting cannot be an answer; a confirmation nearly always is.
+        "bye",
+        "salam",
+        "salaam",
+        "mahadsanid",
+        "fahmay",
+        "good",
+        "morning",
+        "evening",
+    ];
+    // Any of these substrings means the user is talking about their work or asking for
+    // something, so the turn carries information. Checked first, and as substrings, so
+    // "jobs", "jobless" and "CVs" are all caught.
+    const SIGNAL_WORDS: &[&str] = &[
+        "job",
+        "cv",
+        "resume",
+        "work",
+        "shaqo",
+        "help",
+        "apply",
+        "salary",
+        "experience",
+        "degree",
+    ];
+
+    let lowered = text.to_lowercase();
+    if SIGNAL_WORDS.iter().any(|word| lowered.contains(word)) {
+        return false;
+    }
+
+    let words: Vec<&str> = lowered
+        .split_whitespace()
+        // Punctuation carries no meaning here ("Thanks!" / "ok."), so it is trimmed rather
+        // than treated as another word.
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|word| !word.is_empty())
+        .collect();
+
+    // Empty is not low signal: a turn with no text at all is a bug upstream, not a greeting.
+    !words.is_empty() && words.len() <= 2 && words.iter().all(|word| SMALL_TALK.contains(word))
+}
+
 async fn handle_collecting(
     state: &AppState,
     user_id: &str,
@@ -478,14 +542,29 @@ async fn handle_collecting(
     }))
     .collect();
 
+    // Does this turn need the extractor at all? A greeting or an acknowledgement cannot
+    // change a profile, and the extractor would be handed the whole conversation to
+    // rediscover that. Two cases always run it regardless: the first assistant turn of a
+    // chat (before then there is no profile to speak of) and a user whose work area is
+    // still unknown (that is exactly the turn the extractor is there to fill in).
+    // `memory.has_categories` reads the ACCOUNT's match profile, which is where the
+    // extractor writes categories — the chat's own profile is CV-shaped and never has them.
+    let first_assistant_turn = !chat.turns.iter().any(|turn| turn.role == "assistant");
+    let skip_extraction = is_low_signal(content) && memory.has_categories && !first_assistant_turn;
+
     // Hold the worst case for BOTH calls of this turn before anything is sent: the
     // reply, and the extraction that runs on the same conversation afterwards. The
     // extraction prompt is the conversation again plus the reply, so counting the
     // chat prompt a second time is a deliberate over-estimate — the unused part is
     // refunded by settle_credit. Holding here is what makes the 402 land before the
-    // user sees any output.
+    // user sees any output. A skipped extraction holds only the reply, so the smaller
+    // turn is not reserved for at the price of the larger one either.
     let reserved = reserve_estimate(&messages, state.config.llm_max_tokens_chat).saturating_add(
-        reserve_estimate(&messages, state.config.llm_max_tokens_extract),
+        if skip_extraction {
+            0
+        } else {
+            reserve_estimate(&messages, state.config.llm_max_tokens_extract)
+        },
     );
     reserve_credit(state, user_id, reserved).await?;
 
@@ -536,48 +615,63 @@ async fn handle_collecting(
         .map(|turn| json!({ "role": turn.role, "content": turn.content }))
         .collect();
 
-    let extract_messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            // The candidate list rides in the user message rather than the prompt
-            // constant, so the slugs stay defined once in categories.rs and the
-            // prompt cannot drift away from the taxonomy.
-            content: format!(
-                "{}\n\nCandidate categories for \"categories\" (use these slugs exactly):\n{}",
-                EXTRACT_SYSTEM_PROMPT,
-                crate::categories::Category::prompt_list()
-            ),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: serde_json::to_string(&json!({ "conversation": conversation }))
-                .map_err(|err| AppError::BadGateway(err.to_string()))?,
-        },
-    ];
+    // A skipped extraction is indistinguishable from one that returned nothing new:
+    // `extracted` is empty, so the profile merges to itself, no language or wantsJobs flag is
+    // set and the usage below carries only the reply. Nothing downstream of this reads which
+    // path ran, which is what stops a skipped turn from dropping a job list or a settlement.
+    let (extracted, extraction_usage) = if skip_extraction {
+        (json!({}), TokenUsage::default())
+    } else {
+        // The candidate list rides in the system message rather than the prompt constant, so
+        // the slugs stay defined once in categories.rs and the prompt cannot drift away from
+        // the taxonomy. The labels are only worth their tokens while the work area is unknown
+        // — the condition the system prompt above uses to decide whether to ask about it.
+        let candidate_list = if memory.has_categories {
+            crate::categories::Category::prompt_list_slugs()
+        } else {
+            crate::categories::Category::prompt_list()
+        };
 
-    let extraction = llm
-        .chat(
-            &extract_messages,
-            ChatOptions {
-                temperature: 0.0,
-                json_mode: true,
-                max_tokens: state.config.llm_max_tokens_extract,
+        let extract_messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: format!(
+                    "{}\n\nCandidate categories for \"categories\" (use these slugs exactly):\n{}",
+                    EXTRACT_SYSTEM_PROMPT, candidate_list
+                ),
             },
-        )
-        .await;
-    let extraction = match extraction {
-        Ok(result) => result,
-        Err(err) => {
-            // The reply was already streamed, so it is charged for what it cost
-            // rather than refunded. Only the extraction is lost.
-            let stream_usage = stream_result.usage.unwrap_or_default();
-            let _ = record_usage(state, user_id, &stream_usage).await;
-            let _ = settle_credit(state, user_id, reserved, stream_usage.total_tokens).await;
-            return Err(err);
-        }
-    };
+            ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::to_string(&json!({ "conversation": conversation }))
+                    .map_err(|err| AppError::BadGateway(err.to_string()))?,
+            },
+        ];
 
-    let extracted = crate::util::extract_json(&extraction.content)?;
+        let extraction = llm
+            .chat(
+                &extract_messages,
+                ChatOptions {
+                    temperature: 0.0,
+                    json_mode: true,
+                    max_tokens: state.config.llm_max_tokens_extract,
+                },
+            )
+            .await;
+        let extraction = match extraction {
+            Ok(result) => result,
+            Err(err) => {
+                // The reply was already streamed, so it is charged for what it cost
+                // rather than refunded. Only the extraction is lost.
+                let stream_usage = stream_result.usage.unwrap_or_default();
+                let _ = record_usage(state, user_id, &stream_usage).await;
+                let _ = settle_credit(state, user_id, reserved, stream_usage.total_tokens).await;
+                return Err(err);
+            }
+        };
+
+        let extracted = crate::util::extract_json(&extraction.content)?;
+        (extracted, extraction.usage.unwrap_or_default())
+    };
     let incoming_profile = extracted
         .get("profile")
         .cloned()
@@ -656,7 +750,8 @@ async fn handle_collecting(
     chat.updated_at = now_iso();
 
     let stream_usage = stream_result.usage.unwrap_or_default();
-    let extraction_usage = extraction.usage.unwrap_or_default();
+    // `extraction_usage` is zero on a skipped turn, so a turn that made one call is charged
+    // for one call — the saving is real in the ledger, not only in the request count.
     let mut usage = TokenUsage {
         prompt_tokens: stream_usage.prompt_tokens + extraction_usage.prompt_tokens,
         completion_tokens: stream_usage.completion_tokens + extraction_usage.completion_tokens,
@@ -991,4 +1086,78 @@ async fn finalize_chat(
         .await?;
 
     Ok(resume)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_low_signal;
+
+    #[test]
+    fn greetings_and_acknowledgements_are_low_signal() {
+        for text in [
+            "Hi",
+            "hi",
+            "Hi!",
+            "hello",
+            "Hey.",
+            "thanks",
+            "Thanks!",
+            "thank you",
+            "thx",
+            "bye",
+            "salam",
+            "salaam",
+            "mahadsanid",
+            "fahmay",
+            "good morning",
+            "evening",
+        ] {
+            assert!(is_low_signal(text), "{text:?} should skip the extractor");
+        }
+    }
+
+    #[test]
+    fn confirmations_run_the_extractor_because_they_answer_a_question() {
+        // The agent offers "would you like to see the jobs I have for X?" and the user agrees.
+        // The extractor is what turns that agreement into a `jobs` event, so these must never
+        // be treated as noise however short they are.
+        for text in ["yes", "ok", "okay", "yeah", "no", "yebo", "haa"] {
+            assert!(
+                !is_low_signal(text),
+                "{text:?} answers a question and must run the extractor"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_about_work_is_low_signal_free() {
+        for text in [
+            "show me jobs",
+            "shaqo",
+            "Shaqo ma rabtaa?",
+            "I am an IT manager",
+            "cv",
+            "resume",
+            "work",
+            "help",
+            "apply",
+            "salary",
+            "experience",
+            "degree",
+            // A greeting with a request attached is a request, not a greeting.
+            "Hi, show me jobs",
+            "ok thanks, any work in Health?",
+        ] {
+            assert!(!is_low_signal(text), "{text:?} must run the extractor");
+        }
+    }
+
+    #[test]
+    fn empty_and_multi_word_messages_run_the_extractor() {
+        assert!(!is_low_signal(""));
+        assert!(!is_low_signal("   "));
+        assert!(!is_low_signal("ok thanks again"));
+        // Two words are allowed only if BOTH are small talk.
+        assert!(!is_low_signal("thanks Hassan"));
+    }
 }

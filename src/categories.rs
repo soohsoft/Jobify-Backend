@@ -216,6 +216,19 @@ impl Category {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// The same list with the labels stripped: one bare slug per line.
+    ///
+    /// The labels exist to help a reader tell 28 similar names apart. The extractor only ever
+    /// has to COPY a slug it was given, so once the account already has a work area the labels
+    /// are overhead paid on every remaining turn of the chat — which is the bulk of them.
+    pub fn prompt_list_slugs() -> String {
+        Category::ALL
+            .iter()
+            .map(|category| category.slug())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Slugs of the OTHER categories in the same group as `slug`.
@@ -284,6 +297,26 @@ mod tests {
         assert!(list.contains("- health — Health"));
         assert!(list.contains("- environment_and_climate — Environment & Climate"));
         assert!(list.contains("- wash — WASH (Water, Sanitation & Hygiene)"));
+    }
+
+    #[test]
+    fn prompt_list_slugs_is_the_same_list_without_the_labels() {
+        let list = Category::prompt_list_slugs();
+        assert_eq!(list.lines().count(), 28);
+        // Every line must be a slug the taxonomy can resolve, and nothing else — a stray
+        // label here would be silently re-sent on every turn of every established chat.
+        for line in list.lines() {
+            assert!(!line.contains(' '), "{line} is not a bare slug");
+            assert!(
+                Category::from_slug(line).is_some(),
+                "{line} does not resolve to a category"
+            );
+        }
+        assert!(
+            Category::prompt_list()
+                .lines()
+                .all(|line| line.contains(" — "))
+        );
     }
 
     #[test]

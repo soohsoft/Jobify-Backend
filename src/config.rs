@@ -33,6 +33,11 @@ pub struct Config {
     /// with a 402 and the product is dead on arrival, so every new user starts with a
     /// working balance. Applied only at creation.
     pub signup_grant_tokens: u64,
+    /// Enables `POST /credits/topup`, which credits a balance without a payment provider. Unset
+    /// means the route does not exist. It is deliberately opt-in: an endpoint that adds money to
+    /// an account is a free-money hole if it ever reaches production by accident, and the safe
+    /// default has to be "closed".
+    pub dev_topup_key: Option<String>,
 }
 
 impl Config {
@@ -66,6 +71,10 @@ impl Config {
             llm_max_tokens_extract: env_u64("LLM_MAX_TOKENS_EXTRACT", 2_000),
             chat_session_token_budget: env_u64("CHAT_SESSION_TOKEN_BUDGET", 150_000),
             signup_grant_tokens: env_u64("SIGNUP_GRANT_TOKENS", 300_000),
+            dev_topup_key: std::env::var("DEV_TOPUP_KEY")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         }
     }
 

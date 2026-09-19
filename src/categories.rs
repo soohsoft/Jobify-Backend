@@ -37,9 +37,27 @@ pub enum Category {
     LogisticsAndSupplyChain,
     TelecommunicationsAndMedia,
     LegalAndRegulatoryServices,
-    EnvironmentWaterAndSanitation,
+    /// Environment and climate work. WASH used to live inside this variant; it now has its own
+    /// category, because "Environment, Water & Sanitation (WASH)" and a humanitarian "WASH"
+    /// would otherwise both claim every water and sanitation posting.
+    EnvironmentAndClimate,
     ManufacturingAndProduction,
     HospitalityAndTourism,
+
+    // Humanitarian & development
+    HumanRightsAndAdvocacy,
+    HumanitarianAidAndEmergencyRelief,
+    PeacebuildingAndSecurity,
+    GenderEqualityAndSocialInclusion,
+    YouthAndChildDevelopment,
+    MigrationRefugeesAndDisplaced,
+    ArtsCultureAndHeritage,
+    GovernanceDemocracyAndCivicParticipation,
+    Protection,
+    LivelihoodsAndResilience,
+    FoodSecurity,
+    ShelterAndNonFoodItems,
+    Wash,
 }
 
 impl CategoryGroup {
@@ -88,9 +106,22 @@ impl Category {
         Category::LogisticsAndSupplyChain,
         Category::TelecommunicationsAndMedia,
         Category::LegalAndRegulatoryServices,
-        Category::EnvironmentWaterAndSanitation,
+        Category::EnvironmentAndClimate,
         Category::ManufacturingAndProduction,
         Category::HospitalityAndTourism,
+        Category::HumanRightsAndAdvocacy,
+        Category::HumanitarianAidAndEmergencyRelief,
+        Category::PeacebuildingAndSecurity,
+        Category::GenderEqualityAndSocialInclusion,
+        Category::YouthAndChildDevelopment,
+        Category::MigrationRefugeesAndDisplaced,
+        Category::ArtsCultureAndHeritage,
+        Category::GovernanceDemocracyAndCivicParticipation,
+        Category::Protection,
+        Category::LivelihoodsAndResilience,
+        Category::FoodSecurity,
+        Category::ShelterAndNonFoodItems,
+        Category::Wash,
     ];
 
     /// Stable machine slug (wire + database contract).
@@ -108,7 +139,22 @@ impl Category {
             Category::LogisticsAndSupplyChain => "logistics_and_supply_chain",
             Category::TelecommunicationsAndMedia => "telecommunications_and_media",
             Category::LegalAndRegulatoryServices => "legal_and_regulatory_services",
-            Category::EnvironmentWaterAndSanitation => "environment_water_and_sanitation",
+            Category::EnvironmentAndClimate => "environment_and_climate",
+            Category::HumanRightsAndAdvocacy => "human_rights_and_advocacy",
+            Category::HumanitarianAidAndEmergencyRelief => "humanitarian_aid_and_emergency_relief",
+            Category::PeacebuildingAndSecurity => "peacebuilding_and_security",
+            Category::GenderEqualityAndSocialInclusion => "gender_equality_and_social_inclusion",
+            Category::YouthAndChildDevelopment => "youth_and_child_development",
+            Category::MigrationRefugeesAndDisplaced => "migration_refugees_and_displaced",
+            Category::ArtsCultureAndHeritage => "arts_culture_and_heritage",
+            Category::GovernanceDemocracyAndCivicParticipation => {
+                "governance_democracy_and_civic_participation"
+            }
+            Category::Protection => "protection",
+            Category::LivelihoodsAndResilience => "livelihoods_and_resilience",
+            Category::FoodSecurity => "food_security",
+            Category::ShelterAndNonFoodItems => "shelter_and_non_food_items",
+            Category::Wash => "wash",
             Category::ManufacturingAndProduction => "manufacturing_and_production",
             Category::HospitalityAndTourism => "hospitality_and_tourism",
         }
@@ -129,7 +175,22 @@ impl Category {
             Category::LogisticsAndSupplyChain => "Logistics & Supply Chain",
             Category::TelecommunicationsAndMedia => "Telecommunications & Media",
             Category::LegalAndRegulatoryServices => "Legal & Regulatory Services",
-            Category::EnvironmentWaterAndSanitation => "Environment, Water & Sanitation (WASH)",
+            Category::EnvironmentAndClimate => "Environment & Climate",
+            Category::HumanRightsAndAdvocacy => "Human Rights, Civil Rights & Advocacy",
+            Category::HumanitarianAidAndEmergencyRelief => "Humanitarian Aid & Emergency Relief",
+            Category::PeacebuildingAndSecurity => "Peacebuilding, Conflict Resolution & Security",
+            Category::GenderEqualityAndSocialInclusion => "Gender Equality & Social Inclusion",
+            Category::YouthAndChildDevelopment => "Youth & Child Development",
+            Category::MigrationRefugeesAndDisplaced => "Migration, Refugees & Displaced Persons",
+            Category::ArtsCultureAndHeritage => "Arts, Culture & Heritage Preservation",
+            Category::GovernanceDemocracyAndCivicParticipation => {
+                "Governance, Democracy & Civic Participation"
+            }
+            Category::Protection => "Protection",
+            Category::LivelihoodsAndResilience => "Livelihoods & Resilience",
+            Category::FoodSecurity => "Food Security",
+            Category::ShelterAndNonFoodItems => "Shelter & Non-Food Items (NFIs)",
+            Category::Wash => "WASH (Water, Sanitation & Hygiene)",
             Category::ManufacturingAndProduction => "Manufacturing & Production",
             Category::HospitalityAndTourism => "Hospitality & Tourism",
         }
@@ -173,7 +234,7 @@ mod tests {
     #[test]
     fn taxonomy_is_15_categories_in_one_group() {
         assert_eq!(CategoryGroup::ALL.len(), 1);
-        assert_eq!(Category::ALL.len(), 15);
+        assert_eq!(Category::ALL.len(), 28);
     }
 
     #[test]
@@ -207,18 +268,22 @@ mod tests {
             Category::from_slug("public_health_and_healthcare_management"),
             None
         );
-        assert_eq!(Category::from_slug("wash"), None);
+        // `wash` is a category again, as a humanitarian one — the point of the split.
+        assert_eq!(Category::from_slug("wash"), Some(Category::Wash));
+        assert_eq!(
+            Category::from_slug("environment_water_and_sanitation"),
+            None
+        );
         assert_eq!(Category::from_slug("computer_tecnology"), None);
     }
 
     #[test]
     fn prompt_list_carries_one_line_per_category() {
         let list = Category::prompt_list();
-        assert_eq!(list.lines().count(), 15);
+        assert_eq!(list.lines().count(), 28);
         assert!(list.contains("- health — Health"));
-        assert!(list.contains(
-            "- environment_water_and_sanitation — Environment, Water & Sanitation (WASH)"
-        ));
+        assert!(list.contains("- environment_and_climate — Environment & Climate"));
+        assert!(list.contains("- wash — WASH (Water, Sanitation & Hygiene)"));
     }
 
     #[test]

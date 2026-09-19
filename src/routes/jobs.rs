@@ -749,12 +749,17 @@ mod tests {
     #[test]
     fn trims_surrounding_whitespace() {
         assert_eq!(
-            canonical_category(&raw("  environment_water_and_sanitation  ")),
-            Some("environment_water_and_sanitation")
+            canonical_category(&raw("  environment_and_climate  ")),
+            Some("environment_and_climate")
         );
-        // An old, finer slug must NOT resolve: it has to be dropped rather than absorbed into
-        // whichever broad category happens to be nearby.
-        assert_eq!(canonical_category(&raw("wash")), None);
+        // The humanitarian WASH category is its own thing now.
+        assert_eq!(canonical_category(&raw("wash")), Some("wash"));
+        // A slug from the pre-broad taxonomy must NOT resolve, or a stale value would be
+        // absorbed into whichever category happens to be nearby.
+        assert_eq!(
+            canonical_category(&raw("public_health_and_healthcare_management")),
+            None
+        );
     }
 
     #[test]
@@ -773,7 +778,15 @@ mod tests {
 
     #[test]
     fn slugs_are_strictly_lowercase() {
-        assert_eq!(canonical_category(&raw("WASH")), None);
+        // A label is not a slug, even when it reads like one — only the snake_case value passes.
+        assert_eq!(
+            canonical_category(&raw("Water, Sanitation & Hygiene")),
+            None
+        );
+        assert_eq!(
+            canonical_category(&raw("Humanitarian Aid and Emergency Relief")),
+            None
+        );
     }
 
     // The visibility rule is the one thing standing between a user and a job that

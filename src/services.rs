@@ -166,12 +166,28 @@ async fn drain_credit(state: &AppState, user_id: &str) -> Result<CreditDoc, AppE
 }
 
 pub fn credit_json(credit: &CreditDoc) -> serde_json::Value {
+    // A balance is never negative, and it is never reported as one. `tokens` is unsigned and
+    // the ledger's decrement is guarded, so an overspend drains the balance to zero and the
+    // shortfall is recorded as debt — there is no negative arithmetic for a client to render.
+    // The max(0.0) states that guarantee in the one place a client reads a balance, so no
+    // future change to the arithmetic can leak a minus sign into a UI.
+    //
+    // Rounded to 6 decimals: the raw division produces 17-digit floats in JSON, which is noise
+    // for a currency amount, and it used to arrive in the response verbatim.
+    let balance_usd = round_usd(tokens_to_usd(credit.tokens).max(0.0));
     serde_json::json!({
-        "balanceUsd": tokens_to_usd(credit.tokens),
+        "balanceUsd": balance_usd,
         "tokens": credit.tokens,
         "debtTokens": credit.debt_tokens,
+        "debtUsd": round_usd(tokens_to_usd(credit.debt_tokens).max(0.0)),
         "currency": crate::models::CREDIT_CURRENCY,
     })
+}
+
+/// Currency amounts go out at 6 decimals; the UI formats to 2. Keeps float noise out of the
+/// API without hiding the small amounts a cheap turn actually costs.
+pub fn round_usd(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
 }
 
 pub async fn record_usage(
@@ -300,6 +316,39 @@ mod tests {
         let second = get_or_create_credit(&state, "user-e").await.unwrap();
         assert_eq!(first.id, second.id);
         assert_eq!(first.tokens, 0);
+    }
+
+    #[test]
+    fn a_balance_is_never_reported_as_negative() {
+        // Overspend drains to zero and records debt, so the number a client renders floors at
+        // 0.00 and the shortfall shows up separately instead of as a negative balance.
+        let drained = CreditDoc {
+            id: "c".to_string(),
+            user_id: "u".to_string(),
+            tokens: 0,
+            debt_tokens: 5_836,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let json = credit_json(&drained);
+        assert_eq!(json["balanceUsd"], serde_json::json!(0.0));
+        assert!(json["balanceUsd"].as_f64().unwrap() >= 0.0);
+        assert_eq!(json["tokens"], serde_json::json!(0));
+        assert_eq!(json["debtTokens"], serde_json::json!(5_836));
+        assert!(json["debtUsd"].as_f64().unwrap() > 0.0);
+
+        // and nothing leaks float noise: the 17-digit division is rounded
+        let funded = CreditDoc {
+            id: "c".to_string(),
+            user_id: "u".to_string(),
+            tokens: 297_414,
+            debt_tokens: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let balance = credit_json(&funded)["balanceUsd"].as_f64().unwrap();
+        assert_eq!(balance, 0.270376);
+        assert_eq!(json["debtUsd"].as_f64().unwrap(), 0.005305);
     }
 
     #[tokio::test]

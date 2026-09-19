@@ -741,20 +741,26 @@ mod tests {
     #[test]
     fn accepts_a_known_slug() {
         assert_eq!(
-            canonical_category(&raw("software_engineering_and_web_development")),
-            Some("software_engineering_and_web_development")
+            canonical_category(&raw("computer_technology")),
+            Some("computer_technology")
         );
     }
 
     #[test]
     fn trims_surrounding_whitespace() {
-        assert_eq!(canonical_category(&raw("  wash  ")), Some("wash"));
+        assert_eq!(
+            canonical_category(&raw("  environment_water_and_sanitation  ")),
+            Some("environment_water_and_sanitation")
+        );
+        // An old, finer slug must NOT resolve: it has to be dropped rather than absorbed into
+        // whichever broad category happens to be nearby.
+        assert_eq!(canonical_category(&raw("wash")), None);
     }
 
     #[test]
     fn rejects_unknown_and_free_text() {
         assert_eq!(canonical_category(&raw("totally_made_up_slug")), None);
-        assert_eq!(canonical_category(&raw("Software Engineering")), None);
+        assert_eq!(canonical_category(&raw("Computer Technology")), None);
         assert_eq!(canonical_category(&raw("IT & Networking")), None);
     }
 

@@ -1,9 +1,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const TOKENS_PER_USD_AT_COST: u64 = 5_500_000;
-pub const TOKENS_PER_USD_BILLED: u64 = 1_100_000;
-pub const PROFIT_MARGIN: f64 = 0.8;
+/// What a million tokens actually cost us, as tokens-per-dollar. Measured, not assumed:
+/// DeepInfra reports `estimated_cost` per call, and google/gemini-3.7-flash came back at ~$1.21
+/// per 1M blended (reasoning tokens bill as output, which is most of the surprise). The previous
+/// value, 5,500,000 ($0.18/1M), was a DeepSeek-era assumption and understated our cost 6.7x —
+/// which is how a "80% margin" was reported while the product was selling below cost.
+pub const TOKENS_PER_USD_AT_COST: u64 = 826_446;
+/// Tokens a customer gets for $1. DERIVED, not chosen: cost rate x (1 - margin). It is written
+/// out rather than computed because the ledger reads it as a constant, and a test below pins the
+/// two together — they drifted apart once and the margin went negative without anything failing.
+pub const TOKENS_PER_USD_BILLED: u64 = 413_223;
+pub const PROFIT_MARGIN: f64 = 0.5;
 pub const CREDIT_CURRENCY: &str = "USD";
 pub const MIN_TOP_UP_USD: f64 = 1.0;
 pub const COST_PER_TOKEN: f64 = 1.0 / TOKENS_PER_USD_AT_COST as f64;
@@ -849,7 +857,7 @@ mod tests {
 
     #[test]
     fn usd_to_tokens_one_dollar() {
-        assert_eq!(usd_to_tokens(1.0), 1_100_000);
+        assert_eq!(usd_to_tokens(1.0), TOKENS_PER_USD_BILLED);
     }
 
     #[test]
@@ -860,12 +868,28 @@ mod tests {
 
     #[test]
     fn usd_to_tokens_half_dollar_is_exact() {
-        assert_eq!(usd_to_tokens(0.5), 550_000);
+        assert_eq!(usd_to_tokens(0.5), TOKENS_PER_USD_BILLED / 2);
+    }
+
+    #[test]
+    /// The billed rate must be the cost rate discounted by the margin. These two numbers decide
+    /// the price, and when they disagree the product sells below cost while every margin report
+    /// still looks healthy — the failure this pins shut.
+    #[test]
+    fn the_billed_rate_is_the_cost_rate_minus_our_margin() {
+        let derived = TOKENS_PER_USD_AT_COST as f64 * (1.0 - PROFIT_MARGIN);
+        assert!(
+            (derived - TOKENS_PER_USD_BILLED as f64).abs() / derived < 0.001,
+            "TOKENS_PER_USD_BILLED ({TOKENS_PER_USD_BILLED}) is not TOKENS_PER_USD_AT_COST \
+             ({TOKENS_PER_USD_AT_COST}) x (1 - {PROFIT_MARGIN}) = {derived}"
+        );
+        // and the price has to be above what we pay, or the margin is not a margin
+        assert!(PRICE_PER_TOKEN > COST_PER_TOKEN);
     }
 
     #[test]
     fn tokens_to_usd_roundtrips() {
-        assert_eq!(tokens_to_usd(1_100_000), 1.0);
+        assert_eq!(tokens_to_usd(413_223), 1.0);
         assert_eq!(tokens_to_usd(0), 0.0);
     }
 

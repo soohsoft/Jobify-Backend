@@ -347,8 +347,8 @@ mod tests {
             updated_at: String::new(),
         };
         let balance = credit_json(&funded)["balanceUsd"].as_f64().unwrap();
-        assert_eq!(balance, 0.270376);
-        assert_eq!(json["debtUsd"].as_f64().unwrap(), 0.005305);
+        assert_eq!(balance, 0.719742);
+        assert_eq!(json["debtUsd"].as_f64().unwrap(), 0.014123);
     }
 
     #[tokio::test]

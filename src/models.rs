@@ -587,6 +587,10 @@ pub struct UserResponse {
     pub headline: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
+    /// Always serialised, unlike the fields above: the client uses it to restore the language tab
+    /// when the app starts, so "absent" and "not chosen yet" must not look the same on the wire.
+    #[serde(default)]
+    pub preferred_language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub match_profile: Option<MatchProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]

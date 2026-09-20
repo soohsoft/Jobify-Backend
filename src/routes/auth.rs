@@ -357,6 +357,10 @@ fn to_user_response(user: &UserDoc) -> UserResponse {
         phone: user.phone.clone(),
         headline: user.headline.clone(),
         avatar_url: user.avatar_url.clone(),
+        // Returned so the language the user chose — including one switched mid-chat, which is
+        // stored on the account for exactly this reason — survives closing the app. Without it
+        // the tab had nothing to restore from and fell back to the default.
+        preferred_language: user.preferred_language.clone(),
         match_profile: user.match_profile.clone(),
         alerts: user.alerts.clone(),
     }

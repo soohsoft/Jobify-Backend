@@ -740,10 +740,7 @@ mod tests {
 
     #[test]
     fn accepts_a_known_slug() {
-        assert_eq!(
-            canonical_category(&raw("computer_technology")),
-            Some("computer_technology")
-        );
+        assert_eq!(canonical_category(&raw("ict")), Some("ict"));
     }
 
     #[test]

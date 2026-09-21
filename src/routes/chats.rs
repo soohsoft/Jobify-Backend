@@ -963,6 +963,23 @@ async fn handle_collecting(
             .and_then(|doc| doc.alerts.clone())
             .unwrap_or_default();
 
+        // A field the user asked to see just this once ("show me logistics jobs", "any AI work?").
+        // It is applied to a LOCAL copy so the search runs in that field, and deliberately never
+        // written back: the account's work area is what the stored profile keeps, and one look at
+        // logistics must not turn a nurse into a logistician for every future match.
+        let requested = extracted
+            .get("searchCategory")
+            .and_then(|value| value.as_str())
+            .map(|slug| slug.trim().to_lowercase())
+            .filter(|slug| crate::categories::Category::from_slug(slug).is_some());
+        let profile = match (profile, requested) {
+            (Some(mut profile), Some(slug)) => {
+                profile.categories = vec![slug];
+                Some(profile)
+            }
+            (profile, _) => profile,
+        };
+
         // Read what the result line needs BEFORE the profile is moved into the match below.
         let area_slugs: Vec<String> = profile
             .as_ref()

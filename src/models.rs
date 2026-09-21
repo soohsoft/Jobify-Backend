@@ -839,6 +839,13 @@ pub struct CreateChatRequest {
     /// prompt, so a job seeker is never interrogated like a CV writer.
     #[serde(default)]
     pub purpose: Option<String>,
+    /// Start the conversation with the agent speaking. The CV tab opens straight into an
+    /// interview, and an empty screen with a blinking cursor is a worse first impression than the
+    /// agent saying hello first. Handled like a normal turn in every other way: the reply streams,
+    /// is charged, and is stored — only the user's side of it is not stored, because the user
+    /// never wrote anything.
+    #[serde(default)]
+    pub opening: bool,
 }
 
 #[derive(Deserialize)]
@@ -848,6 +855,13 @@ pub struct SelectTemplateRequest {
 
 #[derive(Deserialize)]
 pub struct ChatMessageRequest {
+    /// Set by the client when the user has only opened a chat and written nothing. The server
+    /// writes the kickoff itself and does not store a user turn for it.
+    #[serde(default)]
+    pub opening: bool,
+    /// Absent on an opening turn — there is nothing for the user to have written. Required
+    /// otherwise, and a normal request that omits it is still refused where emptiness matters.
+    #[serde(default)]
     pub content: String,
 }
 

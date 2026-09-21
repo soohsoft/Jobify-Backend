@@ -320,6 +320,18 @@ async fn send_message(
         });
     }
 
+    // An opening turn: the user has not written anything, so there is nothing of theirs to store.
+    // The kickoff text goes to the model as its instruction and is deliberately NOT pushed into
+    // the transcript — the conversation starts with the agent's own first message.
+    let opening = body.opening;
+    let content = if opening {
+        "(The chat has just opened and the user has not written anything yet. Write your first \
+         message to them now.)"
+            .to_string()
+    } else {
+        body.content.clone()
+    };
+
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
     let task_state = state.clone();
     let task_user = user.id.clone();
@@ -340,7 +352,7 @@ async fn send_message(
                 .await;
                 Ok(())
             }
-            _ => handle_collecting(&task_state, &task_user, chat, &body.content, &tx).await,
+            _ => handle_collecting(&task_state, &task_user, chat, &content, &tx, opening).await,
         };
 
         if let Err(err) = result {
@@ -463,6 +475,9 @@ async fn handle_collecting(
     mut chat: ChatDoc,
     content: &str,
     tx: &SseTx,
+    // True when the user only opened the chat: no user turn is stored, and nothing is extracted
+    // from a message they did not write.
+    opening: bool,
 ) -> Result<(), AppError> {
     // A chat session is many turns, and every turn is two LLM calls for every chat
     // type — CV interview, job-search intake, follow-ups. Capping each request still
@@ -475,12 +490,17 @@ async fn handle_collecting(
     }
 
     let now = now_iso();
-    let user_turn = ChatTurn {
-        role: "user".to_string(),
-        content: content.to_string(),
-        created_at: now.clone(),
-    };
-    chat.turns.push(user_turn);
+    // An opening turn has no user side to store. Pushing a placeholder would put words in the
+    // user's mouth in the transcript the extractor later reads, which is how a phantom "the user
+    // said they want a CV" gets invented.
+    if !opening {
+        let user_turn = ChatTurn {
+            role: "user".to_string(),
+            content: content.to_string(),
+            created_at: now.clone(),
+        };
+        chat.turns.push(user_turn);
+    }
 
     // What the service already knows about this user, appended to the system prompt.
     // Loaded per turn rather than cached on the chat: the account can be edited in
@@ -575,7 +595,9 @@ async fn handle_collecting(
     // `memory.has_categories` reads the ACCOUNT's match profile, which is where the
     // extractor writes categories — the chat's own profile is CV-shaped and never has them.
     let first_assistant_turn = !chat.turns.iter().any(|turn| turn.role == "assistant");
-    let skip_extraction = is_low_signal(content) && memory.has_categories && !first_assistant_turn;
+    // An opening turn carries nothing to extract, so it never runs — the reply is the whole turn.
+    let skip_extraction =
+        opening || (is_low_signal(content) && memory.has_categories && !first_assistant_turn);
 
     // Hold the worst case for BOTH calls of this turn before anything is sent: the
     // reply, and the extraction that runs on the same conversation afterwards. The

@@ -511,7 +511,7 @@ async fn handle_collecting(
         if memory.has_categories {
             "known — do not ask about their background again"
         } else {
-            "not known yet — ask the two questions in STEP 3"
+            "not known yet — ask the two questions in STEP 2"
         }
     ));
     if !memory.context.is_empty() {

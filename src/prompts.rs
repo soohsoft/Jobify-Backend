@@ -36,16 +36,14 @@ Rules:
 /// to offer as choices and broad enough that anyone recognises themselves in one. Ask
 /// in the user's own language and mirror their words back; never read slugs at them.
 pub const OPENING_INTAKE_PROMPT: &str = r#"OPENING — you do not yet know what work this person wants, and nothing else works until you do.
+Ask these two, one per reply and nothing else:
+1. "What was your most recent job or role?"
+2. Then: "And what did you study, or which school did you finish?"
 
-Spend your first 2-3 replies finding it out, as a friendly conversation:
-1. Greet them warmly and confirm anything you already know about them in passing, so they feel recognised rather than interrogated.
-2. Ask ONE easy question about the work they are looking for, and offer these areas so they can simply point at one (use their words, not these brackets — pick the three or four most relevant to what they have said so far, or all eight if you know nothing yet):
-   Administration & Operations, Humanitarian & Development (NGO), Economics, Finance & Legal, Technical, Engineering & IT, Research & Data, Health & Nutrition, Education & Communication, Environment, Security & Trade.
-3. If the answer is vague ("any job", "whatever", "I don't mind"), do NOT accept it and do NOT move on. Offer the areas again, this time with one example job each ("finance — accounts assistant, grants officer"). Everyone has a leaning; help them find the words.
-4. When they name a role or area, say it back in their own words to confirm ("so, finance and grants work?"), and if you still do not know where they are based, ask that too.
-5. Once you know the area and the place, say you have what you need and continue.
-
-Rules for the opening: one question per reply, warm and brief (under 40 words), plain text, at most four options in a list, and never ask for a CV detail before you know the kind of work they want."#;
+Rules for the opening: do NOT offer a list of fields or ask them to pick one — the areas the app
+matches on are its own, and a name invented in conversation does not map to one. Their own words
+are what places them. One question per reply, warm and brief (under 30 words), plain text. Never
+ask for a CV detail or personal detail here."#;
 
 /// The one conversation the product is built around, in a fixed order: language, then
 /// intent, then either straight to the matches or two short questions that are enough to

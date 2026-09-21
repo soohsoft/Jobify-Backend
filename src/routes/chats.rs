@@ -514,6 +514,31 @@ async fn handle_collecting(
             "not known yet — ask the two questions in STEP 2"
         }
     ));
+    // A returning user with a work area gets the numbers on the opening turn. The app knows what
+    // is live and the agent does not, so the counts are handed to it — the alternative is an
+    // opening line with an invented figure in it, which is worse than saying nothing.
+    if memory.has_categories {
+        let mine: Vec<String> = state
+            .users()
+            .find_one(doc! { "_id": user_id })
+            .await?
+            .and_then(|account| account.match_profile.map(|profile| profile.categories))
+            .unwrap_or_default();
+        let live = crate::routes::jobs::live_job_filter();
+        let total = state.jobs().count_documents(live.clone()).await?;
+        let in_field = if mine.is_empty() {
+            0
+        } else {
+            state
+                .jobs()
+                .count_documents(doc! { "$and": [live, { "category": { "$in": &mine } }] })
+                .await?
+        };
+        system.push_str(&format!(
+            "\nLIVE RIGHT NOW: {total} postings in total, {in_field} in their work area, {} in other areas.",
+            total.saturating_sub(in_field)
+        ));
+    }
     if !memory.context.is_empty() {
         system.push_str("\n\n");
         system.push_str(&memory.context);

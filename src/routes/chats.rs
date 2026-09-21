@@ -1094,6 +1094,16 @@ async fn handle_collecting(
             }),
         )
         .await;
+
+        // What they can do next, offered as chips under the reply. Written here rather than by the
+        // model: the labels then never drift, they cost nothing in tokens, and they are localised
+        // with the result line because the conversation has one language.
+        let suggestions: Vec<&str> = if somali {
+            vec!["Ii raadi shaqo", "Qayb kale aan raadiyo", "Maxaa cusub?"]
+        } else {
+            vec!["Find me jobs", "Search another field", "What's new?"]
+        };
+        send_sse(tx, "suggestions", json!({ "suggestions": suggestions })).await;
     }
 
     send_sse(

@@ -86,7 +86,10 @@ pub struct JobDoc {
     pub qualifications: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub posted_date: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Always serialised, including as null. A client cannot tell "no closing date was listed"
+    /// from "the field is missing" if the key vanishes, and a job list needs to render those two
+    /// differently.
+    #[serde(default)]
     pub deadline: Option<String>,
     #[serde(default)]
     pub url: String,
@@ -127,7 +130,10 @@ pub struct JobInput {
     pub qualifications: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub posted_date: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Always serialised, including as null. A client cannot tell "no closing date was listed"
+    /// from "the field is missing" if the key vanishes, and a job list needs to render those two
+    /// differently.
+    #[serde(default)]
     pub deadline: Option<String>,
     #[serde(default)]
     pub url: String,

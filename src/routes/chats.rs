@@ -770,7 +770,10 @@ async fn handle_collecting(
     // An opening turn has no extraction to read, and the user has not asked for anything yet — but
     // they opened a chat about work, and the whole point is to show them what is there. So the
     // search runs unprompted on that turn only, and the list appears with the greeting.
-    let wants_jobs = if opening {
+    // Also on the first turn of a chat: a returning user who opens a chat about work and types
+    // anything at all has already said what they want, and the client is not the authority on
+    // whether they should see their matches. The flag is only read from the extractor after that.
+    let wants_jobs = if opening || (memory.has_categories && first_assistant_turn) {
         memory.has_categories
     } else {
         extracted

@@ -551,11 +551,32 @@ async fn handle_collecting(
         } else {
             state
                 .jobs()
-                .count_documents(doc! { "$and": [live, { "category": { "$in": &mine } }] })
+                .count_documents(doc! { "$and": [live.clone(), { "category": { "$in": &mine } }] })
+                .await?
+        };
+        // Deadline closeness, not just volume: a posting that closes in three days is worth more
+        // to the person than one that closes next month, and only the app can see the dates.
+        let today = crate::util::nairobi_today();
+        let soon = (chrono::Utc::now() + chrono::Duration::days(7))
+            .format("%Y-%m-%d")
+            .to_string();
+        let closing_soon = if mine.is_empty() {
+            0
+        } else {
+            state
+                .jobs()
+                .count_documents(doc! {
+                    "$and": [
+                        live,
+                        { "category": { "$in": &mine } },
+                        { "deadline": { "$gte": &today, "$lte": &soon } },
+                    ]
+                })
                 .await?
         };
         system.push_str(&format!(
-            "\nLIVE RIGHT NOW: {total} postings in total, {in_field} in their work area, {} in other areas.",
+            "\nLIVE RIGHT NOW: {total} postings in total, {in_field} in their work area, {} \
+             in other areas. {closing_soon} of their field's postings close within 7 days.",
             total.saturating_sub(in_field)
         ));
     }
@@ -746,10 +767,17 @@ async fn handle_collecting(
         .map(str::trim)
         .filter(|value| *value == "en" || *value == "so")
         .map(String::from);
-    let wants_jobs = extracted
-        .get("wantsJobs")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // An opening turn has no extraction to read, and the user has not asked for anything yet — but
+    // they opened a chat about work, and the whole point is to show them what is there. So the
+    // search runs unprompted on that turn only, and the list appears with the greeting.
+    let wants_jobs = if opening {
+        memory.has_categories
+    } else {
+        extracted
+            .get("wantsJobs")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    };
 
     let merged = merge_profile(&chat.profile, &incoming_profile);
     let next_status = if complete {

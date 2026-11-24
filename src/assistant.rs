@@ -342,6 +342,113 @@ pub struct Answer {
     pub charged_queries: i64,
 }
 
+/// Words that carry no discriminating power in a job-search message. Dropping them is what
+/// lets an extracted keyword like `"programme officer jobs"` behave like `"programme officer"`.
+const STOPWORDS: &[&str] = &[
+    "and",
+    "in",
+    "for",
+    "the",
+    "of",
+    "with",
+    "jobs",
+    "job",
+    "work",
+    "vacancy",
+    "vacancies",
+    "tender",
+    "tenders",
+    "any",
+    "all",
+];
+
+/// A pasted paragraph must not turn the query into a huge scan, so only this many
+/// discriminating terms are ever used from one message.
+const MAX_QUERY_TERMS: usize = 8;
+
+/// The searchable fields, in the order a match is looked for. Title and organization are the
+/// ones a user means; location and description are what turns a near-miss into a hit.
+const SEARCH_FIELDS: &[&str] = &["title", "organization", "location", "description"];
+
+/// Split one extracted keyword into the terms that must ALL be present.
+///
+/// `"programme officer"` -> `["programme", "officer"]`, `"jobs in the"` -> `[]`. An empty
+/// result means the keyword said nothing searchable and must be dropped: an empty AND-group
+/// would match every row, which is the bug in the other direction.
+pub fn keyword_terms(keyword: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for raw in keyword.split_whitespace() {
+        let term: String = raw
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'')
+            .to_ascii_lowercase();
+        if term.is_empty() || term.len() > MAX_TERM_CHARS || STOPWORDS.contains(&term.as_str()) {
+            continue;
+        }
+        if !terms.contains(&term) {
+            terms.push(term);
+        }
+    }
+    terms
+}
+
+/// Group the routed keywords into AND-groups of terms, ORed across keywords and capped.
+pub fn search_terms(keywords: &[String]) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut budget = MAX_QUERY_TERMS;
+    for keyword in keywords {
+        if budget == 0 {
+            break;
+        }
+        let mut terms: Vec<String> = Vec::new();
+        for term in keyword_terms(keyword) {
+            if budget == 0 {
+                break;
+            }
+            if terms.contains(&term) {
+                continue;
+            }
+            terms.push(term);
+            budget -= 1;
+        }
+        if !terms.is_empty() {
+            groups.push(terms);
+        }
+    }
+    groups
+}
+
+/// The keyword clause: every term of a keyword must appear in one of the searchable fields,
+/// and any one keyword may satisfy the query. Returns `None` when nothing searchable is left,
+/// so the caller drops the clause instead of letting it match everything.
+pub fn keyword_clause(keywords: &[String]) -> Option<Document> {
+    let groups = search_terms(keywords);
+    if groups.is_empty() {
+        return None;
+    }
+    let mut alternatives: Vec<Document> = Vec::new();
+    for terms in groups {
+        let mut per_term: Vec<Document> = Vec::new();
+        for term in terms {
+            let pattern = doc! { "$regex": escape_regex(&term), "$options": "i" };
+            let mut fields: Vec<Document> = Vec::new();
+            for field in SEARCH_FIELDS {
+                fields.push(doc! { *field: pattern.clone() });
+            }
+            per_term.push(doc! { "$or": fields });
+        }
+        alternatives.push(if per_term.len() == 1 {
+            per_term.remove(0)
+        } else {
+            doc! { "$and": per_term }
+        });
+    }
+    Some(if alternatives.len() == 1 {
+        alternatives.remove(0)
+    } else {
+        doc! { "$or": alternatives }
+    })
+}
+
 /// Live rows for the routed filters. The visibility rule is `live_job_filter()` — the same
 /// function the feed and the matcher use, so the assistant can never offer a job the feed
 /// itself would hide.
@@ -356,15 +463,8 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
     if !routed.categories.is_empty() {
         clauses.push(doc! { "category": { "$in": &routed.categories } });
     }
-    if !routed.keywords.is_empty() {
-        let mut alternatives: Vec<Document> = Vec::new();
-        for keyword in &routed.keywords {
-            let pattern = doc! { "$regex": escape_regex(keyword), "$options": "i" };
-            alternatives.push(doc! { "title": pattern.clone() });
-            alternatives.push(doc! { "organization": pattern.clone() });
-            alternatives.push(doc! { "description": pattern });
-        }
-        clauses.push(doc! { "$or": alternatives });
+    if let Some(keyword) = keyword_clause(&routed.keywords) {
+        clauses.push(keyword);
     }
     // Same rule as `GET /jobs`: "job" must also match the legacy rows that have no `kind`
     // field, so it is a separate clause rather than another key on a shared document.
@@ -795,6 +895,91 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Keyword matching (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_phrase_keyword_splits_into_its_terms() {
+        assert_eq!(
+            keyword_terms("programme officer"),
+            vec!["programme".to_string(), "officer".to_string()]
+        );
+        // A keyword that swallowed the plural noun the user typed is cleaned, not quoted.
+        assert_eq!(
+            keyword_terms("Programme Officer Jobs"),
+            vec!["programme".to_string(), "officer".to_string()]
+        );
+        // Punctuation around a term is trimmed; internal hyphens are kept.
+        assert_eq!(
+            keyword_terms("(Nutrition), school-meals"),
+            vec!["nutrition".to_string(), "school-meals".to_string()]
+        );
+        assert_eq!(
+            keyword_terms("officer officer"),
+            vec!["officer".to_string()]
+        );
+    }
+
+    #[test]
+    fn stopwords_are_dropped() {
+        assert_eq!(
+            keyword_terms("warehouse jobs in the Hargeisa"),
+            vec!["warehouse".to_string(), "hargeisa".to_string()]
+        );
+        assert!(keyword_terms("jobs in for the of with").is_empty());
+        assert!(keyword_terms("   ").is_empty());
+    }
+
+    #[test]
+    fn an_all_stopword_keyword_is_ignored_instead_of_matching_everything() {
+        // No terms means no clause at all: an empty AND-group would match every row.
+        assert!(keyword_clause(&["jobs in the".to_string()]).is_none());
+        assert!(keyword_clause(&[]).is_none());
+        assert_eq!(
+            search_terms(&["jobs".to_string(), "driver".to_string()]),
+            vec![vec!["driver".to_string()]]
+        );
+    }
+
+    #[test]
+    fn terms_are_anded_within_a_keyword_and_ored_across_keywords() {
+        let single = keyword_clause(&["programme officer".to_string()]).unwrap();
+        let ands = single
+            .get_array("$and")
+            .expect("one group is an $and of terms");
+        assert_eq!(ands.len(), 2);
+        // Each term may be satisfied by any of the searchable fields.
+        for term in ands {
+            let fields = term.as_document().unwrap().get_array("$or").unwrap();
+            assert_eq!(
+                fields.len(),
+                4,
+                "title, organization, location, description"
+            );
+        }
+
+        let two = keyword_clause(&["programme officer".to_string(), "driver".to_string()]).unwrap();
+        let groups = two.get_array("$or").expect("two keywords are an $or");
+        assert_eq!(groups.len(), 2);
+
+        // A single term does not need an $and wrapper.
+        let one_term = keyword_clause(&["driver".to_string()]).unwrap();
+        assert!(one_term.contains_key("$or"));
+        assert!(!one_term.contains_key("$and"));
+    }
+
+    #[test]
+    fn the_term_cap_is_honoured() {
+        let pasted = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima";
+        let groups = search_terms(&[pasted.to_string()]);
+        assert_eq!(groups[0].len(), MAX_QUERY_TERMS);
+
+        let many: Vec<String> = (0..20).map(|i| format!("term{i}")).collect();
+        let total: usize = search_terms(&many).iter().map(Vec::len).sum();
+        assert_eq!(total, MAX_QUERY_TERMS);
+    }
+
+    // -----------------------------------------------------------------------
     // Grounding (pure)
     // -----------------------------------------------------------------------
 
@@ -1016,6 +1201,93 @@ mod tests {
         assert!(body.contains("Warehouse Assistant"));
         assert!(body.contains("Horn Relief"));
         assert!(!body.contains("http"));
+    }
+
+    #[tokio::test]
+    async fn keyword_search_requires_every_term_of_a_keyword_and_any_of_several() {
+        let Some(state) = test_state("jobify_test_assistant_terms", StubLlm::new(vec![]), 3).await
+        else {
+            return;
+        };
+        for (id, title, organization, description) in [
+            (
+                "job-1",
+                "Programme Policy Officer (Nutrition)",
+                "World Food Programme",
+                "Coordinate the nutrition programme in the region.",
+            ),
+            (
+                "job-2",
+                "Programme Assistant",
+                "World Food Programme",
+                "Administrative support to the team.",
+            ),
+            (
+                "job-3",
+                "Driver",
+                "Horn Relief",
+                "Deliver supplies across the region.",
+            ),
+        ] {
+            state
+                .db
+                .collection::<mongodb::bson::Document>("jobs")
+                .insert_one(doc! {
+                    "_id": id,
+                    "title": title,
+                    "organization": organization,
+                    "location": "Mogadishu",
+                    "description": description,
+                    "kind": "job",
+                    "deadline": "2099-01-01",
+                    "created_at": now_iso(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let routed = |keywords: Vec<&str>| Routed {
+            intent: Intent::Search,
+            location: Some("Mogadishu".to_string()),
+            categories: Vec::new(),
+            keywords: keywords.into_iter().map(str::to_string).collect(),
+            kind: SearchKind::Both,
+        };
+
+        // The phrase used to match nothing because the words are not adjacent in the title.
+        let rows = search_jobs(&state, &routed(vec!["programme officer"]))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Programme Policy Officer (Nutrition)");
+
+        // AND: "programme" is in both, "assistant" only in job-2 — so job-1 must drop out.
+        let rows = search_jobs(&state, &routed(vec!["programme assistant"]))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].job_id, "job-2");
+
+        // OR across keywords: the driver job matches on its own keyword.
+        let rows = search_jobs(&state, &routed(vec!["programme officer", "driver"]))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = rows.iter().map(|row| row.job_id.as_str()).collect();
+        assert!(ids.contains(&"job-1"));
+        assert!(ids.contains(&"job-3"));
+        assert!(!ids.contains(&"job-2"));
+
+        // A location term is part of the haystack, a description term also matches.
+        let rows = search_jobs(&state, &routed(vec!["mogadishu driver"]))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].job_id, "job-3");
+        let rows = search_jobs(&state, &routed(vec!["nutrition"]))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].job_id, "job-1");
     }
 
     #[tokio::test]

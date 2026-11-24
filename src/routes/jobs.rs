@@ -112,20 +112,23 @@ async fn list(
     extension: Option<Extension<AuthUser>>,
     Query(query): Query<JobsQuery>,
 ) -> ApiResult {
-    // One read for both fallbacks: the viewer's location when the caller passed none, and
-    // the match profile the feed scores against. A public caller gets neither.
+    // One read for the match profile the feed scores against. A public caller gets none.
+    //
+    // The stored `users.location` is deliberately NOT used as a fallback filter. Onboarding
+    // no longer asks for one (the product is Somalia-wide), but legacy values survive a
+    // read — "Kismayo, Mogadishu" is one substring and matches no single stored location,
+    // so falling back to it emptied a signed-in member's whole feed and looked like "no
+    // jobs". Only an explicit `?location=` narrows the feed, and existing user data is
+    // never rewritten.
     let viewer = match extension {
         Some(Extension(user)) => state.users().find_one(doc! { "_id": &user.id }).await?,
         None => None,
     };
 
-    let mut location = query.location.clone().filter(|s| !s.trim().is_empty());
-    if location.is_none() {
-        location = viewer
-            .as_ref()
-            .and_then(|doc| doc.location.clone())
-            .filter(|s| !s.trim().is_empty());
-    }
+    let location = query
+        .location
+        .clone()
+        .filter(|value| !value.trim().is_empty());
 
     let mut filter = doc! {};
     if let Some(location) = location {
@@ -1826,6 +1829,95 @@ mod tests {
             scores["job-wash"], 0,
             "a foreign category scores 0 in the feed too"
         );
+
+        let _ = db.drop().await;
+    }
+
+    /// The feed must NOT inherit a stored profile location as an implicit filter. Onboarding
+    /// no longer asks for one (the product is Somalia-wide), but legacy values survive a
+    /// read — and "Kismayo, Mogadishu" is a single substring that matches no stored location,
+    /// so a signed-in member's whole feed came back empty. An explicit `?location=` must
+    /// still narrow, exactly as before.
+    #[tokio::test]
+    async fn a_stale_profile_location_does_not_filter_the_feed_but_an_explicit_one_does() {
+        use super::{JobsQuery, list};
+        use crate::auth::AuthUser;
+        use crate::config::Config;
+        use crate::state::AppState;
+        use axum::Extension;
+        use axum::extract::{Query, State};
+
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return;
+        };
+        let db = client.database("jobify_test_feed_location");
+        let _ = db.drop().await;
+        let state = AppState::new(db.clone(), Config::from_env());
+        let live = crate::util::nairobi_days_ago(-5);
+        let now = crate::util::now_iso();
+
+        // The real member's legacy value, verbatim: two cities in one string.
+        db.collection::<Document>("users")
+            .insert_one(doc! {
+                "_id": "user-dayib",
+                "name": "Dayib",
+                "education": [],
+                "location": "Kismayo, Mogadishu",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("jobs")
+            .insert_many([
+                doc! { "_id": "job-mog", "title": "Data Analyst", "location": "Mogadishu", "deadline": &live, "created_at": &now },
+                doc! { "_id": "job-har", "title": "Driver", "location": "Hargeisa", "deadline": &live, "created_at": &now },
+            ])
+            .await
+            .unwrap();
+
+        let viewer = Some(Extension(AuthUser {
+            id: "user-dayib".to_string(),
+            role: "user".to_string(),
+        }));
+        let query = |location: Option<&str>| JobsQuery {
+            q: None,
+            search: None,
+            location: location.map(str::to_string),
+            organization: None,
+            category: None,
+            kind: None,
+            page: 1,
+            limit: 20,
+        };
+
+        // No `location` param: every live row, not zero. The stored value is not a filter.
+        let (_, Json(feed)) = list(State(state.clone()), viewer.clone(), Query(query(None)))
+            .await
+            .unwrap();
+        assert_eq!(
+            feed["meta"]["total"], 2,
+            "a junk stored location must not empty the feed: {feed}"
+        );
+        assert_eq!(feed["data"].as_array().unwrap().len(), 2);
+
+        // ... and it matches what a caller with no account at all sees.
+        let (_, Json(public)) = list(State(state.clone()), None, Query(query(None)))
+            .await
+            .unwrap();
+        assert_eq!(public["meta"]["total"], feed["meta"]["total"]);
+
+        // An explicit filter still narrows the feed to the matching location.
+        let (_, Json(filtered)) = list(
+            State(state.clone()),
+            viewer,
+            Query(query(Some("Mogadishu"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered["meta"]["total"], 1, "{filtered}");
+        assert_eq!(filtered["data"][0]["_id"], "job-mog");
 
         let _ = db.drop().await;
     }

@@ -282,6 +282,11 @@ Canonical category slugs: {}",
 
 /// One row of a grounded search answer. Built from `JobDoc`, so every field exists in the
 /// database — this struct is the ONLY thing the phrasing call is allowed to talk about.
+///
+/// `url` is the exception: it is the job's real source link, carried so the bot can render
+/// it, and deliberately EXCLUDED from `render_rows`, which is the row block the phrasing
+/// call receives. The model is only ever asked to phrase, never to produce a link, so it
+/// cannot rewrite or invent one; Rust attaches the URL to the payload after the reply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchRow {
     pub job_id: String,
@@ -290,6 +295,7 @@ pub struct SearchRow {
     pub location: Option<String>,
     pub kind: String,
     pub deadline: Option<String>,
+    pub url: Option<String>,
 }
 
 impl SearchRow {
@@ -301,11 +307,16 @@ impl SearchRow {
             "location": self.location,
             "kind": self.kind,
             "deadline": self.deadline,
+            "url": self.url,
         })
     }
 }
 
 /// The deterministic rendering used both as the fallback and in the prompt's row block.
+///
+/// Carries no URL on purpose: this string is what the phrasing call sees, and a link in the
+/// prompt is a link the model could paraphrase or replace. The real source URL travels on
+/// `SearchRow::url` to the client instead.
 pub fn render_rows(rows: &[SearchRow]) -> String {
     rows.iter()
         .enumerate()
@@ -507,6 +518,13 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
     let mut cursor = state.jobs().find(filter).with_options(options).await?;
     let mut rows: Vec<SearchRow> = Vec::new();
     while let Some(job) = cursor.try_next().await? {
+        // A blank URL is no URL: the payload says `null` rather than an empty string a
+        // client would render as a dead link.
+        let url = if job.url.trim().is_empty() {
+            None
+        } else {
+            Some(job.url.clone())
+        };
         rows.push(SearchRow {
             job_id: job.id,
             title: job.title,
@@ -514,6 +532,7 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
             location: job.location,
             kind: job.kind,
             deadline: job.deadline,
+            url,
         });
     }
     Ok(rows)
@@ -881,6 +900,7 @@ mod tests {
                 "description": "Warehouse duties",
                 "category": "logistics_and_supply_chain",
                 "kind": "job",
+                "url": "https://hornrelief.example/careers/warehouse-assistant",
                 // Far future, so the live rule keeps it: the 55 production rows are all
                 // outside the window and must not be used to test a positive match.
                 "deadline": "2099-01-01",
@@ -1055,6 +1075,7 @@ mod tests {
             location: Some("Hargeisa".to_string()),
             kind: "job".to_string(),
             deadline: Some("2099-01-01".to_string()),
+            url: Some("https://hornrelief.example/careers/warehouse-assistant".to_string()),
         }
     }
 
@@ -1075,6 +1096,35 @@ mod tests {
         // The caller's message is not forwarded: the phrasing call cannot be talked into
         // answering something else.
         assert!(!user.to_lowercase().contains("jobs in mogadishu"));
+    }
+
+    /// The URL is attached in Rust and must never enter the prompt: a model that never sees
+    /// a link can neither rewrite it nor invent one. Both halves are asserted on the built
+    /// prompt string, not on a live call.
+    #[test]
+    fn the_source_url_reaches_the_payload_but_never_the_phrasing_prompt() {
+        let rows = vec![row()];
+        let reference = row().url.clone().unwrap();
+
+        let messages = phrasing_messages(&rows);
+        let prompt: String = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !prompt.contains("http") && !prompt.contains(&reference),
+            "the phrasing prompt must not carry a link: {prompt}"
+        );
+
+        // `render_rows` is both the fallback reply and the prompt's row block, so it must
+        // stay link-free as well.
+        assert!(!render_rows(&rows).contains("http"));
+
+        // The client payload does carry it, under the same key the matcher rows use.
+        let payload = rows[0].to_json();
+        assert_eq!(payload["url"], reference);
+        assert_eq!(payload["job_id"], "job-1");
     }
 
     #[test]
@@ -1391,6 +1441,17 @@ mod tests {
         assert_eq!(answer.intent, Intent::Search);
         assert_eq!(answer.rows.len(), 1);
         assert_eq!(answer.rows[0].title, "Warehouse Assistant");
+        // The row carries the job's real source link, and it is on the payload the bot reads.
+        assert_eq!(
+            answer.rows[0].url.as_deref(),
+            Some("https://hornrelief.example/careers/warehouse-assistant"),
+            "the search row must carry the stored url"
+        );
+        assert_eq!(
+            answer.rows[0].to_json()["url"],
+            "https://hornrelief.example/careers/warehouse-assistant",
+            "and the bot must receive it"
+        );
         assert!(answer.reply.contains("Warehouse Assistant"));
         assert_eq!(answer.charged_queries, 1);
         assert_eq!(answer.credits.used_this_period, 1);

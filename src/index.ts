@@ -11,15 +11,22 @@
 import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 
 import { buildCommands } from './commands.js';
-import { createCategoryCache, createDmSender, type BotContext } from './context.js';
+import {
+  createCategoryCache,
+  createChannelSender,
+  createDmSender,
+  type BotContext,
+} from './context.js';
 import { runDigest } from './digest.js';
 import { loadConfig, loadDotEnv } from './env.js';
 import { Backend } from './http.js';
+import { ensureIntro, introContent, type IntroChannel } from './intro.js';
 import { handleInteraction } from './interactions.js';
 import { createLogger, errorFields } from './log.js';
 import { handleMessage } from './messages.js';
 import { OnboardingSessions } from './onboarding.js';
 import { DailyDigestScheduler } from './scheduler.js';
+import { handleMemberJoin } from './welcome.js';
 
 async function main(): Promise<void> {
   loadDotEnv();
@@ -36,6 +43,9 @@ async function main(): Promise<void> {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
+      // `GuildMemberAdd` is only dispatched with this privileged intent. Without it a new
+      // member is silent until they write first — the exact behaviour this feature removes.
+      GatewayIntentBits.GuildMembers,
       GatewayIntentBits.DirectMessages,
       // Guild message bodies (mentions and the free-text channel) are empty without this.
       GatewayIntentBits.MessageContent,
@@ -55,6 +65,7 @@ async function main(): Promise<void> {
     ...(config.freeChannelId ? { freeChannelId: config.freeChannelId } : {}),
     categories: createCategoryCache(backend),
     sendDm: createDmSender(client),
+    sendChannel: createChannelSender(client),
   };
 
   const scheduler = new DailyDigestScheduler({
@@ -86,6 +97,27 @@ async function main(): Promise<void> {
         logger.error('command registration failed', errorFields(err));
       }
       scheduler.start();
+
+      // The pinned intro is the channel's front door; a failure here must not stop the bot.
+      if (config.freeChannelId) {
+        try {
+          const channel = await ready.channels.fetch(config.freeChannelId);
+          if (!channel || !('messages' in channel)) {
+            logger.warn('intro skipped: free channel is not a text channel', {
+              channelId: config.freeChannelId,
+            });
+          } else {
+            const outcome = await ensureIntro(
+              channel as unknown as IntroChannel,
+              logger,
+              introContent(config.digestHour, config.digestTz),
+            );
+            logger.info('intro ensured', { channelId: config.freeChannelId, outcome });
+          }
+        } catch (err) {
+          logger.error('intro ensure failed', errorFields(err));
+        }
+      }
     })();
   });
 
@@ -102,6 +134,14 @@ async function main(): Promise<void> {
     const botId = client.user?.id ?? config.discordAppId;
     void handleMessage(message, ctx, botId).catch((err) => {
       logger.error('message handler threw', errorFields(err));
+    });
+  });
+
+  client.on(Events.GuildMemberAdd, (member) => {
+    // The handler already catches its own delivery failures; this is the last-resort guard so
+    // one bad join can never take the process down.
+    void handleMemberJoin(member, ctx).catch((err) => {
+      logger.error('member join handler threw', { discordId: member.user?.id, ...errorFields(err) });
     });
   });
 

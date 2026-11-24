@@ -33,14 +33,31 @@ without an @mention — plain messages there take the same path as a DM, onboard
 included. Every other guild channel keeps the mention-only rule, and leaving it unset keeps
 today's behaviour.
 
+## Greeting new members
+
+`GuildMemberAdd` (requires the privileged **Server Members** intent, enabled in the developer
+portal) upserts the account and DMs the member: three lines of welcome plus the same education
+prompt `/start` builds, so the interview starts before the member says anything. A member who
+already has a profile gets the welcome without the interview. With DMs closed Discord answers
+50007; the bot then posts one message in the free channel that @mentions them once and says
+how to fix it. The DM is attempted once, and the log records `path: dm|channel|failed`.
+
+At boot the bot also ensures exactly one "How Jobify works" post in the free channel, marked
+by a trailing `-# jobify-intro v1`, and pins it. The marker is what makes restarts idempotent;
+copy changes are edited in place only while the message is pinned.
+
 ## Invite URL
 
 ```
-https://discord.com/oauth2/authorize?client_id=1574835560315363418&scope=bot%20applications.commands&permissions=83968
+https://discord.com/oauth2/authorize?client_id=1574835560315363418&scope=bot%20applications.commands&permissions=92160&guild_id=1574842294312509670&disable_guild_select=true
 ```
 
-`permissions=83968` = Send Messages (2048) + Embed Links (16384) + Read Message History
-(65536). `applications.commands` is what lets the global slash commands appear.
+`permissions=92160` = Send Messages (2048) + Embed Links (16384) + Read Message History (65536)
++ **Manage Messages (8192)**. The last one is what lets the bot pin the "How Jobify works"
+intro in `DISCORD_FREE_CHANNEL_ID`; without it the post still goes out, the pin is refused
+(50013) and the log says so. Opening the URL again for an existing install updates the bot's
+managed role in place.
+`applications.commands` is what lets the global slash commands appear.
 
 ## Run
 

@@ -75,12 +75,21 @@ export interface MatchRow {
  * renders what the backend decided instead of re-deriving it from the profile.
  */
 export interface MatchMeta {
-  /** `no_match_profile` is a normal state on the way into onboarding, not an error. */
+  /**
+   * `no_match_profile` is a normal state on the way into onboarding; `below_threshold` means
+   * there IS a profile but nothing scored at or above the cut-off — an honest empty list, and
+   * the only state the bot answers with the "nothing scores above N%" sentence rather than
+   * a list.
+   */
   reason: string;
   total: number;
   categories: string[];
   subcategories: string[];
   categorySource?: string;
+  /** The cut-off the backend applied. Absent on a backend that predates it (read as 70). */
+  threshold?: number;
+  /** Rows the matcher scored before the cut-off, so "0 of 4" can be said honestly. */
+  considered?: number;
 }
 
 export interface MatchList {
@@ -153,6 +162,9 @@ export interface Delivery {
   jobId?: string | null;
   /** The source page, when the queue carried it on the row itself. */
   url?: string | null;
+  /** The 0–100 the job scored when it was queued, so the digest shows the same percentage
+   *  the list did. Absent on rows queued before scores existed. */
+  matchScore?: number | null;
   job?: FeedJob | null;
   createdAt?: string | null;
 }

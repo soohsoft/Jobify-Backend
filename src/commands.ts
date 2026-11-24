@@ -19,6 +19,7 @@ import {
 
 import type { BotContext } from './context.js';
 import {
+  belowThresholdCopy,
   formatAssistantReply,
   formatRows,
   helpText,
@@ -78,7 +79,7 @@ async function ensureUser(interaction: ChatInputCommandInteraction, ctx: BotCont
   });
 }
 
-function feedRow(job: FeedJob): RowInput {
+function feedRow(job: FeedJob, matchScore?: number | null): RowInput {
   return {
     title: job.title,
     organization: job.organization,
@@ -87,6 +88,7 @@ function feedRow(job: FeedJob): RowInput {
     kind: job.kind ?? null,
     jobId: job._id,
     url: job.url ?? null,
+    matchScore: matchScore ?? null,
   };
 }
 
@@ -118,6 +120,13 @@ async function browse(
 
   const noun = kind === 'tender' ? 'tenders' : 'jobs';
   if (rows.length === 0) {
+    // Below the cut-off is an ANSWER, not an empty corpus: the backend scored rows and none
+    // reached the bar. Saying "nothing live" here would be a lie and would invite a list of
+    // weak rows, which is exactly what the cut-off exists to prevent.
+    if (meta.reason === 'below_threshold') {
+      await interaction.editReply({ content: belowThresholdCopy(meta.threshold) });
+      return;
+    }
     await interaction.editReply({
       content:
         `Nothing live in your fields right now (${areas.join(', ')}).\n` +
@@ -130,7 +139,10 @@ async function browse(
     `**Newest ${noun} for you**`,
     `I watch for: ${areas.join(', ')}`,
     '',
-    formatRows(rows.map((row) => feedRow(row.job)), { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS }),
+    formatRows(
+      rows.map((row) => feedRow(row.job, row.matchScore)),
+      { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS },
+    ),
     '',
     `Ask for something specific, for example \`/${noun === 'tenders' ? 'tenders' : 'jobs'} monitoring and evaluation\`.`,
   ].join('\n');

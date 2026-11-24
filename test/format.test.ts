@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  DEFAULT_MATCH_THRESHOLD,
   MAX_DIGEST_ROWS,
   assistantFailureCopy,
+  belowThresholdCopy,
   capRows,
   deliveryRow,
   digestMessage,
@@ -12,6 +14,7 @@ import {
   formatRows,
   helpText,
   jobLink,
+  matchLabel,
   rowLine,
   sourceLink,
 } from '../src/format.js';
@@ -296,6 +299,58 @@ test('a delivery prefers the embedded job document and falls back to the notific
   assert.equal(fallback.title, 'Driver needed');
   assert.equal(fallback.location, null);
   assert.equal(fallback.jobId, null);
+});
+
+// ---------------------------------------------------------------------------
+// The match percentage and the below-threshold empty state
+// ---------------------------------------------------------------------------
+
+test('the percentage is rendered beside the title, from the backend number', () => {
+  assert.equal(matchLabel(87), '87% match');
+  assert.equal(matchLabel(70), '70% match');
+  assert.equal(matchLabel(87.4), '87% match');
+  assert.equal(matchLabel(140), '100% match');
+  assert.equal(matchLabel(-5), '0% match');
+  // An absent or broken score renders nothing rather than an invented number.
+  assert.equal(matchLabel(null), null);
+  assert.equal(matchLabel(undefined), null);
+  assert.equal(matchLabel(Number.NaN), null);
+
+  const line = rowLine(rowInput({ matchScore: 87 }));
+  assert.equal(line, '**Data Analyst** — 87% match — Horn Relief — Mogadishu — closes 2026-12-03');
+  // A row with no score is unchanged: the label is not a placeholder.
+  assert.equal(rowLine(rowInput()), '**Data Analyst** — Horn Relief — Mogadishu — closes 2026-12-03');
+});
+
+test('the digest shows each job\'s percentage, carried on the queued notification', () => {
+  const delivery: Delivery = {
+    notificationId: 'n1',
+    userId: 'u1',
+    title: 'Jobify notification',
+    body: 'body',
+    jobId: 'job-7',
+    matchScore: 87,
+    job: { _id: 'job-7', title: 'WASH Officer', organization: 'Oxfam', location: 'Baidoa', deadline: '2026-12-09' },
+  };
+  assert.equal(deliveryRow(delivery).matchScore, 87);
+
+  const message = digestMessage([deliveryRow(delivery)], { appBaseUrl: APP });
+  assert.ok(message.includes('**WASH Officer** — 87% match — Oxfam — Baidoa — closes 2026-12-09'), message);
+
+  // A row queued before scores existed still renders, just without a percentage.
+  const legacy = digestMessage([deliveryRow({ ...delivery, matchScore: null })], { appBaseUrl: APP });
+  assert.ok(legacy.includes('**WASH Officer** — Oxfam'), legacy);
+  assert.ok(!legacy.includes('% match'));
+});
+
+test('the below-threshold sentence names the cut-off and promises a message', () => {
+  assert.equal(
+    belowThresholdCopy(70),
+    'Nothing scores above 70% for you right now — I will message you when something does.',
+  );
+  // An absent threshold falls back to the documented default rather than saying "undefined".
+  assert.equal(belowThresholdCopy(undefined), belowThresholdCopy(DEFAULT_MATCH_THRESHOLD));
+  assert.ok(belowThresholdCopy(80).includes('80%'));
 });
 
 test('help is at most ten lines', () => {

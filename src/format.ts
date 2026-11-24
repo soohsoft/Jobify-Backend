@@ -25,6 +25,37 @@ export interface RowInput {
   jobId?: string | null;
   /** The job's real page on the source portal. Preferred over any portal link. */
   url?: string | null;
+  /** The backend's 0–100 fit for this member. Absent on a surface that has no score. */
+  matchScore?: number | null;
+}
+
+/** The cut-off every current backend applies; used only when `meta.threshold` is absent. */
+export const DEFAULT_MATCH_THRESHOLD = 70;
+
+/**
+ * The backend's score as Discord text: `87% match`.
+ *
+ * The percentage is the backend's decision, never computed here: a missing, non-finite or
+ * out-of-range value renders no label at all, because a made-up number is worse than none.
+ */
+export function matchLabel(score: number | null | undefined): string | null {
+  if (typeof score !== 'number' || !Number.isFinite(score)) return null;
+  const clamped = Math.max(0, Math.min(100, Math.round(score)));
+  return `${clamped}% match`;
+}
+
+/**
+ * The one sentence for "you have a profile, but nothing cleared the cut-off".
+ *
+ * This is the below_threshold empty state: the bot must not list weak rows and must not
+ * pretend the member has no profile. Naming the number makes the promise checkable.
+ */
+export function belowThresholdCopy(threshold: number | null | undefined): string {
+  const cut =
+    typeof threshold === 'number' && Number.isFinite(threshold)
+      ? Math.round(threshold)
+      : DEFAULT_MATCH_THRESHOLD;
+  return `Nothing scores above ${cut}% for you right now — I will message you when something does.`;
 }
 
 export function truncate(text: string, max: number): string {
@@ -73,9 +104,12 @@ export function jobLink(appBaseUrl: string, jobId: string | null | undefined): s
   return `${base}/jobs/${jobId}`;
 }
 
-/** `Title — Org — Location — closes DATE`, skipping the parts the source did not publish. */
+/** `Title — 87% match — Org — Location — closes DATE`, skipping what the source did not publish. */
 export function rowLine(row: RowInput, index?: number): string {
   const parts: string[] = [`**${truncate(row.title, 110)}**`];
+  // The fit sits right beside the title, so the ranking is visible on the line itself.
+  const score = matchLabel(row.matchScore);
+  if (score) parts.push(score);
   if (row.organization?.trim()) parts.push(truncate(row.organization.trim(), 60));
   parts.push(row.location?.trim() ? truncate(row.location.trim(), 50) : 'location not listed');
   parts.push(row.deadline?.trim() ? `closes ${row.deadline.trim()}` : 'no deadline listed');
@@ -153,6 +187,9 @@ export function deliveryRow(delivery: Delivery): RowInput {
       // The queue has carried the source page both on the row and inside the embedded job,
       // depending on the backend version that queued it — accept either.
       url: job.url ?? delivery.url ?? null,
+      // The score is recorded with the notification, so a row queued before scores existed
+      // simply renders without one.
+      matchScore: delivery.matchScore ?? null,
     };
   }
   return {
@@ -162,6 +199,7 @@ export function deliveryRow(delivery: Delivery): RowInput {
     deadline: null,
     jobId: delivery.jobId ?? null,
     url: delivery.url ?? null,
+    matchScore: delivery.matchScore ?? null,
   };
 }
 

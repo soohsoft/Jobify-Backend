@@ -241,6 +241,8 @@ export class Backend {
         categories: strings(meta.categories),
         subcategories: strings(meta.subcategories),
         ...(typeof meta.categorySource === 'string' ? { categorySource: meta.categorySource } : {}),
+        ...(typeof meta.threshold === 'number' ? { threshold: meta.threshold } : {}),
+        ...(typeof meta.considered === 'number' ? { considered: meta.considered } : {}),
       },
     };
   }

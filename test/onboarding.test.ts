@@ -171,7 +171,7 @@ test('a session starts at the name step and is cleared when the interview ends',
 
 test('the completion message says Setup complete, repeats the answers, shows five matches and points at /jobs', () => {
   const matches: MatchRow[] = Array.from({ length: 7 }, (_, index) => ({
-    matchScore: 4 - index * 0.1,
+    matchScore: 92 - index,
     job: {
       _id: `job-${index + 1}`,
       title: `Programme Officer ${index + 1}`,
@@ -206,6 +206,9 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
   // Five rows is the digest ceiling, and each one is a real link to the job.
   assert.equal(prompt.content.match(/\/jobs\/job-/g)?.length, 5);
   assert.ok(!prompt.content.includes('Programme Officer 6'), 'the sixth row is not shown');
+  // Each line carries the backend's percentage beside the title.
+  assert.ok(prompt.content.includes('**Programme Officer 1** — 92% match'), prompt.content);
+  assert.ok(prompt.content.includes('**Programme Officer 5** — 88% match'), prompt.content);
   assert.ok(prompt.content.includes('`/jobs` lists everything for you at any time'));
   assert.equal(
     (prompt.components[0]?.toJSON().components[0] as { custom_id?: string } | undefined)?.custom_id,
@@ -217,7 +220,7 @@ test('the completion message links each match to its source page, never a local 
   const source = 'https://somalijobs.com/jobs/mogadishu/14525213046612058/reach-data-analyst';
   const matches: MatchRow[] = [
     {
-      matchScore: 3,
+      matchScore: 82,
       job: {
         _id: 'job-1',
         title: 'REACH Data Analyst',
@@ -229,7 +232,7 @@ test('the completion message links each match to its source page, never a local 
         url: source,
       },
     },
-    { matchScore: 2, job: { _id: 'job-2', title: 'Driver', organization: 'NGO', location: null, deadline: null, kind: 'job' } },
+    { matchScore: 76, job: { _id: 'job-2', title: 'Driver', organization: 'NGO', location: null, deadline: null, kind: 'job' } },
   ];
 
   const prompt = completionPrompt({
@@ -268,6 +271,42 @@ test('the completion message is honest when nothing matches or alerts are off', 
   assert.ok(prompt.content.includes('Alerts: off'), 'an explicit /stop is reported as off, not silently overridden');
   assert.ok(!prompt.content.includes('/jobs/job-'));
   assert.ok(!prompt.content.includes('I will watch for'), 'no role line when the backend decided nothing');
+});
+
+test('the completion message says the cut-off, not "nothing live", when every row is below it', () => {
+  // The backend scored the corpus and nothing reached 70: the profile is fine and rows exist,
+  // so "nothing live matches" would be false and a list of weak rows is exactly what the
+  // cut-off forbids.
+  const prompt = completionPrompt({
+    user: user(),
+    matches: [],
+    matchReason: 'below_threshold',
+    matchThreshold: 70,
+    digestTz: 'Africa/Nairobi',
+    digestHour: 8,
+    appBaseUrl: 'https://app.jobify.test',
+  });
+
+  assert.ok(
+    prompt.content.includes('Nothing scores above 70% for you right now — I will message you when something does.'),
+    prompt.content,
+  );
+  assert.ok(!prompt.content.includes('Nothing live matches your answers this minute'));
+  assert.ok(!prompt.content.includes('/jobs/job-'), 'no weak row is listed');
+});
+
+test('a completion read with no profile still says "nothing live", not the cut-off sentence', () => {
+  const prompt = completionPrompt({
+    user: user(),
+    matches: [],
+    matchReason: 'no_match_profile',
+    matchThreshold: 70,
+    digestTz: 'Africa/Nairobi',
+    digestHour: 8,
+    appBaseUrl: 'https://app.jobify.test',
+  });
+  assert.ok(prompt.content.includes('Nothing live matches your answers this minute'));
+  assert.ok(!prompt.content.includes('Nothing scores above'));
 });
 
 test('the watching line names the derived role titles, and degrades rather than lying', () => {

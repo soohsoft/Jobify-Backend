@@ -615,7 +615,15 @@ async fn match_jobs(
         Vec::new()
     };
 
-    let scored = ranked_candidates(&state, &profile, &exclusions, &exclude, limit as i64).await?;
+    let scored = ranked_candidates(
+        &state,
+        &profile,
+        &exclusions,
+        &exclude,
+        limit as i64,
+        kind_preference_clause("both"),
+    )
+    .await?;
     let queued_count = if query.record {
         queue_notifications(&state, &user.id, &scored).await?
     } else {
@@ -658,19 +666,42 @@ async fn queued_job_ids(state: &AppState, user_id: &str) -> Result<Vec<String>, 
     Ok(ids)
 }
 
+/// The job/tender preference as a query clause.
+///
+/// `None` means "no narrowing": `both`, an absent preference, and every account that
+/// predates the field all include tenders and jobs. "jobs" must also match a MISSING `kind`
+/// field — the older listings carry none — which is why it is an `$or` rather than an
+/// equality.
+fn kind_preference_clause(wanted: &str) -> Option<Document> {
+    match wanted.trim().to_ascii_lowercase().as_str() {
+        "jobs" => Some(doc! { "$or": [ doc! { "kind": "job" }, doc! { "kind": null } ] }),
+        "tenders" => Some(doc! { "kind": "tender" }),
+        _ => None,
+    }
+}
+
 /// Candidates for a profile, scored and sorted.
 ///
 /// The single place that decides what is eligible: the live-job rule, the profile's
-/// categories, the user's own rejections, and what has already been queued. The feed and
-/// the automated alert path both come through here, so they cannot disagree.
+/// categories, the user's own rejections, the kind preference and what has already been
+/// queued. The feed and the automated alert path both come through here, so they cannot
+/// disagree.
 async fn ranked_candidates(
     state: &AppState,
     profile: &MatchProfile,
     exclusions: &AlertPrefs,
     exclude_job_ids: &[String],
     limit: i64,
+    kind_clause: Option<Document>,
 ) -> Result<Vec<(f64, JobDoc)>, AppError> {
     let mut filter = live_job_filter();
+
+    // What the member asked for. Applied as its own `$and` element because `live_job_filter`
+    // already owns the top-level `$or`, and a Document cannot hold one key twice; `None`
+    // ("both", and every account with no preference stored) adds nothing.
+    if let Some(clause) = kind_clause {
+        filter.insert("$and", vec![clause]);
+    }
 
     let mut categories = doc! { "$in": &profile.categories };
     // A rejected category is applied to the query rather than filtered after scoring, so
@@ -770,7 +801,10 @@ pub async fn queue_matches_for_user(
     };
     let exclusions = user.alerts.clone().unwrap_or_default();
     let exclude = queued_job_ids(state, user_id).await?;
-    let scored = ranked_candidates(state, &profile, &exclusions, &exclude, limit).await?;
+    // A member who asked for tenders only must not be queued jobs they will never be sent.
+    let kind_clause = kind_preference_clause(user.wants.as_deref().unwrap_or("both"));
+    let scored =
+        ranked_candidates(state, &profile, &exclusions, &exclude, limit, kind_clause).await?;
     queue_notifications(state, user_id, &scored).await
 }
 
@@ -791,6 +825,38 @@ mod tests {
         assert_eq!(canonical_kind(&raw("consultancy")), "job");
         assert_eq!(canonical_kind(&raw("")), "job");
         assert_eq!(canonical_kind(&None), "job");
+    }
+
+    // The alert path narrows on what the member asked for, and "jobs" has to keep matching
+    // the older listings that carry no `kind` field at all — an equality would hide them.
+    #[test]
+    fn the_wants_preference_narrows_the_query_and_both_adds_no_clause() {
+        use super::kind_preference_clause;
+        use mongodb::bson::Bson;
+
+        assert!(kind_preference_clause("both").is_none());
+        assert!(kind_preference_clause("").is_none());
+        assert!(kind_preference_clause("anything else").is_none());
+
+        let tenders = kind_preference_clause("TENDERS").expect("tenders must narrow");
+        assert_eq!(tenders.get_str("kind").unwrap(), "tender");
+        assert!(tenders.get("$or").is_none());
+
+        let jobs = kind_preference_clause("jobs").expect("jobs must narrow");
+        let alternatives = jobs.get_array("$or").expect("jobs is an $or").clone();
+        assert_eq!(alternatives.len(), 2);
+        assert_eq!(
+            alternatives[0]
+                .as_document()
+                .unwrap()
+                .get_str("kind")
+                .unwrap(),
+            "job"
+        );
+        assert!(matches!(
+            alternatives[1].as_document().unwrap().get("kind"),
+            Some(Bson::Null)
+        ));
     }
 
     #[test]

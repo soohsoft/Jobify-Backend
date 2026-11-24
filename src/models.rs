@@ -241,6 +241,11 @@ pub struct UserDoc {
     pub sectors: Vec<String>,
     #[serde(default)]
     pub skills: Vec<String>,
+    /// What this member asked to be alerted about: "jobs", "tenders" or "both". Absent on
+    /// every account that predates the field, which reads as "both" — so nothing needs
+    /// migrating and the web accounts keep their current behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wants: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub company: Option<CompanyProfile>,
     /// The immutable Discord snowflake this account belongs to. Absent on the nine
@@ -611,6 +616,9 @@ pub struct DiscordProfileRequest {
     pub sectors: Vec<String>,
     #[serde(default)]
     pub skills: Vec<String>,
+    /// "jobs", "tenders" or "both". Omitted by the web client, which keeps "both".
+    #[serde(default)]
+    pub wants: Option<String>,
 }
 
 /// `POST /internal/discord/link-token`.
@@ -692,6 +700,8 @@ pub struct UserResponse {
     pub sectors: Vec<String>,
     pub skills: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub wants: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub company: Option<CompanyProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discord_id: Option<String>,
@@ -716,6 +726,7 @@ impl UserResponse {
             experience_years: user.experience_years,
             sectors: user.sectors.clone(),
             skills: user.skills.clone(),
+            wants: user.wants.clone(),
             company: user.company.clone(),
             discord_id: user.discord_id.clone(),
         }

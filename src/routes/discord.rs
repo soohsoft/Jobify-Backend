@@ -147,6 +147,23 @@ fn clean_skills(raw: &[String]) -> Vec<String> {
     skills
 }
 
+/// What the member asked to be alerted about.
+///
+/// `None` means "no stored preference", which every reader treats as both kinds — so
+/// "both" is stored as absence rather than as a third value that behaves like a missing one.
+/// An unknown value is a 400 naming the three accepted answers: this drives a query filter,
+/// and "Tender" silently becoming nothing is exactly the kind of quiet bug to avoid.
+fn canonical_wants(raw: &str) -> Result<Option<&'static str>, AppError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "jobs" => Ok(Some("jobs")),
+        "tenders" => Ok(Some("tenders")),
+        "both" | "" => Ok(None),
+        _ => Err(AppError::BadRequest(
+            "wants must be \"jobs\", \"tenders\" or \"both\"".to_string(),
+        )),
+    }
+}
+
 async fn link_for(state: &AppState, discord_id: &str) -> Result<DiscordLinkDoc, AppError> {
     state
         .discord_links()
@@ -287,6 +304,7 @@ async fn upsert_user(
                 experience_years: None,
                 sectors: Vec::new(),
                 skills: Vec::new(),
+                wants: None,
                 company: None,
                 discord_id: Some(discord_id.clone()),
                 created_at: now,
@@ -380,6 +398,18 @@ async fn update_profile(
 
     if let Some(years) = body.experience_years {
         set.insert("experience_years", i32::from(years));
+    }
+
+    if let Some(raw) = body.wants.as_deref() {
+        match canonical_wants(raw)? {
+            Some(wants) => {
+                set.insert("wants", wants);
+            }
+            // "both" clears the field: absence is what "both" means everywhere it is read.
+            None => {
+                unset.insert("wants", "");
+            }
+        }
     }
 
     let sectors = if body.sectors.is_empty() {
@@ -694,6 +724,7 @@ mod tests {
             experience_years: None,
             sectors: Vec::new(),
             skills: Vec::new(),
+            wants: None,
             company: None,
             discord_id: Some("900000000000000001".to_string()),
             created_at: String::new(),
@@ -711,6 +742,17 @@ mod tests {
 
         user.match_profile.as_mut().unwrap().categories = vec!["ict".to_string()];
         assert!(onboarding_complete(&user));
+    }
+
+    #[test]
+    fn wants_accepts_three_answers_and_stores_both_as_absence() {
+        assert_eq!(canonical_wants("jobs").unwrap(), Some("jobs"));
+        assert_eq!(canonical_wants("Tenders").unwrap(), Some("tenders"));
+        assert_eq!(canonical_wants("  BOTH ").unwrap(), None);
+        assert_eq!(canonical_wants("").unwrap(), None);
+        let err = canonical_wants("cv help").unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        assert!(err.message().contains("jobs"));
     }
 
     async fn test_state(db_name: &str) -> Option<AppState> {

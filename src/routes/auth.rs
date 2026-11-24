@@ -154,6 +154,7 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         experience_years: None,
         sectors: Vec::new(),
         skills: Vec::new(),
+        wants: None,
         company: None,
         // A password account has no Discord identity until it is linked.
         discord_id: None,

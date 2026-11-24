@@ -8,7 +8,10 @@
 //!
 //! Two cheap calls, temperature 0:
 //!   1. extraction — message -> `{intent, location, categories, keywords, kind}`, validated
-//!      here (unknown category slugs are dropped, not repaired).
+//!      here (unknown category slugs are dropped, not repaired). A truncated or unparseable
+//!      answer — which is what a reasoning model produces when it runs out of output budget
+//!      mid-object — is retried ONCE with a short nudge before it is read as a refusal; the
+//!      retry shares the request's single charge.
 //!   2. phrasing — only for `search`, only after the database returned rows. It receives
 //!      the rows and nothing else, and is told never to invent a job, employer, deadline
 //!      or URL. An empty result set never reaches the model at all.
@@ -46,8 +49,24 @@ const MAX_MESSAGE_CHARS: usize = 500;
 const MAX_KEYWORDS: usize = 6;
 const MAX_TERM_CHARS: usize = 40;
 const MAX_CATEGORIES: usize = 5;
-const EXTRACTION_MAX_TOKENS: u32 = 300;
+
+/// The routing answer is one small JSON object, but the configured model is a reasoning
+/// model: part of every completion budget is spent thinking before the first `{` is
+/// emitted. At 300 the answer was cut off on roughly a third of messages (measured against
+/// the live provider: 2 of 6 truncated at 300, 0 of 6 at 800), and a truncated answer
+/// parsed to `unsupported` — so a job search answered with the refusal sentence. 1000
+/// leaves room for the reasoning plus the object; a normal answer still costs ~150-400.
+const EXTRACTION_MAX_TOKENS: u32 = 1000;
+/// The phrasing call writes at most three short lines and needs no reasoning budget.
 const PHRASING_MAX_TOKENS: u32 = 200;
+/// How many extraction calls one message may cost. The second is a retry, not a new
+/// question: the same reservation pays for it and it never charges again.
+const EXTRACTION_ATTEMPTS: u32 = 2;
+
+/// Appended as a second system message on the retry. It says nothing about the message, so
+/// the model still has exactly one job — it just stops it re-deriving the routing rules.
+const EXTRACTION_RETRY_NUDGE: &str =
+    "Your previous answer was cut off. Reply with the JSON object only — no prose, no reasoning.";
 
 /// The only sentence a message outside the three supported purposes ever gets. Fixed, so
 /// the bot can rely on it and no model can be argued into answering.
@@ -158,13 +177,15 @@ fn clean_term(value: &str) -> Option<String> {
 /// A category slug the taxonomy does not know is dropped rather than repaired: the query
 /// then simply does not filter on it, which returns more rows instead of silently
 /// returning none for a slug nobody stores.
-pub fn parse_extraction(raw: &str) -> Routed {
-    let Some(object) = json_object(raw) else {
-        return Routed::unsupported();
-    };
-    let Ok(extraction) = serde_json::from_str::<RawExtraction>(object) else {
-        return Routed::unsupported();
-    };
+///
+/// `None` means the answer was not a routing decision at all — no JSON object, or an object
+/// that does not deserialize (which is what a truncated answer looks like). That is a
+/// retryable failure, unlike an object that says `unsupported`, which is the model's own
+/// verdict and must NOT be retried. `parse_extraction` is the degrading wrapper for callers
+/// that only want the decision.
+fn parse_answer(raw: &str) -> Option<Routed> {
+    let object = json_object(raw)?;
+    let extraction = serde_json::from_str::<RawExtraction>(object).ok()?;
 
     let intent = match extraction.intent.trim().to_ascii_lowercase().as_str() {
         "search" => Intent::Search,
@@ -173,7 +194,7 @@ pub fn parse_extraction(raw: &str) -> Routed {
         _ => Intent::Unsupported,
     };
     if intent == Intent::Unsupported {
-        return Routed::unsupported();
+        return Some(Routed::unsupported());
     }
 
     let mut categories: Vec<String> = Vec::new();
@@ -220,13 +241,20 @@ pub fn parse_extraction(raw: &str) -> Routed {
         _ => SearchKind::Both,
     };
 
-    Routed {
+    Some(Routed {
         intent,
         location,
         categories,
         keywords,
         kind,
-    }
+    })
+}
+
+/// The routing decision, degrading any unparseable answer to `unsupported`. Only the routing
+/// tests need this view now that the handler distinguishes the two failure modes itself.
+#[cfg(test)]
+fn parse_extraction(raw: &str) -> Routed {
+    parse_answer(raw).unwrap_or_else(Routed::unsupported)
 }
 
 fn canonical_slug_list() -> String {
@@ -607,26 +635,58 @@ pub async fn answer(state: &AppState, user_id: &str, message: &str) -> Result<An
 
     let charge = credits::charge(state, user_id).await?;
 
-    let reply = match state
-        .llm
-        .complete(LlmRequest {
-            messages: extraction_messages(message),
-            max_tokens: EXTRACTION_MAX_TOKENS,
-            json_mode: true,
-        })
-        .await
-    {
-        Ok(reply) => reply,
-        Err(err) => {
-            tracing::warn!(user_id, error = %err.detail(), "assistant extraction failed");
-            credits::refund(state, user_id, charge).await;
-            return Err(AppError::LlmUnavailable(LLM_FAILURE_MESSAGE.to_string()));
-        }
-    };
+    // Extraction, with at most one retry. A reasoning model can spend the whole output
+    // budget thinking and leave the JSON unfinished; that answer is not a refusal, so it is
+    // re-asked once rather than answered with the refusal sentence. The reservation above is
+    // shared by both attempts, so a retry costs the user nothing extra.
+    let mut messages = extraction_messages(message);
+    let mut routed: Option<Routed> = None;
+    let mut prompt_tokens: u64 = 0;
+    let mut completion_tokens: u64 = 0;
+    for attempt in 1..=EXTRACTION_ATTEMPTS {
+        let reply = match state
+            .llm
+            .complete(LlmRequest {
+                messages: messages.clone(),
+                max_tokens: EXTRACTION_MAX_TOKENS,
+                json_mode: true,
+            })
+            .await
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                tracing::warn!(user_id, attempt, error = %err.detail(), "assistant extraction failed");
+                credits::refund(state, user_id, charge).await;
+                return Err(AppError::LlmUnavailable(LLM_FAILURE_MESSAGE.to_string()));
+            }
+        };
+        prompt_tokens += reply.usage.prompt_tokens;
+        completion_tokens += reply.usage.completion_tokens;
 
-    let routed = parse_extraction(&reply.content);
-    let mut prompt_tokens = reply.usage.prompt_tokens;
-    let mut completion_tokens = reply.usage.completion_tokens;
+        let truncated = reply.finish_reason.as_deref() == Some("length");
+        if let Some(decision) = parse_answer(&reply.content) {
+            // A finished answer, or the best one available after the final attempt. Only the
+            // last attempt accepts a `length` stop: on the first it is what the retry exists for.
+            if !truncated || attempt == EXTRACTION_ATTEMPTS {
+                routed = Some(decision);
+                break;
+            }
+        }
+        // The raw prefix is logged (never the key, never a whole response): enough to see a
+        // cut-off object or prose, without turning the log into a copy of the provider body.
+        let raw_prefix: String = reply.content.chars().take(200).collect();
+        tracing::warn!(
+            user_id,
+            attempt,
+            finish_reason = ?reply.finish_reason,
+            raw_prefix = %raw_prefix,
+            "assistant extraction was truncated or unparseable"
+        );
+        if attempt < EXTRACTION_ATTEMPTS {
+            messages.push(LlmMessage::system(EXTRACTION_RETRY_NUDGE));
+        }
+    }
+    let routed = routed.unwrap_or_else(Routed::unsupported);
 
     // Outside the three purposes: fixed sentence, nothing charged. The reservation is put
     // back exactly where it came from.
@@ -771,12 +831,23 @@ mod tests {
     }
 
     fn text(content: &str) -> Result<LlmReply, LlmError> {
+        reply(content, Some("stop"))
+    }
+
+    /// A cut-off answer: the provider ran out of output budget, which on a reasoning model
+    /// happens before the JSON closes. `content` is whatever fragment was emitted.
+    fn truncated(content: &str) -> Result<LlmReply, LlmError> {
+        reply(content, Some("length"))
+    }
+
+    fn reply(content: &str, finish_reason: Option<&str>) -> Result<LlmReply, LlmError> {
         Ok(LlmReply {
             content: content.to_string(),
             usage: LlmUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
             },
+            finish_reason: finish_reason.map(str::to_string),
         })
     }
 
@@ -1119,6 +1190,144 @@ mod tests {
         assert_eq!(snapshot.used_this_period, 0);
         assert_eq!(snapshot.balance, 0);
         assert_eq!(snapshot.remaining_this_period, 3);
+    }
+
+    // A reasoning model spends output tokens on thinking before it emits the JSON, so a
+    // cut-off answer used to be read as a refusal. These four tests pin the retry, and — the
+    // part that matters for the ledger — that a retry is never a second charge.
+
+    #[tokio::test]
+    async fn a_truncated_extraction_is_retried_once_and_charges_a_single_query() {
+        let llm = StubLlm::new(vec![
+            // Everything the model managed to say before it hit the cap.
+            truncated("{\"intent\":\"sea"),
+            text(r#"{"intent":"search","keywords":["programme officer"],"location":"Mogadishu"}"#),
+        ]);
+        let Some(state) = test_state("jobify_test_assistant_retry_ok", llm.clone(), 3).await else {
+            return;
+        };
+
+        let answer = answer(&state, "user-1", "programme officer jobs in Mogadishu")
+            .await
+            .unwrap();
+        assert_eq!(
+            answer.intent,
+            Intent::Search,
+            "the retry recovers the routing"
+        );
+        assert_eq!(
+            answer.charged_queries, 1,
+            "a retry is not a second question"
+        );
+        assert_eq!(
+            answer.reply, NOTHING_MATCHES,
+            "no job is seeded in this database"
+        );
+        assert_eq!(answer.credits.used_this_period, 1);
+        assert_eq!(answer.credits.balance, 0);
+
+        let seen = llm.seen();
+        assert_eq!(seen.len(), 2, "extraction, then exactly one retry");
+        assert_eq!(
+            seen[0].messages.len(),
+            2,
+            "the first attempt is the plain prompt"
+        );
+        assert!(
+            seen.iter().all(|request| request.max_tokens == 1000),
+            "both attempts raise the cap; the retry is not squeezed"
+        );
+        assert_eq!(seen[1].messages.len(), 3, "the retry appends the nudge");
+        assert!(seen[1].messages[2].content.contains("cut off"));
+        assert_eq!(
+            seen[1].messages[1].content,
+            "programme officer jobs in Mogadishu"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_truncated_extractions_are_refused_and_charge_nothing() {
+        let llm = StubLlm::new(vec![
+            truncated("{\"intent\":\"sea"),
+            truncated("{\"intent\":\"sea"),
+        ]);
+        let Some(state) = test_state("jobify_test_assistant_retry_fail", llm.clone(), 3).await
+        else {
+            return;
+        };
+
+        let answer = answer(&state, "user-1", "programme officer jobs in Mogadishu")
+            .await
+            .unwrap();
+        assert_eq!(answer.intent, Intent::Unsupported);
+        assert_eq!(answer.reply, UNSUPPORTED_REPLY);
+        assert_eq!(answer.charged_queries, 0);
+        assert_eq!(llm.seen().len(), 2, "one retry, never a third call");
+
+        // A total failure refunds the reservation exactly as before the retry existed.
+        let snapshot = credits::snapshot(&state, "user-1").await.unwrap();
+        assert_eq!(snapshot.used_this_period, 0);
+        assert_eq!(snapshot.balance, 0);
+        assert_eq!(snapshot.remaining_this_period, 3);
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_extraction_is_retried_and_charges_one_query() {
+        let llm = StubLlm::new(vec![
+            text("I think this is about jobs, so: {intent: search"),
+            extraction("help"),
+        ]);
+        let Some(state) = test_state("jobify_test_assistant_retry_invalid", llm.clone(), 3).await
+        else {
+            return;
+        };
+
+        let answer = answer(&state, "user-1", "how does this work?")
+            .await
+            .unwrap();
+        assert_eq!(answer.intent, Intent::Help);
+        assert_eq!(answer.reply, HELP_TEXT);
+        assert_eq!(answer.charged_queries, 1);
+        assert_eq!(
+            answer.credits.used_this_period, 1,
+            "charged once, not twice"
+        );
+
+        let seen = llm.seen();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1].messages[2].content.contains("JSON object only"));
+    }
+
+    #[tokio::test]
+    async fn a_finished_extraction_is_not_retried_and_charges_once() {
+        let llm = StubLlm::new(vec![text(
+            r#"{"intent":"search","keywords":["nurse"],"location":"Mogadishu"}"#,
+        )]);
+        let Some(state) = test_state("jobify_test_assistant_no_retry", llm.clone(), 3).await else {
+            return;
+        };
+
+        let answer = answer(&state, "user-1", "nurse jobs in Mogadishu")
+            .await
+            .unwrap();
+        assert_eq!(answer.intent, Intent::Search);
+        assert_eq!(answer.charged_queries, 1);
+        assert_eq!(llm.seen().len(), 1, "a complete answer is never re-asked");
+    }
+
+    #[test]
+    fn only_an_unparseable_answer_is_retryable() {
+        // The model's own refusal is a valid decision: retrying it would double the provider
+        // cost of every unsupported message and could turn a refusal into a guess.
+        assert!(parse_answer(r#"{"intent":"unsupported"}"#).is_some());
+        assert!(parse_answer(r#"{"intent":"write_my_cv"}"#).is_some());
+        // No object, or an object cut off mid-token, is not a decision.
+        assert!(parse_answer("").is_none());
+        assert!(parse_answer("prose with no object").is_none());
+        assert!(parse_answer(r#"{"intent":"search","keywords":["nurse"#).is_none());
+        assert!(parse_answer(r#"{"intent":"search"#).is_none());
+        // The degrading wrapper keeps its old contract for every other caller.
+        assert_eq!(parse_extraction("prose").intent, Intent::Unsupported);
     }
 
     #[tokio::test]

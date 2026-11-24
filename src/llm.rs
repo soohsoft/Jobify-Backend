@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 
-/// A hard ceiling on one provider call. The assistant keeps `max_tokens` at 300, so a
-/// request that runs for longer than this is stuck, not slow.
+/// A hard ceiling on one provider call. The assistant caps an extraction at 1000 tokens —
+/// a reasoning model spends part of that budget thinking before it writes the JSON, so a
+/// 300-token cap truncated the answer and looked like a refusal (see `EXTRACTION_MAX_TOKENS`).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +62,10 @@ pub struct LlmUsage {
 pub struct LlmReply {
     pub content: String,
     pub usage: LlmUsage,
+    /// The provider's stop reason. `"length"` means the output hit `max_tokens` and was
+    /// cut off — for a JSON call that answer is incomplete, however well-formed its head
+    /// looks, so the assistant retries it instead of treating it as a refusal.
+    pub finish_reason: Option<String>,
 }
 
 /// Internal failure detail. The variant text is for `tracing` only: the assistant answers
@@ -129,6 +134,8 @@ struct ApiMessage {
 struct ApiChoice {
     #[serde(default)]
     message: Option<ApiMessage>,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -194,13 +201,14 @@ impl LlmClient for HttpLlmClient {
                 .json()
                 .await
                 .map_err(|err| LlmError::Transport(err.to_string()))?;
-            let content = data
-                .choices
-                .into_iter()
-                .next()
-                .and_then(|choice| choice.message)
-                .map(|message| message.content)
-                .unwrap_or_default();
+            let mut content = String::new();
+            let mut finish_reason = None;
+            if let Some(choice) = data.choices.into_iter().next() {
+                if let Some(message) = choice.message {
+                    content = message.content;
+                }
+                finish_reason = choice.finish_reason;
+            }
             let usage = data
                 .usage
                 .map(|usage| LlmUsage {
@@ -209,7 +217,11 @@ impl LlmClient for HttpLlmClient {
                 })
                 .unwrap_or_default();
 
-            Ok(LlmReply { content, usage })
+            Ok(LlmReply {
+                content,
+                usage,
+                finish_reason,
+            })
         })
     }
 }

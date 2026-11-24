@@ -2,9 +2,11 @@
  * Boot: read config, connect the gateway, register the global commands, arm the digest.
  *
  * Intents are exactly what the product needs — Guilds (to know its servers), GuildMessages
- * (mentions in a server) and DirectMessages (the documented way to talk to the bot). No
- * MessageContent: DMs work without it, and a server mention needs it enabled in the developer
- * portal, which the README explains.
+ * (mentions in a server and the optional free-text channel) and DirectMessages (the
+ * documented way to talk to the bot), plus MessageContent because a guild message arrives
+ * with an empty body without it. Slack-like "type in the channel" only works when the
+ * privileged intent is both requested here and enabled for the application in the developer
+ * portal; Discord refuses the login if it is requested but not approved.
  */
 import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 
@@ -31,7 +33,13 @@ async function main(): Promise<void> {
   });
 
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages],
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.DirectMessages,
+      // Guild message bodies (mentions and the free-text channel) are empty without this.
+      GatewayIntentBits.MessageContent,
+    ],
     // A DM channel created before this process started arrives partially hydrated; without
     // this, answering a member who wrote while the bot was restarting throws.
     partials: [Partials.Channel],

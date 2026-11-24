@@ -91,15 +91,17 @@ token is never logged — the boot line reports only `token_configured: true`.
 
 ## MESSAGE CONTENT intent
 
-The bot requests exactly three intents: `Guilds`, `GuildMessages`, `DirectMessages`.
+The bot requests four intents: `Guilds`, `GuildMessages`, `DirectMessages` and
+`MessageContent`.
 
 - **DMs work without MESSAGE CONTENT.** A DM to the bot arrives with its content; this is the
   documented way to talk to it.
-- **@mentions in a server need MESSAGE CONTENT enabled** in the developer portal
-  (Applications → Bot → Privileged Gateway Intents). Without it, a mention arrives with an
-  empty body and the bot can only reply "tell me what you are looking for". Slash commands are
-  unaffected either way. Enable it only if the server mention path matters to you; it requires
-  verification above 100 servers.
+- **Guild messages need MESSAGE CONTENT.** Without it a message — mention or plain text in
+  `DISCORD_FREE_CHANNEL_ID` — arrives with an empty body, so the bot stays silent. The intent
+  must be enabled in the developer portal (Applications → Bot → Privileged Gateway Intents)
+  *and* requested in `src/index.ts`; requesting one the application has not been approved for
+  makes the gateway login fail, which is why the code and the portal setting move together.
+  It requires verification above 100 servers. Slash commands are unaffected either way.
 
 ## The digest
 

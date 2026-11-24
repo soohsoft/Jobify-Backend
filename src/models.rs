@@ -1,3 +1,4 @@
+use mongodb::bson::DateTime as BsonDateTime;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -46,10 +47,22 @@ pub struct JobDoc {
     pub employment_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salary: Option<String>,
+    /// "job" or "tender". Every document stored before this field existed is a job, so
+    /// the default is also the migration: nothing is rewritten, and the API reports the
+    /// 55 legacy rows as `"kind": "job"` without a single write.
+    #[serde(default = "default_job_kind")]
+    pub kind: String,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+}
+
+pub const KIND_JOB: &str = "job";
+pub const KIND_TENDER: &str = "tender";
+
+pub fn default_job_kind() -> String {
+    KIND_JOB.to_string()
 }
 
 /// What the scraper posts. Mirrors `scraper/src/types.ts` exactly.
@@ -86,6 +99,11 @@ pub struct JobInput {
     pub employment_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salary: Option<String>,
+    /// Optional on the wire. Anything that is not "tender" (absent, blank, mis-cased, or a
+    /// value the taxonomy does not know) is stored as "job": a listing is never rejected
+    /// over a label.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -171,6 +189,19 @@ pub struct AlertPrefs {
     pub excluded_categories: Vec<String>,
 }
 
+/// The employer/vendor side of an account. Absent for a job seeker; set through
+/// `PATCH /me/company`, and cleared by sending an empty name.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CompanyProfile {
+    pub name: String,
+    #[serde(default)]
+    pub services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UserDoc {
     #[serde(rename = "_id")]
@@ -201,6 +232,21 @@ pub struct UserDoc {
     pub match_profile: Option<MatchProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<AlertPrefs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub education_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experience_years: Option<u8>,
+    /// Canonical category slugs, the same vocabulary `match_profile.categories` uses.
+    #[serde(default)]
+    pub sectors: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub company: Option<CompanyProfile>,
+    /// The immutable Discord snowflake this account belongs to. Absent on the nine
+    /// password accounts that predate the bot; `discord_links` is the reverse index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_id: Option<String>,
     #[serde(default)]
     pub created_at: String,
 }
@@ -242,6 +288,126 @@ pub struct EmailOtpDoc {
 
 fn default_otp_purpose() -> String {
     crate::otp::PURPOSE_VERIFY.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Discord identity, portal links, subscriptions, payments
+// ---------------------------------------------------------------------------
+
+/// One Discord account, bound to exactly one Jobify user. `discord_id` is the immutable
+/// snowflake the bot sends; it is also mirrored onto the user document for reads.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiscordLinkDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub discord_id: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_name: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// One live portal link. `_id` is the SHA-256 hex of the raw token, never the token
+/// itself: the raw value is returned to the bot exactly once and cannot be read back.
+///
+/// The timestamps are BSON dates rather than RFC3339 strings because the TTL index on
+/// `expires_at` only expires Date values — a string would leave dead rows forever. The
+/// exchange query also filters `expires_at`, so single use never depends on the TTL
+/// monitor having run.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LinkTokenDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    pub discord_id: String,
+    pub created_at: BsonDateTime,
+    pub expires_at: BsonDateTime,
+    #[serde(default)]
+    pub used_at: Option<BsonDateTime>,
+}
+
+pub const SUBSCRIPTION_ACTIVE: &str = "active";
+pub const SUBSCRIPTION_EXPIRED: &str = "expired";
+pub const SUBSCRIPTION_NONE: &str = "none";
+
+/// $1/month, one row per user (`_id` = user id). Absent means `status: "none"`; the
+/// route reports that rather than creating a row nobody asked for.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SubscriptionDoc {
+    #[serde(rename = "_id")]
+    pub user_id: String,
+    #[serde(default = "default_subscription_status")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_end: Option<String>,
+    #[serde(default = "default_subscription_amount")]
+    pub amount_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub auto_renew: bool,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+pub const SUBSCRIPTION_AMOUNT_USD: f64 = 1.0;
+
+fn default_subscription_status() -> String {
+    SUBSCRIPTION_NONE.to_string()
+}
+
+fn default_subscription_amount() -> f64 {
+    SUBSCRIPTION_AMOUNT_USD
+}
+
+impl SubscriptionDoc {
+    /// What a caller with no row sees: an honest `none`, not a 404.
+    pub fn none_for(user_id: &str) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            status: SUBSCRIPTION_NONE.to_string(),
+            period_start: None,
+            period_end: None,
+            amount_usd: SUBSCRIPTION_AMOUNT_USD,
+            provider: None,
+            auto_renew: false,
+            updated_at: String::new(),
+        }
+    }
+}
+
+/// A payment attempt in the shape the collection already holds (nine legacy rows). New
+/// rows add `provider`; legacy rows have no such field, so it is optional and every
+/// existing document is left exactly as it is.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PaymentDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub amount_usd: f64,
+    #[serde(default)]
+    pub tokens: u64,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub reference: String,
+    #[serde(default)]
+    pub provider_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +495,68 @@ pub struct UpdateProfileRequest {
     pub email: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Discord / portal / company requests
+// ---------------------------------------------------------------------------
+
+/// `POST /internal/discord/users`. `username` is the Discord handle; `global_name` is the
+/// display name and is what a person expects to see.
+#[derive(Deserialize)]
+pub struct DiscordUserRequest {
+    pub discord_id: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub global_name: Option<String>,
+}
+
+/// `POST /internal/discord/profile`. Every field is optional so the bot can send one
+/// answer at a time; the match profile is derived from whatever arrives.
+#[derive(Deserialize)]
+pub struct DiscordProfileRequest {
+    pub discord_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub education_level: Option<String>,
+    #[serde(default)]
+    pub experience_years: Option<u8>,
+    #[serde(default)]
+    pub sectors: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+}
+
+/// `POST /internal/discord/link-token`.
+#[derive(Deserialize)]
+pub struct LinkTokenRequest {
+    pub discord_id: String,
+    /// Defaults to 900 and is clamped to 300..=3600: a portal link is a convenience, not
+    /// a password, and a week-long one is a standing key.
+    #[serde(default)]
+    pub ttl_seconds: Option<i64>,
+}
+
+/// `POST /auth/magic`.
+#[derive(Deserialize)]
+pub struct MagicLinkRequest {
+    pub token: String,
+}
+
+/// `PATCH /me/company`. An empty `name` clears the company.
+#[derive(Deserialize)]
+pub struct CompanyRequest {
+    pub name: String,
+    #[serde(default)]
+    pub services: Vec<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct UserResponse {
     pub id: String,
@@ -348,6 +576,16 @@ pub struct UserResponse {
     pub match_profile: Option<MatchProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alerts: Option<AlertPrefs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub education_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experience_years: Option<u8>,
+    pub sectors: Vec<String>,
+    pub skills: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub company: Option<CompanyProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_id: Option<String>,
 }
 
 impl UserResponse {
@@ -365,6 +603,12 @@ impl UserResponse {
             avatar_url: user.avatar_url.clone(),
             match_profile: user.match_profile.clone(),
             alerts: user.alerts.clone(),
+            education_level: user.education_level.clone(),
+            experience_years: user.experience_years,
+            sectors: user.sectors.clone(),
+            skills: user.skills.clone(),
+            company: user.company.clone(),
+            discord_id: user.discord_id.clone(),
         }
     }
 }

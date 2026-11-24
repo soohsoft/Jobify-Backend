@@ -15,11 +15,29 @@ pub async fn connect(config: &Config) -> mongodb::error::Result<Database> {
 /// live collection must not be touched at startup.
 async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     // Prevent duplicate registrations racing the find-then-insert in auth.
-    db.collection::<mongodb::bson::Document>("users")
+    //
+    // PARTIAL, and that is the whole point. A Discord account has no email, so several
+    // user documents carry `email: ""` (and the field may be absent). A plain unique index
+    // on `email` treats every empty/missing value as the same null key, which would allow
+    // exactly ONE Discord user in the entire database. The partial expression covers only
+    // real addresses, so many Discord accounts coexist while two people still cannot share
+    // a password account's address.
+    let users = db.collection::<mongodb::bson::Document>("users");
+    // The pre-Discord index was named `email_1` and is strictly weaker than the one below.
+    // Dropping by name is idempotent (a missing index is an error we ignore) and is what
+    // lets `create_index` change the options instead of failing with a conflict.
+    let _ = users.drop_index("email_1").await;
+    users
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "email": 1 })
-                .options(IndexOptions::builder().unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .name("email_unique_nonempty".to_string())
+                        .partial_filter_expression(doc! { "email": { "$gt": "" } })
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -63,6 +81,15 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
+    // `GET /jobs?kind=` reads the whole feed through this field.
+    db.collection::<mongodb::bson::Document>("jobs")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "kind": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
     // One notification per (user, job). Partial, so notifications carrying no job_id are
     // not all treated as the same null key.
     db.collection::<mongodb::bson::Document>("notifications")
@@ -73,6 +100,45 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                     IndexOptions::builder()
                         .unique(true)
                         .partial_filter_expression(doc! { "job_id": { "$exists": true } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // One Jobify user per Discord account, enforced by the database rather than by the
+    // find-then-write in the route: two bot calls for a new member race each other.
+    db.collection::<mongodb::bson::Document>("discord_links")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "discord_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // Lookups by user, for the portal and for account deletion.
+    db.collection::<mongodb::bson::Document>("discord_links")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // A link token stops being useful at `expires_at`, so the row may go with it. TTL only
+    // acts on real BSON dates, which is why the model stores `expires_at` as a date and not
+    // an RFC3339 string. Expiry correctness does not depend on this: the exchange query
+    // filters on the date itself.
+    db.collection::<mongodb::bson::Document>("link_tokens")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("expires_at_ttl".to_string())
+                        .expire_after(std::time::Duration::from_secs(0))
                         .build(),
                 )
                 .build(),

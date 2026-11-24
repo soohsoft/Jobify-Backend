@@ -11,6 +11,9 @@ pub struct Config {
     pub jwt_issuer: String,
     /// The scraper sends this as `x-api-key`. There is deliberately no second name for it.
     pub internal_api_key: String,
+    /// Where the web portal lives, with no trailing slash. `POST /internal/discord/link-token`
+    /// builds `<APP_BASE_URL>/enter?t=<raw>` from it; the bot does not need to know the host.
+    pub app_base_url: String,
 }
 
 impl Config {
@@ -29,6 +32,10 @@ impl Config {
                 "SCRAPER_INTERNAL_API_KEY",
                 "jobify-scraper-dev-key-change-me",
             ),
+            // Trailing slashes are stripped here so the minted URL is never `//enter`.
+            app_base_url: env_var("APP_BASE_URL", "http://localhost:5173")
+                .trim_end_matches('/')
+                .to_string(),
         }
     }
 }

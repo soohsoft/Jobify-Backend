@@ -5,6 +5,7 @@ mod categories;
 mod config;
 mod db;
 mod error;
+mod links;
 mod mail;
 mod middleware;
 mod models;
@@ -32,9 +33,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(addr = %addr, mail_live, "jobify-backend listening");
-    axum::serve(listener, routes)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Connect info is enabled so `POST /auth/magic` can key its attempt limit on the real
+    // peer address rather than on a header the caller controls.
+    axum::serve(
+        listener,
+        routes.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }

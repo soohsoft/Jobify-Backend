@@ -8,9 +8,11 @@ use crate::state::AppState;
 mod alerts;
 mod auth;
 mod common;
+mod discord;
 mod health;
 mod jobs;
 mod notifications;
+mod subscription;
 
 pub type ApiResult =
     Result<(axum::http::StatusCode, axum::Json<serde_json::Value>), crate::error::AppError>;
@@ -36,6 +38,7 @@ pub fn app(state: AppState) -> Router {
         .merge(jobs::protected_router())
         .merge(alerts::protected_router())
         .merge(notifications::router())
+        .merge(subscription::protected_router())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -44,6 +47,7 @@ pub fn app(state: AppState) -> Router {
     let internal = Router::new()
         .merge(jobs::internal_router())
         .merge(alerts::internal_router())
+        .merge(discord::internal_router())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_internal_api,

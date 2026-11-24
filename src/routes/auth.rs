@@ -1,30 +1,36 @@
 use axum::{
     Extension, Json, Router,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::StatusCode,
     routing::{get, post, put},
 };
 use mongodb::bson::doc;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 
 use crate::auth::{AuthUser, hash_password, issue_token, verify_password};
 use crate::categories::Category;
 use crate::error::AppError;
+use crate::links;
 use crate::models::{
-    EmailOtpDoc, ForgotPasswordRequest, LoginRequest, MatchProfile, MatchProfileRequest,
-    RegisterRequest, ResendOtpRequest, ResetPasswordRequest, UpdateProfileRequest, UserDoc,
-    UserResponse, VerifyEmailRequest,
+    CompanyProfile, CompanyRequest, EmailOtpDoc, ForgotPasswordRequest, LoginRequest,
+    MagicLinkRequest, MatchProfile, MatchProfileRequest, RegisterRequest, ResendOtpRequest,
+    ResetPasswordRequest, UpdateProfileRequest, UserDoc, UserResponse, VerifyEmailRequest,
 };
 use crate::otp;
 use crate::state::AppState;
 use crate::util::{now_iso, uuid_id};
 
 use super::ApiResult;
+use super::subscription;
 
 pub fn public_router() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
+        // The web portal has no signup and no password: the bot mints a one-time link and
+        // the portal trades it here for a session.
+        .route("/auth/magic", post(magic_link))
         // Both are public by necessity: the user cannot authenticate, that is the problem.
         // Neither confirms whether an address has an account.
         .route("/auth/forgot-password", post(forgot_password))
@@ -44,6 +50,9 @@ pub fn verification_router() -> Router<AppState> {
 pub fn protected_router() -> Router<AppState> {
     Router::new()
         .route("/auth/me", get(me).patch(update_me))
+        // The company/vendor profile is its own resource rather than a field on the user:
+        // it is the employer side of the account, with its own validation and caps.
+        .route("/me/company", axum::routing::patch(update_company))
         // The match profile has its own endpoint rather than riding on PATCH /auth/me: it is
         // the one field the matcher and the alert queue read, so it gets its own validation,
         // its own caps and a verb that says "this replaces the whole profile".
@@ -141,6 +150,13 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         location: None,
         match_profile: None,
         alerts: None,
+        education_level: None,
+        experience_years: None,
+        sectors: Vec::new(),
+        skills: Vec::new(),
+        company: None,
+        // A password account has no Discord identity until it is linked.
+        discord_id: None,
         created_at: now,
     };
 
@@ -220,6 +236,94 @@ async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) ->
         Json(json!({
             "status": "success",
             "data": { "user": UserResponse::from_doc(&user), "token": token }
+        })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Portal sign-in (one-time link)
+// ---------------------------------------------------------------------------
+
+/// `POST /auth/magic` — the ONLY way into the web portal, and the only session endpoint
+/// that is neither a password nor a signup.
+///
+/// Single use is enforced by the database, not by a read-then-write: the exchange is one
+/// `find_one_and_update` whose filter requires `used_at: null` and an unexpired
+/// `expires_at`. Two parallel exchanges with the same token therefore cannot both match —
+/// the loser sees `None` and gets the same 400 as an unknown token.
+///
+/// Every failure answers with the SAME message and status. The endpoint is public, so
+/// distinguishing "never existed" from "expired" from "already used" would tell an attacker
+/// which guesses were once real. Attempts are logged (by IP, never by token) and a coarse
+/// per-IP limit keeps one client from walking the space.
+async fn magic_link(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<MagicLinkRequest>,
+) -> ApiResult {
+    let ip = addr.ip().to_string();
+    if !state.magic_limiter.check(&ip) {
+        tracing::warn!(ip = %ip, "magic link exchange refused: too many attempts");
+        return Err(AppError::TooManyRequests(
+            "Too many sign-in attempts. Wait a few minutes and try again.".to_string(),
+        ));
+    }
+
+    let invalid = || AppError::BadRequest("This link has expired or was already used".to_string());
+
+    let raw = body.token.trim();
+    if raw.is_empty() {
+        tracing::info!(ip = %ip, "magic link exchange with no token");
+        return Err(invalid());
+    }
+
+    let now = mongodb::bson::DateTime::from_millis(chrono::Utc::now().timestamp_millis());
+    let burned = state
+        .link_tokens()
+        .find_one_and_update(
+            doc! {
+                "_id": links::token_fingerprint(raw),
+                "used_at": null,
+                "expires_at": { "$gt": now },
+            },
+            doc! { "$set": { "used_at": now } },
+        )
+        .await?;
+
+    let Some(token) = burned else {
+        tracing::info!(ip = %ip, "magic link exchange refused: unknown, used or expired");
+        return Err(invalid());
+    };
+
+    let user = state
+        .users()
+        .find_one(doc! { "_id": &token.user_id })
+        .await?
+        .ok_or_else(|| {
+            // The token was valid but its account is gone. This is a data problem, not a
+            // bad link, so it is reported as an error and not disguised as one.
+            tracing::error!(user_id = %token.user_id, "magic link points at a missing account");
+            AppError::Internal("This link no longer points at an account".to_string())
+        })?;
+
+    let jwt = issue_token(
+        &state.config.jwt_secret,
+        &state.config.jwt_issuer,
+        &user.id,
+        &user.role,
+    )?;
+    let subscription = subscription::subscription_for(&state, &user.id).await?;
+
+    tracing::info!(user_id = %user.id, ip = %ip, "portal session issued from a one-time link");
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": {
+                "user": UserResponse::from_doc(&user),
+                "token": jwt,
+                "subscription": subscription::payload(&subscription),
+            }
         })),
     ))
 }
@@ -436,6 +540,131 @@ async fn delete_match_profile(
         .await?;
 
     let updated = load_user(&state, &user.id).await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": UserResponse::from_doc(&updated) })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Company / vendor profile
+// ---------------------------------------------------------------------------
+
+/// A company is a shop window, not a CV: ten services with short labels is the whole
+/// shape, and a list that grows without limit stops being readable.
+pub const MAX_COMPANY_SERVICES: usize = 10;
+pub const MAX_COMPANY_SERVICE_CHARS: usize = 40;
+pub const MAX_COMPANY_NAME_CHARS: usize = 120;
+pub const MAX_COMPANY_WEBSITE_CHARS: usize = 300;
+pub const MAX_COMPANY_DESCRIPTION_CHARS: usize = 1000;
+
+/// Trim, drop blanks, collapse case-insensitive duplicates, and refuse anything over the
+/// cap instead of silently keeping ten of twelve: a caller that loses two services without
+/// being told will believe they were saved.
+fn clean_services(raw: Vec<String>) -> Result<Vec<String>, AppError> {
+    let mut services: Vec<String> = Vec::new();
+    for value in raw {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() > MAX_COMPANY_SERVICE_CHARS {
+            return Err(AppError::BadRequest(format!(
+                "Each service must be {MAX_COMPANY_SERVICE_CHARS} characters or fewer — '{}' is {}.",
+                trimmed,
+                trimmed.chars().count()
+            )));
+        }
+        if !services
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+        {
+            services.push(trimmed.to_string());
+        }
+        if services.len() > MAX_COMPANY_SERVICES {
+            return Err(AppError::BadRequest(format!(
+                "List at most {MAX_COMPANY_SERVICES} services — you entered {}.",
+                services.len()
+            )));
+        }
+    }
+    Ok(services)
+}
+
+fn normalize_optional(
+    value: Option<String>,
+    max: usize,
+    noun: &str,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > max {
+        return Err(AppError::BadRequest(format!(
+            "The {noun} must be {max} characters or fewer."
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// `PATCH /me/company` — the employer/vendor side of an account.
+///
+/// An empty name CLEARS the company (200, not 400): the portal's company form needs a way
+/// to say "I am not a company after all", and a validation error is not that. Every other
+/// field is normalized here so the stored document is the canonical one.
+async fn update_company(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<CompanyRequest>,
+) -> ApiResult {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        state
+            .users()
+            .update_one(
+                doc! { "_id": &auth.id },
+                doc! { "$unset": { "company": "" } },
+            )
+            .await?;
+        let updated = load_user(&state, &auth.id).await?;
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "success", "data": UserResponse::from_doc(&updated) })),
+        ));
+    }
+
+    if name.chars().count() > MAX_COMPANY_NAME_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "The company name must be {MAX_COMPANY_NAME_CHARS} characters or fewer."
+        )));
+    }
+
+    let company = CompanyProfile {
+        name,
+        services: clean_services(body.services)?,
+        website: normalize_optional(body.website, MAX_COMPANY_WEBSITE_CHARS, "website")?,
+        description: normalize_optional(
+            body.description,
+            MAX_COMPANY_DESCRIPTION_CHARS,
+            "description",
+        )?,
+    };
+
+    let stored = mongodb::bson::to_bson(&company)?;
+    state
+        .users()
+        .update_one(
+            doc! { "_id": &auth.id },
+            doc! { "$set": { "company": stored } },
+        )
+        .await?;
+
+    // Read back rather than echo, same rule as every other write in this file.
+    let updated = load_user(&state, &auth.id).await?;
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": UserResponse::from_doc(&updated) })),
@@ -906,5 +1135,41 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
         assert_eq!(bearer_user(&valid, "test-secret").unwrap().id, "user-1");
+    }
+
+    #[test]
+    fn company_services_are_trimmed_deduped_and_capped() {
+        let services = clean_services(vec![
+            " Solar installation ".to_string(),
+            "solar INSTALLATION".to_string(),
+            "".to_string(),
+            "Maintenance".to_string(),
+        ])
+        .expect("a valid service list must be accepted");
+        assert_eq!(services, vec!["Solar installation", "Maintenance"]);
+
+        let too_many: Vec<String> = (0..11).map(|n| format!("service {n}")).collect();
+        let err = clean_services(too_many).expect_err("over the cap must be refused");
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("at most 10 services"));
+
+        let long = vec!["x".repeat(MAX_COMPANY_SERVICE_CHARS + 1)];
+        let err = clean_services(long).expect_err("an over-long service must be refused");
+        assert!(err.message().contains("40 characters"));
+    }
+
+    #[test]
+    fn a_blank_company_field_is_stored_as_absent() {
+        assert_eq!(
+            normalize_optional(Some("   ".to_string()), 300, "website").unwrap(),
+            None
+        );
+        assert_eq!(normalize_optional(None, 300, "website").unwrap(), None);
+        assert_eq!(
+            normalize_optional(Some("  https://a.so ".to_string()), 300, "website").unwrap(),
+            Some("https://a.so".to_string())
+        );
+        let err = normalize_optional(Some("x".repeat(301)), 300, "website").expect_err("too long");
+        assert!(err.message().contains("website"));
     }
 }

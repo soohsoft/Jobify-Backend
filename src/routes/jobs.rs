@@ -14,7 +14,9 @@ use std::collections::HashMap;
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
-use crate::models::{AlertPrefs, JobDoc, JobInput, MatchProfile, NotificationDoc};
+use crate::models::{
+    AlertPrefs, JobDoc, JobInput, KIND_JOB, KIND_TENDER, MatchProfile, NotificationDoc,
+};
 use crate::state::AppState;
 use crate::util::{escape_regex, nairobi_days_ago, nairobi_today, now_iso, uuid_id};
 
@@ -83,6 +85,10 @@ pub struct JobsQuery {
     organization: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    /// `job` or `tender`. Absent means both — which is what the 55 listings stored before
+    /// `kind` existed need, since they carry no field at all.
+    #[serde(default)]
+    kind: Option<String>,
     #[serde(default = "default_page")]
     page: u64,
     #[serde(default = "default_limit")]
@@ -142,11 +148,33 @@ async fn list(
         );
     }
 
-    let live = live_job_filter();
-    let filter = if filter.is_empty() {
-        live
+    // A `kind` filter is a separate clause rather than another key in `filter`, because
+    // `filter` may already hold an `$or` from the search box and a Document cannot hold the
+    // same key twice. "job" must also match the legacy rows, which have no `kind` field at
+    // all: `null` matches both an explicit null and a missing field.
+    let kind_clause = match query.kind.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(KIND_TENDER) => Some(doc! { "kind": KIND_TENDER }),
+        Some(KIND_JOB) => Some(doc! { "$or": [ { "kind": KIND_JOB }, { "kind": null } ] }),
+        Some(other) => {
+            return Err(AppError::BadRequest(format!(
+                "kind must be \"{KIND_JOB}\" or \"{KIND_TENDER}\" — got '{other}'"
+            )));
+        }
+    };
+
+    let mut clauses = Vec::new();
+    if !filter.is_empty() {
+        clauses.push(filter);
+    }
+    clauses.push(live_job_filter());
+    if let Some(kind) = kind_clause {
+        clauses.push(kind);
+    }
+    let filter = if clauses.len() == 1 {
+        clauses.remove(0)
     } else {
-        doc! { "$and": [filter, live] }
+        doc! { "$and": clauses }
     };
 
     let page = query.page.max(1);
@@ -439,6 +467,9 @@ async fn ingest_jobs(
         if let Some(value) = input.salary.as_deref().filter(|s| !s.trim().is_empty()) {
             set.insert("salary", value);
         }
+        // Always written, and always a known value: a listing is never rejected over its
+        // kind, and the 55 legacy documents are read as "job" through the serde default.
+        set.insert("kind", canonical_kind(&input.kind));
         if !input.requirements.is_empty() {
             set.insert("requirements", &input.requirements);
         }
@@ -485,6 +516,21 @@ async fn ingest_jobs(
 fn canonical_category(raw: &Option<String>) -> Option<&'static str> {
     let slug = raw.as_deref()?.trim();
     crate::categories::Category::from_slug(slug).map(|category| category.slug())
+}
+
+/// "tender" is the only alternative to a job. Anything else — absent, blank, mis-cased or
+/// unknown — is stored as "job": the label is never a reason to drop a listing, and a
+/// tender that stops claiming to be one becomes a job rather than keeping a stale type.
+fn canonical_kind(raw: &Option<String>) -> &'static str {
+    match raw
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some(KIND_TENDER) => KIND_TENDER,
+        _ => KIND_JOB,
+    }
 }
 
 #[derive(Deserialize)]
@@ -730,10 +776,21 @@ pub async fn queue_matches_for_user(
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_category;
+    use super::{canonical_category, canonical_kind};
 
     fn raw(value: &str) -> Option<String> {
         Some(value.to_string())
+    }
+
+    #[test]
+    fn a_kind_is_tender_only_when_it_says_so() {
+        assert_eq!(canonical_kind(&raw("tender")), "tender");
+        assert_eq!(canonical_kind(&raw("  TENDER  ")), "tender");
+        // Everything else is a job, and nothing is rejected over the label.
+        assert_eq!(canonical_kind(&raw("job")), "job");
+        assert_eq!(canonical_kind(&raw("consultancy")), "job");
+        assert_eq!(canonical_kind(&raw("")), "job");
+        assert_eq!(canonical_kind(&None), "job");
     }
 
     #[test]

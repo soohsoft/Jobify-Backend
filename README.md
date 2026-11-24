@@ -63,6 +63,7 @@ Every response is `{"status": "success", "data": ..., "meta": ...}`; every error
 | POST | `/internal/discord/profile` (`discord_id` + onboarding answers) | `x-api-key` |
 | POST | `/internal/discord/link-token` (`discord_id`, `ttl_seconds?`) | `x-api-key` |
 | GET | `/internal/discord/user/{discord_id}` | `x-api-key` |
+| GET | `/internal/discord/matches/{discord_id}?limit=5` (scored rows, same matcher as `/jobs/match`) | `x-api-key` |
 
 `POST /subscription/start` answers 200 with `meta.gateway_wired: false` and a pending
 `provider: "manual"` payment row: the $1/month charge is recorded but nothing is activated,
@@ -147,10 +148,30 @@ every assistant call answers 502 and charges nothing.
   ⇒ `job`, never a rejected listing). The 55 pre-kind documents were not rewritten; they
   read back as `"kind": "job"` through the serde default, and `?kind=job` matches an absent
   field as well as an explicit one.
-- **`match_profile` is derived from the bot's onboarding answers** (sectors → canonical
-  category slugs, skills → keywords, location → locations) so the existing matcher works
-  unchanged. Unknown sectors are dropped; the manual `PUT /me/match-profile` still refuses
-  them by name.
+- **`match_profile` is derived in Rust from the onboarding answers** — there is no model in
+  the match path:
+  - `categories` = the union, in answer order and deduped, of the categories each recorded
+    degree's **field of study** maps to (`src/onboarding.rs`). `Health → health`,
+    `Business administration` and `Finance & accounting → business_and_finance`, `ICT → ict`,
+    `Engineering → engineering_and_construction`, `Agriculture → agriculture`, `Law →
+    legal_and_regulatory_services`, `Logistics & procurement → logistics_and_supply_chain`,
+    `Social science & development → humanitarian_aid_and_emergency_relief`, `WASH → wash`,
+    `Nutrition → food_security`, `Education → education`;
+  - `keywords` = the words of `last_position` (at most four), the member's own words behind an
+    `Other` field, and any skills a web client still sends (20 total);
+  - `locations` is **always empty**: Jobify covers all of Somalia, so the interview does not ask
+    for a city and the matcher ranks the whole country.
+  Levels and fields are validated against fixed lists; anything else is a **400 naming the
+  offender** and nothing is written. `education` is `[{level, field}]`, ordered, max 4; a
+  non-degree level carries an empty field, and `Other` is stored as `Other: <their words>`
+  (which maps to no category — the words only become keywords). `education_level` mirrors the
+  highest degree and `sectors` mirrors the derived categories, so neither can drift.
+- **`onboarding_complete` = a name AND at least one education entry**, not "the matcher has a
+  category": an all-`Other` history is a real answer and still onboarding-complete (it just
+  matches by keyword). Completing it switches the daily digest on
+  (`alerts.enabled: true`, `mode: daily`) — unless `alerts.user_disabled` is set, which is what
+  `/stop` and `/alerts off` write, so a re-run of the interview can never silently re-enable a
+  member who said no.
 
 ## Dev gates
 

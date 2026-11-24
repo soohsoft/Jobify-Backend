@@ -301,6 +301,9 @@ pub(crate) async fn apply_alert_prefs(
                     "alerts.enabled": enabled,
                     "alerts.mode": &mode,
                     "alerts.last_sent_at": &last_sent_at,
+                    // Remember that this was the member's own decision, so finishing (or
+                    // re-running) onboarding cannot switch alerts back on behind their back.
+                    "alerts.user_disabled": !enabled,
                 }
             },
         )
@@ -367,7 +370,13 @@ async fn not_a_fit(
             doc! { "_id": &auth.id },
             doc! {
                 "$addToSet": { format!("alerts.{field}"): &value },
-                "$set": { "alerts.enabled": true, "alerts.mode": "daily" },
+                // Rejecting a job is an active "keep sending me things", so it clears the
+                // explicit switch-off marker as well as switching alerts on.
+                "$set": {
+                    "alerts.enabled": true,
+                    "alerts.mode": "daily",
+                    "alerts.user_disabled": false,
+                },
             },
         )
         .await?;

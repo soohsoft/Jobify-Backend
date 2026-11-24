@@ -12,6 +12,9 @@ mod llm;
 mod mail;
 mod middleware;
 mod models;
+/// The education/experience → matcher translation. Called by the Discord profile route and
+/// unit-tested on its own, because these lists decide who is sent what.
+mod onboarding;
 mod otp;
 mod routes;
 mod state;

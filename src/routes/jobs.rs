@@ -808,6 +808,44 @@ pub async fn queue_matches_for_user(
     queue_notifications(state, user_id, &scored).await
 }
 
+/// The matcher for a stored account, with no HTTP caller.
+///
+/// `GET /jobs/match` (bearer) and the bot's `GET /internal/discord/matches/{discord_id}` both
+/// come through here, so the portal and Discord cannot disagree about what matches — the same
+/// reason `live_job_filter` exists. It always reads, never queues: the caller decides whether
+/// a read should consume alert state, and both current callers say no.
+///
+/// Returns the scored rows and the categories that produced them; an empty category list is
+/// the "no usable profile" state, which is normal on the way into onboarding.
+pub(crate) async fn match_rows(
+    state: &AppState,
+    user_id: &str,
+    limit: i64,
+) -> Result<(Vec<(f64, JobDoc)>, Vec<String>), AppError> {
+    let Some(user) = state.users().find_one(doc! { "_id": user_id }).await? else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let exclusions = user.alerts.clone().unwrap_or_default();
+    let Some(profile) = user
+        .match_profile
+        .clone()
+        .filter(|profile| !profile.categories.is_empty())
+    else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+
+    let scored = ranked_candidates(
+        state,
+        &profile,
+        &exclusions,
+        &[],
+        limit,
+        kind_preference_clause("both"),
+    )
+    .await?;
+    Ok((scored, profile.categories))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{canonical_category, canonical_kind};

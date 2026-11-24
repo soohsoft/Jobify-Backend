@@ -151,6 +151,8 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterReques
         match_profile: None,
         alerts: None,
         education_level: None,
+        education: Vec::new(),
+        last_position: None,
         experience_years: None,
         sectors: Vec::new(),
         skills: Vec::new(),

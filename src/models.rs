@@ -183,10 +183,29 @@ pub struct AlertPrefs {
     pub mode: String,
     #[serde(default)]
     pub last_sent_at: String,
+    /// Set when the member themselves switched alerts off (`/stop`, `/alerts off`).
+    ///
+    /// Finishing onboarding turns alerts on by default, and re-running the interview must not
+    /// undo an explicit "no": this flag is the difference between "never asked" and "said no",
+    /// which `enabled: false` alone cannot express. Defaulted, so the documents written before
+    /// it existed read as "never said no".
+    #[serde(default)]
+    pub user_disabled: bool,
     #[serde(default)]
     pub excluded_employers: Vec<String>,
     #[serde(default)]
     pub excluded_categories: Vec<String>,
+}
+
+/// One degree or certificate, in the order the member answered. `field` is the canonical label
+/// from `onboarding::FIELDS` — or `Other: <the member's own words>` — and is empty for a level
+/// that is not asked about a field (`none`, `primary`, `secondary`, `diploma`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct EducationEntry {
+    #[serde(default)]
+    pub level: String,
+    #[serde(default)]
+    pub field: String,
 }
 
 /// The employer/vendor side of an account. Absent for a job seeker; set through
@@ -234,6 +253,13 @@ pub struct UserDoc {
     pub alerts: Option<AlertPrefs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub education_level: Option<String>,
+    /// The interview's answer set: levels with the field of study, in the order given (max 4).
+    /// Defaulted, so the ten accounts written before this existed read as an empty list.
+    #[serde(default)]
+    pub education: Vec<EducationEntry>,
+    /// The most recent job title, as the member typed it. Feeds the matcher's keywords.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_position: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experience_years: Option<u8>,
     /// Canonical category slugs, the same vocabulary `match_profile.categories` uses.
@@ -601,17 +627,28 @@ pub struct DiscordUserRequest {
 
 /// `POST /internal/discord/profile`. Every field is optional so the bot can send one
 /// answer at a time; the match profile is derived from whatever arrives.
+///
+/// `education` is `Option<Vec<..>>` rather than a plain list on purpose: `None` means "this
+/// answer was not part of the payload" and `Some(list)` means "this is the whole history",
+/// so a partial save cannot wipe the degrees already recorded.
 #[derive(Deserialize)]
 pub struct DiscordProfileRequest {
     pub discord_id: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
-    pub location: Option<String>,
-    #[serde(default)]
     pub education_level: Option<String>,
     #[serde(default)]
+    pub education: Option<Vec<EducationEntry>>,
+    /// The last job title. A blank value clears it; an absent one leaves it alone.
+    #[serde(default)]
+    pub last_position: Option<String>,
+    #[serde(default)]
     pub experience_years: Option<u8>,
+    /// No longer asked by the interview (Jobify covers all of Somalia) and no longer part of
+    /// the derived match profile, but still accepted and stored so an older client keeps working.
+    #[serde(default)]
+    pub location: Option<String>,
     #[serde(default)]
     pub sectors: Vec<String>,
     #[serde(default)]
@@ -695,6 +732,11 @@ pub struct UserResponse {
     pub alerts: Option<AlertPrefs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub education_level: Option<String>,
+    /// Always serialised (an empty list is meaningful: this account has no degrees recorded),
+    /// so the bot can render the interview's answers back to the member.
+    pub education: Vec<EducationEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_position: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub experience_years: Option<u8>,
     pub sectors: Vec<String>,
@@ -723,6 +765,8 @@ impl UserResponse {
             match_profile: user.match_profile.clone(),
             alerts: user.alerts.clone(),
             education_level: user.education_level.clone(),
+            education: user.education.clone(),
+            last_position: user.last_position.clone(),
             experience_years: user.experience_years,
             sectors: user.sectors.clone(),
             skills: user.skills.clone(),

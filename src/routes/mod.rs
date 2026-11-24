@@ -7,7 +7,9 @@ use crate::state::AppState;
 
 mod alerts;
 mod assistant;
-mod auth;
+// `pub(crate)` for the profile caps: the onboarding translation validates against the SAME
+// keyword/term limits the portal's `PUT /me/match-profile` enforces.
+pub(crate) mod auth;
 mod categories;
 mod common;
 mod credits;

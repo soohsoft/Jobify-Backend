@@ -129,7 +129,7 @@ pub struct SourceConfig {
 // Users
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MatchProfile {
     /// Canonical category slugs, validated through `categories::Category`.
     #[serde(default)]
@@ -140,6 +140,19 @@ pub struct MatchProfile {
     pub locations: Vec<String>,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// `PUT /me/match-profile`. Every field defaults, so a caller may send only what it has —
+/// but the request REPLACES the stored profile rather than merging into it: the three lists
+/// are the whole profile, and an omitted list is an empty one.
+#[derive(Deserialize, Clone, Default)]
+pub struct MatchProfileRequest {
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub locations: Vec<String>,
 }
 
 /// A user's job-alert subscription and the negative signals that shape it.

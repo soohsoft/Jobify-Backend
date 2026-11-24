@@ -2,16 +2,18 @@ use axum::{
     Extension, Json, Router,
     extract::State,
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use mongodb::bson::doc;
 use serde_json::{Value, json};
 
 use crate::auth::{AuthUser, hash_password, issue_token, verify_password};
+use crate::categories::Category;
 use crate::error::AppError;
 use crate::models::{
-    EmailOtpDoc, ForgotPasswordRequest, LoginRequest, RegisterRequest, ResendOtpRequest,
-    ResetPasswordRequest, UpdateProfileRequest, UserDoc, UserResponse, VerifyEmailRequest,
+    EmailOtpDoc, ForgotPasswordRequest, LoginRequest, MatchProfile, MatchProfileRequest,
+    RegisterRequest, ResendOtpRequest, ResetPasswordRequest, UpdateProfileRequest, UserDoc,
+    UserResponse, VerifyEmailRequest,
 };
 use crate::otp;
 use crate::state::AppState;
@@ -40,7 +42,15 @@ pub fn verification_router() -> Router<AppState> {
 }
 
 pub fn protected_router() -> Router<AppState> {
-    Router::new().route("/auth/me", get(me).patch(update_me))
+    Router::new()
+        .route("/auth/me", get(me).patch(update_me))
+        // The match profile has its own endpoint rather than riding on PATCH /auth/me: it is
+        // the one field the matcher and the alert queue read, so it gets its own validation,
+        // its own caps and a verb that says "this replaces the whole profile".
+        .route(
+            "/me/match-profile",
+            put(put_match_profile).delete(delete_match_profile),
+        )
 }
 
 /// Creates (or replaces) the account's code, stores only its hash, and mails it.
@@ -286,6 +296,145 @@ async fn update_me(
 
     // Read back rather than echo the request: then the response is the stored document,
     // and a client can trust it as the new state.
+    let updated = load_user(&state, &user.id).await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": UserResponse::from_doc(&updated) })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Match profile
+// ---------------------------------------------------------------------------
+
+/// Limits on what a profile may hold. Small on purpose: the matcher scores every candidate
+/// against every keyword, and each entry is also read on every alert run.
+pub const MAX_PROFILE_CATEGORIES: usize = 10;
+pub const MAX_PROFILE_KEYWORDS: usize = 20;
+pub const MAX_PROFILE_LOCATIONS: usize = 5;
+/// A keyword or location is a search term, not a sentence.
+pub const MAX_PROFILE_TERM_CHARS: usize = 60;
+
+/// Turns a request into the document shape the matcher already understands, or explains
+/// which input it will not take.
+///
+/// Categories are the matcher's QUERY FILTER, so an unknown slug is refused here by name.
+/// Job ingest does the opposite — it nulls an unknown slug and keeps the listing — but that
+/// is a scraped board's free text; this is a person typing, and silently dropping half of
+/// what they asked for is worse than saying which entry is wrong.
+fn validate_match_profile(body: MatchProfileRequest) -> Result<MatchProfile, AppError> {
+    let mut categories: Vec<String> = Vec::new();
+    for raw in &body.categories {
+        let trimmed = raw.trim();
+        let Some(category) = Category::from_slug(trimmed) else {
+            return Err(AppError::BadRequest(if trimmed.is_empty() {
+                "A category cannot be blank.".to_string()
+            } else {
+                format!(
+                    "'{trimmed}' is not a category this app recognises. Pick from the category list."
+                )
+            }));
+        };
+        let slug = category.slug().to_string();
+        if !categories.contains(&slug) {
+            categories.push(slug);
+        }
+    }
+    if categories.len() > MAX_PROFILE_CATEGORIES {
+        return Err(AppError::BadRequest(format!(
+            "Choose at most {MAX_PROFILE_CATEGORIES} categories — you picked {}.",
+            categories.len()
+        )));
+    }
+
+    let keywords = clean_terms(body.keywords, MAX_PROFILE_KEYWORDS, "keyword")?;
+    let locations = clean_terms(body.locations, MAX_PROFILE_LOCATIONS, "location")?;
+
+    // An empty category list is a valid profile that matches nothing: `GET /jobs/match`
+    // already answers `meta.reason = "no_match_profile"` for it, which is the same state a
+    // brand-new account is in. Refusing it would leave a client unable to clear its own
+    // profile except by calling DELETE.
+    Ok(MatchProfile {
+        categories,
+        keywords,
+        locations,
+        updated_at: now_iso(),
+    })
+}
+
+/// Trim, drop blanks, collapse case-insensitive duplicates (keeping the first spelling),
+/// refuse anything longer than a term should be, and enforce the cap.
+fn clean_terms(raw: Vec<String>, cap: usize, noun: &str) -> Result<Vec<String>, AppError> {
+    let mut terms: Vec<String> = Vec::new();
+    for value in raw {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() > MAX_PROFILE_TERM_CHARS {
+            return Err(AppError::BadRequest(format!(
+                "Each {noun} must be {MAX_PROFILE_TERM_CHARS} characters or fewer — '{}' is {}.",
+                trimmed,
+                trimmed.chars().count()
+            )));
+        }
+        if !terms
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+        {
+            terms.push(trimmed.to_string());
+        }
+    }
+    if terms.len() > cap {
+        return Err(AppError::BadRequest(format!(
+            "Add at most {cap} {noun}s — you entered {}.",
+            terms.len()
+        )));
+    }
+    Ok(terms)
+}
+
+/// PUT /me/match-profile — replaces the caller's profile. The account comes from the token,
+/// so this can only ever write the caller's own document.
+async fn put_match_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<MatchProfileRequest>,
+) -> ApiResult {
+    let profile = validate_match_profile(body)?;
+    let stored = mongodb::bson::to_bson(&profile)?;
+
+    state
+        .users()
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! { "$set": { "match_profile": stored } },
+        )
+        .await?;
+
+    // Read back rather than echo: the response is then the stored document, and a client can
+    // treat it as the new state (same rule as PATCH /auth/me).
+    let updated = load_user(&state, &user.id).await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": UserResponse::from_doc(&updated) })),
+    ))
+}
+
+/// DELETE /me/match-profile — removes the field entirely rather than storing an empty
+/// profile, so `GET /auth/me` stops echoing one and the matcher answers `no_match_profile`.
+async fn delete_match_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> ApiResult {
+    state
+        .users()
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! { "$unset": { "match_profile": "" } },
+        )
+        .await?;
+
     let updated = load_user(&state, &user.id).await?;
     Ok((
         StatusCode::OK,
@@ -593,3 +742,169 @@ fn provider_label(provider: &str) -> &str {
 
 #[allow(dead_code)]
 fn _unused(_: Value) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(categories: &[&str], keywords: &[&str], locations: &[&str]) -> MatchProfileRequest {
+        MatchProfileRequest {
+            categories: categories.iter().map(|v| v.to_string()).collect(),
+            keywords: keywords.iter().map(|v| v.to_string()).collect(),
+            locations: locations.iter().map(|v| v.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn saves_a_valid_profile_and_stamps_it_with_now() {
+        let profile = validate_match_profile(request(
+            &["ict", "  wash  ", "ict"],
+            &[" Nurse ", "nurse", "M&E"],
+            &[" Mogadishu "],
+        ))
+        .expect("a canonical profile must be accepted");
+
+        // Canonical slugs, in the order given, with the duplicate collapsed.
+        assert_eq!(profile.categories, vec!["ict", "wash"]);
+        // Trimmed, and the case-insensitive duplicate keeps the first spelling.
+        assert_eq!(profile.keywords, vec!["Nurse", "M&E"]);
+        assert_eq!(profile.locations, vec!["Mogadishu"]);
+        let stamped = chrono::DateTime::parse_from_rfc3339(&profile.updated_at)
+            .expect("updated_at must be RFC3339");
+        assert!(
+            (chrono::Utc::now() - stamped.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .abs()
+                < 5
+        );
+    }
+
+    #[test]
+    fn an_unknown_slug_is_a_400_that_names_the_offender() {
+        let err = validate_match_profile(request(&["ict", "computer_tecnology"], &["nurse"], &[]))
+            .expect_err("an unknown slug must be refused");
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "bad_request");
+        assert!(
+            err.message().contains("computer_tecnology"),
+            "the message must name the bad slug: {}",
+            err.message()
+        );
+        // Nothing is written when one entry is wrong: this is all-or-nothing, unlike ingest.
+        assert!(!err.message().contains("'ict'"));
+
+        // A blank entry is refused rather than dropped, for the same reason.
+        let blank = validate_match_profile(request(&[""], &[], &[])).unwrap_err();
+        assert_eq!(blank.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn an_empty_category_list_is_valid_and_means_no_profile() {
+        let profile = validate_match_profile(request(&[], &["nurse"], &["Hargeisa"]))
+            .expect("clearing the categories must be accepted");
+        assert!(profile.categories.is_empty());
+        // The keywords are kept: PUT replaces the profile, it does not guess intent. The
+        // matcher treats "no categories" as no profile either way.
+        assert_eq!(profile.keywords, vec!["nurse"]);
+        assert_eq!(profile.locations, vec!["Hargeisa"]);
+
+        let all_empty = validate_match_profile(request(&[], &[], &[])).unwrap();
+        assert!(all_empty.categories.is_empty() && all_empty.keywords.is_empty());
+    }
+
+    #[test]
+    fn the_caps_are_enforced() {
+        let slugs = crate::categories::Category::ALL;
+        let eleven: Vec<&str> = slugs.iter().take(11).map(|c| c.slug()).collect();
+        let err = validate_match_profile(request(&eleven, &[], &[])).unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("at most 10 categories"));
+
+        // Exactly at the cap is fine.
+        let ten: Vec<&str> = slugs.iter().take(10).map(|c| c.slug()).collect();
+        assert_eq!(
+            validate_match_profile(request(&ten, &[], &[]))
+                .unwrap()
+                .categories
+                .len(),
+            10
+        );
+
+        let keywords: Vec<String> = (0..21).map(|n| format!("word{n}")).collect();
+        let err = validate_match_profile(MatchProfileRequest {
+            categories: vec!["ict".to_string()],
+            keywords,
+            locations: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(err.message().contains("at most 20 keywords"));
+
+        let locations: Vec<String> = (0..6).map(|n| format!("place{n}")).collect();
+        let err = validate_match_profile(MatchProfileRequest {
+            categories: vec!["ict".to_string()],
+            keywords: Vec::new(),
+            locations,
+        })
+        .unwrap_err();
+        assert!(err.message().contains("at most 5 locations"));
+    }
+
+    #[test]
+    fn terms_are_trimmed_blank_entries_dropped_and_length_bounded() {
+        let profile = validate_match_profile(request(
+            &["health"],
+            &["  ", " accountant ", ""],
+            &["  Mogadishu  "],
+        ))
+        .unwrap();
+        assert_eq!(profile.keywords, vec!["accountant"]);
+        assert_eq!(profile.locations, vec!["Mogadishu"]);
+
+        let long = "a".repeat(MAX_PROFILE_TERM_CHARS + 1);
+        let err = validate_match_profile(request(&["health"], &[&long], &[])).unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("60 characters"));
+
+        // Exactly 60 characters is allowed.
+        let at_limit = "b".repeat(MAX_PROFILE_TERM_CHARS);
+        assert!(validate_match_profile(request(&["health"], &[&at_limit], &[])).is_ok());
+    }
+
+    /// The endpoint is mounted on the Bearer-guarded router; this is the guard it meets
+    /// there. A caller with no token, a malformed header or a dead token is answered 401
+    /// before any handler runs. The live HTTP status is also checked against the running
+    /// server with curl (`PUT /me/match-profile` with no Authorization header → 401).
+    #[test]
+    fn a_request_without_a_usable_token_is_unauthorized() {
+        use crate::middleware::bearer_user;
+        use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
+
+        let unauthorized = |headers: &HeaderMap| {
+            let err = bearer_user(headers, "test-secret").expect_err("must be refused");
+            assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
+            assert_eq!(err.code(), "unauthorized");
+        };
+
+        unauthorized(&HeaderMap::new());
+
+        let mut basic = HeaderMap::new();
+        basic.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Basic dXNlcjpwYXNz"),
+        );
+        unauthorized(&basic);
+
+        let mut garbled = HeaderMap::new();
+        garbled.insert(AUTHORIZATION, HeaderValue::from_static("Bearer not.a.jwt"));
+        unauthorized(&garbled);
+
+        // ...and the same header with a real token is the caller.
+        let token = issue_token("test-secret", "jobify-backend", "user-1", "user").unwrap();
+        let mut valid = HeaderMap::new();
+        valid.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        assert_eq!(bearer_user(&valid, "test-secret").unwrap().id, "user-1");
+    }
+}

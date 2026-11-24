@@ -53,12 +53,18 @@ pub async fn require_internal_api(
 }
 
 fn user_from_headers(state: &AppState, headers: &HeaderMap) -> Result<AuthUser, AppError> {
+    bearer_user(headers, &state.config.jwt_secret)
+}
+
+/// The Bearer guard itself, split out from `AppState` so it can be tested directly: every
+/// protected route answers 401 through this function.
+pub(crate) fn bearer_user(headers: &HeaderMap, secret: &str) -> Result<AuthUser, AppError> {
     let token = bearer_token(headers)
         .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".to_string()))?;
     // Deliberately not AppError::from: jsonwebtoken's own text is decoder internals and
     // was reaching the sign-in screen verbatim. Every rejection here means the same thing
     // to a user — the token is no longer usable.
-    decode_token(&state.config.jwt_secret, token).map_err(|_| {
+    decode_token(secret, token).map_err(|_| {
         AppError::Unauthorized("Your session has expired. Please sign in again.".to_string())
     })
 }

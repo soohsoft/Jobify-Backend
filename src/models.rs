@@ -149,15 +149,45 @@ pub struct SourceConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MatchProfile {
-    /// Canonical category slugs, validated through `categories::Category`.
+    /// Canonical category slugs, validated through `categories::Category`. These are the
+    /// matcher's QUERY FILTER, so a slug nothing stores hides every row.
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Role titles the member can actually apply for, e.g. "Data Analyst", "MIS Officer".
+    /// Decided by the completion-time derivation (`profile_llm`) or, when that is
+    /// unavailable, left empty by the deterministic map. They only re-rank rows the
+    /// categories already admitted. Defaulted, so the documents written before
+    /// subcategories existed read as "none".
+    #[serde(default)]
+    pub subcategories: Vec<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
     #[serde(default)]
     pub locations: Vec<String>,
+    /// Where `categories` and `subcategories` came from: "llm" when the one completion-time
+    /// model call decided them, "rules" when the deterministic field-of-study map did
+    /// (no provider, a failed call, or nothing usable back). Empty on documents written
+    /// before the backend started deciding, which is why readers must treat "" as unknown
+    /// rather than as a third source.
+    #[serde(default)]
+    pub category_source: String,
+    /// Fingerprint of the facts the derivation READ (education, last position, years).
+    /// Stored so a re-save of a complete profile with unchanged facts reuses the stored
+    /// decision instead of paying for the model again on every partial save. Backend
+    /// bookkeeping, so it is omitted from responses when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub facts_key: String,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// The categories the member was decided to be matched on, for a reader that must not
+/// guess. `source` is "llm" or "rules" as stored.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct MatchAreas {
+    pub categories: Vec<String>,
+    pub subcategories: Vec<String>,
+    pub source: String,
 }
 
 /// `PUT /me/match-profile`. Every field defaults, so a caller may send only what it has —
@@ -631,7 +661,7 @@ pub struct DiscordUserRequest {
 /// `education` is `Option<Vec<..>>` rather than a plain list on purpose: `None` means "this
 /// answer was not part of the payload" and `Some(list)` means "this is the whole history",
 /// so a partial save cannot wipe the degrees already recorded.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct DiscordProfileRequest {
     pub discord_id: String,
     #[serde(default)]

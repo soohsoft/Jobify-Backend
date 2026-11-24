@@ -153,16 +153,9 @@ struct RawExtraction {
     kind: Option<String>,
 }
 
-/// Take the outermost `{...}` out of whatever the model surrounded it with (fences,
-/// prose). No JSON object means no routing decision, which means `unsupported`.
-fn json_object(raw: &str) -> Option<&str> {
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    Some(&raw[start..=end])
-}
+/// Take the outermost `{...}` out of whatever the model surrounded it with — the shared
+/// rule lives in `util::json_object`, next to the other response-shape helpers.
+use crate::util::json_object;
 
 fn clean_term(value: &str) -> Option<String> {
     let value = value.trim();

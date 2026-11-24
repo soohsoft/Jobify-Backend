@@ -38,6 +38,18 @@ pub fn escape_regex(value: &str) -> String {
     escaped
 }
 
+/// Take the outermost `{...}` out of whatever the model surrounded its JSON with (code
+/// fences, a sentence of prose). Shared by every JSON-mode call: an SDK would parse this
+/// for us, and a model that reasons before answering writes text before the object.
+pub fn json_object(raw: &str) -> Option<&str> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(&raw[start..=end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

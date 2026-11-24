@@ -22,7 +22,7 @@ use crate::links;
 use crate::models::{
     CompanyRequest, DiscordAlertsRequest, DiscordCompanyRequest, DiscordLinkDoc,
     DiscordProfileRequest, DiscordUserRequest, EducationEntry, LinkTokenDoc, LinkTokenRequest,
-    MatchProfile, UserDoc, UserResponse,
+    UserDoc, UserResponse,
 };
 use crate::onboarding;
 use crate::state::AppState;
@@ -462,12 +462,118 @@ async fn update_profile(
         &skills,
     );
 
-    let profile = MatchProfile {
-        categories: categories.clone(),
-        keywords,
-        locations: Vec::new(),
-        updated_at: now_iso(),
+    // The facts the completion-time derivation reads. Everything below is decided from
+    // these, never from what the request happened to carry.
+    let effective_years = body.experience_years.or(user.experience_years);
+    let effective_name = set
+        .get_str("name")
+        .map(str::to_string)
+        .unwrap_or_else(|_| user.name.clone());
+    let facts = crate::profile_llm::Facts {
+        education: &effective_education,
+        last_position: effective_last_position.as_deref(),
+        experience_years: effective_years,
+        skills: &skills,
     };
+    let facts_key = crate::profile_llm::facts_key(&facts);
+    let complete_now = !effective_name.trim().is_empty() && !effective_education.is_empty();
+
+    // Reuse is decided by the answers, not by how the last decision was produced: if the
+    // facts the derivation read are unchanged, the stored profile IS the decision for them,
+    // and paying for the same call again on every partial save is waste. `category_source`
+    // must still be set, which is what distinguishes a decision this backend made (or a
+    // fallback it recorded) from a legacy document or a portal-authored profile.
+    let reusable = user
+        .match_profile
+        .as_ref()
+        .filter(|stored| {
+            complete_now && !stored.category_source.is_empty() && stored.facts_key == facts_key
+        })
+        .cloned();
+
+    let (categories, subcategories, keywords, category_source) = if let Some(stored) = reusable {
+        tracing::debug!(
+            user_id = %user.id,
+            "discord profile: facts unchanged, reusing the stored derivation"
+        );
+        (
+            stored.categories,
+            stored.subcategories,
+            stored.keywords,
+            stored.category_source,
+        )
+    } else if complete_now {
+        // One cheap call, and only now: a partial save never spends a query, and the member
+        // must never end up unmatched because the model was down.
+        match crate::profile_llm::derive(state.llm.as_ref(), &facts).await {
+            Ok(derived) if derived.is_usable() => {
+                let keywords = if derived.keywords.is_empty() {
+                    // A model that returned areas but no terms must not leave the matcher
+                    // with nothing to rank by.
+                    keywords.clone()
+                } else {
+                    derived.keywords
+                };
+                tracing::info!(
+                    user_id = %user.id,
+                    categories = derived.categories.len(),
+                    subcategories = derived.subcategories.len(),
+                    keywords = keywords.len(),
+                    "discord profile: categories decided by the model"
+                );
+                (
+                    derived.categories,
+                    derived.subcategories,
+                    keywords,
+                    crate::profile_llm::SOURCE_LLM.to_string(),
+                )
+            }
+            Ok(derived) => {
+                tracing::warn!(
+                    user_id = %user.id,
+                    categories = derived.categories.len(),
+                    "discord profile: derivation returned no usable category, keeping the rules mapping"
+                );
+                (
+                    categories,
+                    Vec::new(),
+                    keywords,
+                    crate::profile_llm::SOURCE_RULES.to_string(),
+                )
+            }
+            Err(detail) => {
+                tracing::warn!(
+                    user_id = %user.id,
+                    error = %detail,
+                    "discord profile: derivation unavailable, keeping the rules mapping"
+                );
+                (
+                    categories,
+                    Vec::new(),
+                    keywords,
+                    crate::profile_llm::SOURCE_RULES.to_string(),
+                )
+            }
+        }
+    } else {
+        // Mid-interview: the deterministic map, so a half-answered profile already has
+        // something to match on. No model call — the answers are still arriving.
+        (
+            categories,
+            Vec::new(),
+            keywords,
+            crate::profile_llm::SOURCE_RULES.to_string(),
+        )
+    };
+
+    let profile = crate::profile_llm::profile(
+        categories.clone(),
+        subcategories,
+        keywords,
+        &category_source,
+        facts_key,
+        now_iso(),
+    );
 
     // `sectors` mirrors the derived categories so the two lists can never disagree.
     set.insert("sectors", &categories);
@@ -631,13 +737,14 @@ async fn get_matches(
     let link = link_for(&state, &discord_id).await?;
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
 
-    let (scored, categories) = jobs::match_rows(&state, &link.user_id, limit).await?;
-    let reason = if categories.is_empty() {
+    let outcome = jobs::match_rows(&state, &link.user_id, limit, None).await?;
+    let reason = if outcome.areas.categories.is_empty() {
         "no_match_profile"
     } else {
         "ok"
     };
-    let data: Vec<serde_json::Value> = scored
+    let data: Vec<serde_json::Value> = outcome
+        .rows
         .iter()
         .map(|(score, job)| json!({ "job": job, "matchScore": score }))
         .collect();
@@ -645,7 +752,8 @@ async fn get_matches(
     tracing::debug!(
         user_id = %link.user_id,
         rows = data.len(),
-        categories = categories.len(),
+        categories = outcome.areas.categories.len(),
+        subcategories = outcome.areas.subcategories.len(),
         "discord matches read"
     );
     Ok((
@@ -653,7 +761,13 @@ async fn get_matches(
         Json(json!({
             "status": "success",
             "data": data,
-            "meta": { "reason": reason, "total": data.len(), "categories": categories }
+            "meta": {
+                "reason": reason,
+                "total": data.len(),
+                "categories": outcome.areas.categories,
+                "subcategories": outcome.areas.subcategories,
+                "categorySource": outcome.areas.source,
+            }
         })),
     ))
 }
@@ -767,6 +881,10 @@ async fn set_alert_prefs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::MatchProfile;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn a_snowflake_is_digits_only_and_bounded() {
@@ -844,8 +962,11 @@ mod tests {
         }];
         user.match_profile = Some(MatchProfile {
             categories: Vec::new(),
+            subcategories: Vec::new(),
             keywords: vec!["marine".to_string(), "biology".to_string()],
             locations: Vec::new(),
+            category_source: "rules".to_string(),
+            facts_key: String::new(),
             updated_at: String::new(),
         });
         assert!(onboarding_complete(&user));
@@ -867,6 +988,12 @@ mod tests {
     }
 
     async fn test_state(db_name: &str) -> Option<AppState> {
+        test_state_with_llm(db_name, Arc::new(ScriptedLlm::new(vec![]))).await
+    }
+
+    /// The same throwaway database with an injected provider, so no test ever reaches the
+    /// network — the derivation is one of the two places a request can leave the process.
+    async fn test_state_with_llm(db_name: &str, llm: Arc<ScriptedLlm>) -> Option<AppState> {
         let uri = std::env::var("MONGODB_URI")
             .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
         let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
@@ -875,7 +1002,56 @@ mod tests {
         };
         let db = client.database(db_name);
         let _ = db.drop().await;
-        Some(AppState::new(db, crate::config::Config::from_env()))
+        Some(AppState::with_llm(
+            db,
+            crate::config::Config::from_env(),
+            llm,
+        ))
+    }
+
+    /// Answers in order, and counts the calls so "no second call when the facts did not
+    /// change" can be asserted rather than assumed.
+    struct ScriptedLlm {
+        replies: Mutex<VecDeque<Result<crate::llm::LlmReply, crate::llm::LlmError>>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedLlm {
+        fn new(replies: Vec<Result<crate::llm::LlmReply, crate::llm::LlmError>>) -> Self {
+            Self {
+                replies: Mutex::new(replies.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl crate::llm::LlmClient for ScriptedLlm {
+        fn complete<'a>(
+            &'a self,
+            _request: crate::llm::LlmRequest,
+        ) -> futures_util::future::BoxFuture<'a, Result<crate::llm::LlmReply, crate::llm::LlmError>>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let next = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Err(crate::llm::LlmError::Provider(500)));
+            Box::pin(std::future::ready(next))
+        }
+    }
+
+    fn answer(content: &str) -> Result<crate::llm::LlmReply, crate::llm::LlmError> {
+        Ok(crate::llm::LlmReply {
+            content: content.to_string(),
+            usage: crate::llm::LlmUsage::default(),
+            finish_reason: Some("stop".to_string()),
+        })
     }
 
     /// The delivery queue hands out a `userId`, so the drain must be able to turn that into
@@ -979,11 +1155,15 @@ mod tests {
     }
 
     /// The whole interview's last save, through the route the bot actually calls: the degrees
-    /// are stored in order, the match inputs are derived in Rust, and finishing switches the
-    /// daily digest on.
+    /// are stored in order, the model's decision is what gets stored, and finishing switches
+    /// the daily digest on.
     #[tokio::test]
-    async fn a_two_degree_profile_is_stored_and_derives_categories_and_keywords() {
-        let Some(state) = test_state("jobify_test_discord_onboarding").await else {
+    async fn a_two_degree_profile_is_stored_and_the_model_decides_the_areas() {
+        let llm = Arc::new(ScriptedLlm::new(vec![answer(
+            r#"{"categories":["health","business_and_finance"],"subcategories":["Programme Officer","Health Information Officer"],"keywords":["programme","officer","health"]}"#,
+        )]));
+        let Some(state) = test_state_with_llm("jobify_test_discord_onboarding", llm.clone()).await
+        else {
             return;
         };
         let discord_id = "900000000000000888";
@@ -1006,6 +1186,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["meta"]["onboarding_complete"], true);
         assert_eq!(body["meta"]["alerts_enabled"], true);
+        assert_eq!(llm.calls(), 1, "completion is one derivation call");
 
         let education = body["data"]["education"].as_array().unwrap();
         assert_eq!(education.len(), 2, "both degrees are kept, in order");
@@ -1017,8 +1198,14 @@ mod tests {
         assert_eq!(
             profile["categories"],
             json!(["health", "business_and_finance"]),
-            "the union of the two fields' categories, in entry order"
+            "the model's validated slugs, in the order it gave them"
         );
+        assert_eq!(
+            profile["subcategories"],
+            json!(["Programme Officer", "Health Information Officer"]),
+            "the role titles the member can apply for are stored with the categories"
+        );
+        assert_eq!(profile["category_source"], "llm");
         assert_eq!(
             profile["locations"],
             json!([]),
@@ -1055,6 +1242,216 @@ mod tests {
         assert!(alerts.enabled);
         assert_eq!(alerts.mode, "daily");
         assert!(!alerts.user_disabled);
+
+        let stored_profile = stored.match_profile.expect("a complete profile has one");
+        assert_eq!(stored_profile.category_source, "llm");
+        assert_eq!(
+            stored_profile.facts_key.len(),
+            64,
+            "a fingerprint of the answers is kept so the next save can skip the model"
+        );
+    }
+
+    /// A provider that is down must not cost the member their matches: the deterministic
+    /// field map is kept, the source says so, and a re-save with the SAME answers reuses the
+    /// stored decision instead of paying for the model again.
+    #[tokio::test]
+    async fn a_failed_derivation_falls_back_to_rules_and_an_unchanged_resave_does_not_call_again() {
+        // The first call is a provider failure; the scripted stub then answers correctly for
+        // the second save, which is what proves the reuse path did NOT call it.
+        let llm = Arc::new(ScriptedLlm::new(vec![
+            Err(crate::llm::LlmError::Provider(503)),
+            answer(
+                r#"{"categories":["health","business_and_finance"],"subcategories":["Programme Officer"],"keywords":[]}"#,
+            ),
+        ]));
+        let Some(state) =
+            test_state_with_llm("jobify_test_discord_onboarding_fallback", llm.clone()).await
+        else {
+            return;
+        };
+        let discord_id = "900000000000000891";
+        state
+            .discord_links()
+            .insert_one(link_for_test(discord_id, "user-fallback"))
+            .await
+            .unwrap();
+        state
+            .users()
+            .insert_one(fresh_discord_user(
+                "user-fallback",
+                discord_id,
+                "Discord user",
+            ))
+            .await
+            .unwrap();
+
+        let request = profile_request(discord_id);
+        let (_, Json(body)) = update_profile(State(state.clone()), Json(request.clone()))
+            .await
+            .expect("a provider outage must not fail the save");
+        assert_eq!(llm.calls(), 1);
+
+        let profile = &body["data"]["match_profile"];
+        assert_eq!(
+            profile["category_source"], "rules",
+            "the fallback says where the areas came from"
+        );
+        assert_eq!(
+            profile["categories"],
+            json!(["health", "business_and_finance"]),
+            "the deterministic map still gives the matcher a category filter"
+        );
+        assert_eq!(profile["subcategories"], json!([]));
+        assert_eq!(
+            body["meta"]["onboarding_complete"], true,
+            "the interview is still finished"
+        );
+
+        // Same answers again: reuse, no second call, still "rules" (a rules profile is only
+        // retried once the answers change).
+        let (_, Json(again)) = update_profile(State(state.clone()), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(
+            llm.calls(),
+            1,
+            "an unchanged re-save must not spend another derivation"
+        );
+        assert_eq!(again["data"]["match_profile"]["category_source"], "rules");
+        assert!(
+            !again["data"]["match_profile"]["categories"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// An answer with no usable category is the same failure as an outage: keep the rules.
+    #[tokio::test]
+    async fn an_answer_with_no_known_category_is_not_stored_as_a_decision() {
+        let llm = Arc::new(ScriptedLlm::new(vec![answer(
+            r#"{"categories":["computer_technology"],"subcategories":["Data Analyst"],"keywords":["sql"]}"#,
+        )]));
+        let Some(state) = test_state_with_llm("jobify_test_discord_onboarding_bad_slug", llm).await
+        else {
+            return;
+        };
+        let discord_id = "900000000000000892";
+        state
+            .discord_links()
+            .insert_one(link_for_test(discord_id, "user-bad-slug"))
+            .await
+            .unwrap();
+        state
+            .users()
+            .insert_one(fresh_discord_user(
+                "user-bad-slug",
+                discord_id,
+                "Discord user",
+            ))
+            .await
+            .unwrap();
+
+        let (_, Json(body)) =
+            update_profile(State(state.clone()), Json(profile_request(discord_id)))
+                .await
+                .unwrap();
+        let profile = &body["data"]["match_profile"];
+        assert_eq!(profile["category_source"], "rules");
+        assert_eq!(
+            profile["categories"],
+            json!(["health", "business_and_finance"])
+        );
+        assert_eq!(
+            profile["subcategories"],
+            json!([]),
+            "a title decided for an unknown area is dropped with the area"
+        );
+    }
+
+    /// A complete profile whose answers did not change reuses the stored model decision.
+    #[tokio::test]
+    async fn an_unchanged_resave_reuses_the_model_decision() {
+        let first = answer(
+            r#"{"categories":["health"],"subcategories":["Programme Officer"],"keywords":["programme"]}"#,
+        );
+        // A second reply is queued but must never be consumed.
+        let second =
+            answer(r#"{"categories":["education"],"subcategories":["Teacher"],"keywords":[]}"#);
+        let llm = Arc::new(ScriptedLlm::new(vec![first, second]));
+        let Some(state) =
+            test_state_with_llm("jobify_test_discord_onboarding_reuse", llm.clone()).await
+        else {
+            return;
+        };
+        let discord_id = "900000000000000893";
+        state
+            .discord_links()
+            .insert_one(link_for_test(discord_id, "user-reuse"))
+            .await
+            .unwrap();
+        state
+            .users()
+            .insert_one(fresh_discord_user("user-reuse", discord_id, "Discord user"))
+            .await
+            .unwrap();
+
+        let request = profile_request(discord_id);
+        let _ = update_profile(State(state.clone()), Json(request.clone()))
+            .await
+            .unwrap();
+        let (_, Json(again)) = update_profile(State(state.clone()), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(llm.calls(), 1, "the second save must reuse, not re-derive");
+        assert_eq!(
+            again["data"]["match_profile"]["categories"],
+            json!(["health"])
+        );
+        assert_eq!(
+            again["data"]["match_profile"]["subcategories"],
+            json!(["Programme Officer"])
+        );
+        assert_eq!(again["data"]["match_profile"]["category_source"], "llm");
+    }
+
+    /// A partial save never spends a derivation: the answers are still arriving.
+    #[tokio::test]
+    async fn a_partial_save_never_calls_the_model() {
+        let llm = Arc::new(ScriptedLlm::new(vec![answer(
+            r#"{"categories":["ict"],"subcategories":["Data Analyst"],"keywords":[]}"#,
+        )]));
+        let Some(state) =
+            test_state_with_llm("jobify_test_discord_onboarding_partial", llm.clone()).await
+        else {
+            return;
+        };
+        let discord_id = "900000000000000894";
+        state
+            .discord_links()
+            .insert_one(link_for_test(discord_id, "user-partial"))
+            .await
+            .unwrap();
+        state
+            .users()
+            .insert_one(fresh_discord_user(
+                "user-partial",
+                discord_id,
+                "Discord user",
+            ))
+            .await
+            .unwrap();
+
+        // Education not answered yet: the interview is not finished.
+        let mut request = profile_request(discord_id);
+        request.education = None;
+        let (_, Json(body)) = update_profile(State(state.clone()), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(body["meta"]["onboarding_complete"], false);
+        assert_eq!(llm.calls(), 0, "a partial save must not call the model");
+        assert_eq!(body["data"]["match_profile"]["category_source"], "rules");
     }
 
     /// A rejected field must leave the document exactly as it was: no half-applied education.

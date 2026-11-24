@@ -33,6 +33,10 @@ pub fn internal_router() -> Router<AppState> {
     Router::new()
         .route("/internal/sources", get(sources))
         .route("/internal/jobs", post(ingest_jobs))
+        // The bot has no bearer token, so `GET /jobs/match` is unreachable from Discord.
+        // This is the same payload shape addressed by the member's Discord identity, which
+        // is what "/jobs for me" means in the product.
+        .route("/internal/jobs/for-user/{discord_id}", get(jobs_for_user))
 }
 
 pub fn protected_router() -> Router<AppState> {
@@ -547,11 +551,25 @@ fn default_match_limit() -> u64 {
     5
 }
 
-/// Weighted toward what actually predicts fit. The category is the gate and is already
-/// applied by the query filter, so it is scored as a constant; location is the strongest
-/// remaining signal and keywords break ties.
+/// Weighted toward what actually predicts fit. The category is already the query's gate, so
+/// it scores as the constant evidence "this row is in a decided area"; a subcategory phrase
+/// in the title is far stronger evidence than a keyword, because it is a whole job title the
+/// backend decided the member can apply for ("Data Analyst" in the title of an ICT row).
+/// Location is the strongest single signal and keywords break the remaining ties.
+///
+/// ONE function for every route: `GET /jobs/match`, the bot's for-user list and the alert
+/// refresh all score through `ranked_candidates`, so three lists can never rank differently.
 fn score_job(job: &JobDoc, profile: &MatchProfile) -> f64 {
-    let mut score = 3.0;
+    let mut score = 0.0;
+
+    if let Some(category) = job.category.as_deref()
+        && profile
+            .categories
+            .iter()
+            .any(|wanted| wanted.eq_ignore_ascii_case(category))
+    {
+        score += 1.0;
+    }
 
     let location = job.location.clone().unwrap_or_default().to_lowercase();
     if !location.is_empty()
@@ -565,6 +583,16 @@ fn score_job(job: &JobDoc, profile: &MatchProfile) -> f64 {
 
     let title = job.title.to_lowercase();
     let description = job.description.to_lowercase();
+
+    // A decided role title is the whole phrase, so "data analyst" in "Senior Data Analyst"
+    // counts and "data" alone does not.
+    for subcategory in &profile.subcategories {
+        let phrase = subcategory.trim().to_lowercase();
+        if !phrase.is_empty() && title.contains(&phrase) {
+            score += 3.0;
+        }
+    }
+
     for keyword in &profile.keywords {
         let keyword = keyword.trim().to_lowercase();
         if keyword.is_empty() {
@@ -646,6 +674,102 @@ async fn match_jobs(
                 "total": total,
                 "queued": queued_count,
                 "categories": profile.categories,
+                "subcategories": profile.subcategories,
+                "categorySource": profile.category_source,
+            }
+        })),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct ForUserQuery {
+    #[serde(default = "default_match_limit")]
+    limit: u64,
+    /// `job` or `tender`; absent (or `both`) means both. `jobs`/`tenders` are accepted too
+    /// because that is the vocabulary `wants` uses.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// `GET /internal/jobs/for-user/{discord_id}` — the member's own list, addressed by the
+/// identity the bot actually holds.
+///
+/// The payload is deliberately IDENTICAL to `GET /jobs/match` (`data: [{job, matchScore}]`,
+/// the same `meta` keys), so the bot has one shape to render and the portal keeps its own
+/// authoritative route. Nothing is queued: this is a read, and `/jobs` must not consume the
+/// alert state the daily digest owns.
+///
+/// An unknown snowflake is a 404. "No profile yet" is NOT: it is
+/// `meta.reason: "no_match_profile"` with an empty list, exactly like the portal.
+async fn jobs_for_user(
+    State(state): State<AppState>,
+    Path(discord_id): Path<String>,
+    Query(query): Query<ForUserQuery>,
+) -> ApiResult {
+    let discord_id = discord_id.trim();
+    let limit = query.limit.clamp(1, 20);
+    let kind = query
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            // `both` is spelled out by a caller that has a stored preference, so accept it.
+            "both" | "all" => Ok(None),
+            other if other == KIND_JOB || other == "jobs" => Ok(Some(KIND_JOB)),
+            other if other == KIND_TENDER || other == "tenders" => Ok(Some(KIND_TENDER)),
+            other => Err(AppError::BadRequest(format!(
+                "kind must be \"{KIND_JOB}\" or \"{KIND_TENDER}\" — got '{other}'"
+            ))),
+        })
+        .transpose()?
+        .flatten();
+
+    // The snowflake is the account's identity, so an unknown one means no account. A
+    // malformed id can only be a caller bug and is treated the same way rather than
+    // explained back to a client that has no business sending one.
+    let Some(link) = state
+        .discord_links()
+        .find_one(doc! { "discord_id": discord_id })
+        .await?
+    else {
+        return Err(AppError::NotFound(
+            "This Discord account is not registered with Jobify yet.".to_string(),
+        ));
+    };
+
+    let outcome = match_rows(&state, &link.user_id, limit as i64, kind).await?;
+    let reason = if outcome.areas.categories.is_empty() {
+        "no_match_profile"
+    } else {
+        "ok"
+    };
+    let data: Vec<Value> = outcome
+        .rows
+        .iter()
+        .map(|(score, job)| json!({ "job": job, "matchScore": score }))
+        .collect();
+
+    tracing::debug!(
+        user_id = %link.user_id,
+        rows = data.len(),
+        categories = outcome.areas.categories.len(),
+        subcategories = outcome.areas.subcategories.len(),
+        source = %outcome.areas.source,
+        "for-user match read"
+    );
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": data,
+            "meta": {
+                "reason": reason,
+                "total": data.len(),
+                "queued": 0,
+                "categories": outcome.areas.categories,
+                "subcategories": outcome.areas.subcategories,
+                "categorySource": outcome.areas.source,
             }
         })),
     ))
@@ -671,12 +795,16 @@ async fn queued_job_ids(state: &AppState, user_id: &str) -> Result<Vec<String>, 
 /// `None` means "no narrowing": `both`, an absent preference, and every account that
 /// predates the field all include tenders and jobs. "jobs" must also match a MISSING `kind`
 /// field — the older listings carry none — which is why it is an `$or` rather than an
-/// equality.
+/// equality. Both the plural (`wants`) and singular (`?kind=`) spellings are accepted so a
+/// caller never has to translate between two vocabularies for the same idea.
 fn kind_preference_clause(wanted: &str) -> Option<Document> {
-    match wanted.trim().to_ascii_lowercase().as_str() {
-        "jobs" => Some(doc! { "$or": [ doc! { "kind": "job" }, doc! { "kind": null } ] }),
-        "tenders" => Some(doc! { "kind": "tender" }),
-        _ => None,
+    let wanted = wanted.trim().to_ascii_lowercase();
+    if wanted == "jobs" || wanted == KIND_JOB {
+        Some(doc! { "$or": [ doc! { "kind": KIND_JOB }, doc! { "kind": null } ] })
+    } else if wanted == "tenders" || wanted == KIND_TENDER {
+        Some(doc! { "kind": KIND_TENDER })
+    } else {
+        None
     }
 }
 
@@ -808,22 +936,39 @@ pub async fn queue_matches_for_user(
     queue_notifications(state, user_id, &scored).await
 }
 
+/// What one matcher read produced, for a caller that must report the decision as well as
+/// the rows. `areas` is the stored decision (possibly empty = no usable profile).
+pub(crate) struct MatchOutcome {
+    pub rows: Vec<(f64, JobDoc)>,
+    pub areas: crate::models::MatchAreas,
+}
+
 /// The matcher for a stored account, with no HTTP caller.
 ///
-/// `GET /jobs/match` (bearer) and the bot's `GET /internal/discord/matches/{discord_id}` both
-/// come through here, so the portal and Discord cannot disagree about what matches — the same
-/// reason `live_job_filter` exists. It always reads, never queues: the caller decides whether
-/// a read should consume alert state, and both current callers say no.
+/// `GET /jobs/match` (bearer), `GET /internal/jobs/for-user/{discord_id}` and the bot's
+/// `GET /internal/discord/matches/{discord_id}` all come through here, so the portal and
+/// Discord cannot disagree about what matches — the same reason `live_job_filter` exists.
+/// It always reads, never queues: the caller decides whether a read should consume alert
+/// state, and every current caller says no.
 ///
-/// Returns the scored rows and the categories that produced them; an empty category list is
-/// the "no usable profile" state, which is normal on the way into onboarding.
+/// `kind` is "job"/"tender" to narrow, anything else (including `None`) for both; it is
+/// applied to the query rather than after scoring so a member who asked for tenders is not
+/// shown jobs that occupied the returned slots.
+///
+/// An empty category list is the "no usable profile" state, which is normal on the way into
+/// onboarding.
 pub(crate) async fn match_rows(
     state: &AppState,
     user_id: &str,
     limit: i64,
-) -> Result<(Vec<(f64, JobDoc)>, Vec<String>), AppError> {
+    kind: Option<&str>,
+) -> Result<MatchOutcome, AppError> {
+    let empty = MatchOutcome {
+        rows: Vec::new(),
+        areas: crate::models::MatchAreas::default(),
+    };
     let Some(user) = state.users().find_one(doc! { "_id": user_id }).await? else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(empty);
     };
     let exclusions = user.alerts.clone().unwrap_or_default();
     let Some(profile) = user
@@ -831,7 +976,7 @@ pub(crate) async fn match_rows(
         .clone()
         .filter(|profile| !profile.categories.is_empty())
     else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(empty);
     };
 
     let scored = ranked_candidates(
@@ -840,15 +985,26 @@ pub(crate) async fn match_rows(
         &exclusions,
         &[],
         limit,
-        kind_preference_clause("both"),
+        kind_preference_clause(kind.unwrap_or("both")),
     )
     .await?;
-    Ok((scored, profile.categories))
+    let areas = crate::models::MatchAreas {
+        categories: profile.categories.clone(),
+        subcategories: profile.subcategories.clone(),
+        source: profile.category_source.clone(),
+    };
+    Ok(MatchOutcome {
+        rows: scored,
+        areas,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_category, canonical_kind};
+    use super::{
+        AppError, Document, JobDoc, Json, MatchProfile, StatusCode, canonical_category,
+        canonical_kind, doc,
+    };
 
     fn raw(value: &str) -> Option<String> {
         Some(value.to_string())
@@ -989,6 +1145,171 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(live, expected);
+
+        let _ = db.drop().await;
+    }
+
+    fn job_from(value: serde_json::Value) -> JobDoc {
+        serde_json::from_value(value).expect("a minimal job document must deserialize")
+    }
+
+    /// A decided role title in the title is worth more than a loose keyword hit anywhere,
+    /// and the weights are the ones the matcher documents: category +1, subcategory in the
+    /// title +3, keyword in the title +1, keyword in the description +0.5.
+    #[test]
+    fn a_subcategory_phrase_in_the_title_outranks_a_keyword_hit() {
+        use super::score_job;
+
+        let profile = MatchProfile {
+            categories: vec!["ict".to_string()],
+            subcategories: vec!["Data Analyst".to_string()],
+            keywords: vec!["analyst".to_string()],
+            locations: Vec::new(),
+            category_source: "llm".to_string(),
+            facts_key: String::new(),
+            updated_at: String::new(),
+        };
+
+        let exact = job_from(serde_json::json!({
+            "_id": "job-1",
+            "title": "Data Analyst",
+            "description": "SQL reporting",
+            "category": "ict",
+        }));
+        // No subcategory phrase, but the keyword is in the title.
+        let keyword_title = job_from(serde_json::json!({
+            "_id": "job-2",
+            "title": "Analyst, ICT Unit",
+            "description": "",
+            "category": "ict",
+        }));
+        // Keyword only in the description.
+        let keyword_description = job_from(serde_json::json!({
+            "_id": "job-3",
+            "title": "ICT Support Officer",
+            "description": "Reporting to the analyst team",
+            "category": "ict",
+        }));
+
+        let exact_score = score_job(&exact, &profile);
+        assert_eq!(
+            exact_score, 5.0,
+            "category 1 + subcategory 3 + keyword in title 1"
+        );
+        assert_eq!(score_job(&keyword_title, &profile), 2.0);
+        assert_eq!(score_job(&keyword_description, &profile), 1.5);
+        assert!(
+            exact_score > score_job(&keyword_title, &profile),
+            "the decided role title must outrank a plain keyword hit"
+        );
+
+        // A member with no subcategories scores exactly as before this feature.
+        let rules_only = MatchProfile {
+            subcategories: Vec::new(),
+            ..profile.clone()
+        };
+        assert_eq!(score_job(&exact, &profile), score_job(&exact, &profile));
+        assert_eq!(score_job(&exact, &rules_only), 2.0);
+    }
+
+    /// The bot's one call: same rows and shape as `/jobs/match`, addressed by snowflake, and
+    /// a 404 — not an empty list — for an account that does not exist.
+    #[tokio::test]
+    async fn the_for_user_route_404s_for_an_unknown_snowflake_and_lists_a_known_members_rows() {
+        use super::{ForUserQuery, jobs_for_user};
+        use crate::config::Config;
+        use crate::state::AppState;
+        use axum::extract::{Path, Query, State};
+
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return;
+        };
+        let db = client.database("jobify_test_jobs_for_user");
+        let _ = db.drop().await;
+        let state = AppState::new(db.clone(), Config::from_env());
+
+        let missing = jobs_for_user(
+            State(state.clone()),
+            Path("900000000000000000".to_string()),
+            Query(ForUserQuery {
+                limit: 5,
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(missing, AppError::NotFound(_)),
+            "an unknown snowflake is an unknown account"
+        );
+
+        db.collection::<Document>("discord_links")
+            .insert_one(doc! {
+                "_id": "link-901",
+                "discord_id": "900000000000000901",
+                "user_id": "user-901",
+                "username": "sahra",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("users")
+            .insert_one(doc! {
+                "_id": "user-901",
+                "name": "Sahra",
+                "education": [],
+                "match_profile": {
+                    "categories": ["ict"],
+                    "subcategories": ["Data Analyst"],
+                    "keywords": ["sql"],
+                    "locations": [],
+                    "category_source": "llm",
+                },
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("jobs")
+            .insert_one(doc! {
+                "_id": "job-901",
+                "title": "Data Analyst",
+                "organization": "Hormuud",
+                "description": "SQL reporting",
+                "category": "ict",
+                "deadline": crate::util::nairobi_days_ago(-5),
+                "created_at": crate::util::now_iso(),
+            })
+            .await
+            .unwrap();
+
+        let (status, Json(body)) = jobs_for_user(
+            State(state),
+            Path("900000000000000901".to_string()),
+            Query(ForUserQuery {
+                limit: 5,
+                kind: Some("job".to_string()),
+            }),
+        )
+        .await
+        .expect("a registered member must get a list");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["meta"]["reason"], "ok");
+        assert_eq!(body["meta"]["categories"], serde_json::json!(["ict"]));
+        assert_eq!(
+            body["meta"]["subcategories"],
+            serde_json::json!(["Data Analyst"])
+        );
+        assert_eq!(body["meta"]["categorySource"], "llm");
+        let rows = body["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "rows: {body}");
+        assert_eq!(rows[0]["job"]["_id"], "job-901");
+        assert_eq!(
+            rows[0]["matchScore"], 4.5,
+            "category 1 + subcategory in title 3 + keyword 'sql' in the description 0.5"
+        );
+        assert_eq!(body["meta"]["queued"], 0, "a read never queues");
 
         let _ = db.drop().await;
     }

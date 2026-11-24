@@ -461,10 +461,18 @@ fn validate_match_profile(body: MatchProfileRequest) -> Result<MatchProfile, App
     // already answers `meta.reason = "no_match_profile"` for it, which is the same state a
     // brand-new account is in. Refusing it would leave a client unable to clear its own
     // profile except by calling DELETE.
+    //
+    // A portal save is the person's own choice about what to be matched on, so it clears
+    // the derived role titles and records "rules": the completion-time derivation re-runs
+    // on the next onboarding save rather than leaving subcategories that no longer belong
+    // to these categories.
     Ok(MatchProfile {
         categories,
+        subcategories: Vec::new(),
         keywords,
         locations,
+        category_source: "rules".to_string(),
+        facts_key: String::new(),
         updated_at: now_iso(),
     })
 }

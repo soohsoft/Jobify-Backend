@@ -18,6 +18,7 @@ import {
   educationLabel,
   educationPrompt,
   educationSummary,
+  watchingLine,
   experienceLabel,
   experiencePrompt,
   fieldPrompt,
@@ -40,7 +41,14 @@ function user(overrides: Partial<DiscordUser> = {}): DiscordUser {
     provider: 'discord',
     email_verified: true,
     location: null,
-    match_profile: { categories: ['health'], keywords: ['programme'], locations: [], updated_at: '' },
+    match_profile: {
+      categories: ['health'],
+      subcategories: ['Programme Officer', 'MIS Officer'],
+      keywords: ['programme'],
+      locations: [],
+      category_source: 'llm',
+      updated_at: '',
+    },
     alerts: { enabled: true, mode: 'daily', last_sent_at: '', user_disabled: false, excluded_employers: [], excluded_categories: [] },
     education_level: 'bachelor',
     education: [{ level: 'bachelor', field: 'Health' }],
@@ -189,6 +197,12 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
   assert.ok(prompt.content.includes('Senior Programme Officer'));
   assert.ok(prompt.content.includes('3–5 years'));
   assert.ok(prompt.content.includes('Alerts: on, daily at 08:00 (Africa/Nairobi)'));
+  // The derived role titles are said out loud: the member never picks a sector, so this is
+  // where they see what the backend decided to watch for.
+  assert.ok(
+    prompt.content.includes('I will watch for Programme Officer and MIS Officer.'),
+    prompt.content,
+  );
   // Five rows is the digest ceiling, and each one is a real link to the job.
   assert.equal(prompt.content.match(/\/jobs\/job-/g)?.length, 5);
   assert.ok(!prompt.content.includes('Programme Officer 6'), 'the sixth row is not shown');
@@ -221,4 +235,69 @@ test('the completion message is honest when nothing matches or alerts are off', 
   assert.ok(prompt.content.includes('Nothing live matches your answers this minute'));
   assert.ok(prompt.content.includes('Alerts: off'), 'an explicit /stop is reported as off, not silently overridden');
   assert.ok(!prompt.content.includes('/jobs/job-'));
+  assert.ok(!prompt.content.includes('I will watch for'), 'no role line when the backend decided nothing');
+});
+
+test('the watching line names the derived role titles, and degrades rather than lying', () => {
+  // The normal case: the backend's derivation produced role titles.
+  assert.equal(
+    watchingLine({
+      categories: ['ict'],
+      subcategories: ['Data Analyst', 'MIS Officer', 'Programme Officer'],
+      keywords: [],
+      locations: [],
+      category_source: 'llm',
+      updated_at: '',
+    }),
+    'I will watch for Data Analyst, MIS Officer and Programme Officer.',
+  );
+  // The rules fallback: the model was down, so only categories were stored. Say what is
+  // actually known instead of naming roles nobody derived.
+  assert.equal(
+    watchingLine({
+      categories: ['ict', 'business_and_finance'],
+      subcategories: [],
+      keywords: [],
+      locations: [],
+      category_source: 'rules',
+      updated_at: '',
+    }),
+    'I will watch for roles in ict and business_and_finance.',
+  );
+  // Nothing decided at all (e.g. a degree the map does not know): no line, not an empty list.
+  assert.equal(
+    watchingLine({
+      categories: [],
+      subcategories: [],
+      keywords: [],
+      locations: [],
+      category_source: 'rules',
+      updated_at: '',
+    }),
+    null,
+  );
+  assert.equal(watchingLine(null), null);
+});
+
+test('the completion message still completes when the subcategories are absent', () => {
+  const prompt = completionPrompt({
+    user: user({
+      match_profile: {
+        categories: ['health'],
+        subcategories: [],
+        keywords: ['programme'],
+        locations: [],
+        category_source: 'rules',
+        updated_at: '',
+      },
+    }),
+    matches: [],
+    digestTz: 'Africa/Nairobi',
+    digestHour: 8,
+    appBaseUrl: 'https://app.jobify.test',
+  });
+
+  assert.ok(prompt.content.startsWith('**Setup complete**'));
+  assert.ok(prompt.content.includes('I will watch for roles in health.'));
+  assert.ok(!prompt.content.includes('I will watch for .'), 'no empty role list is printed');
 });

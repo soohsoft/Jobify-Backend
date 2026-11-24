@@ -384,10 +384,37 @@ export function promptForStep(step: Step, session: OnboardingSession): StepPromp
 
 export interface CompletionInput {
   user: DiscordUser;
+  /** Rows from `GET /internal/jobs/for-user/{discord_id}` — what the backend decided. */
   matches: MatchRow[];
   digestTz: string;
   digestHour: number;
   appBaseUrl: string;
+}
+
+/** "a, b and c" — a Discord sentence, not a comma list with a trailing separator. */
+export function plainList(items: string[]): string {
+  const clean = items.map((item) => item.trim()).filter((item) => item.length > 0);
+  if (clean.length <= 1) return clean[0] ?? '';
+  return `${clean.slice(0, -1).join(', ')} and ${clean[clean.length - 1]}`;
+}
+
+/**
+ * The one sentence that shows the member what the backend decided for them.
+ *
+ * The interview never asks them to pick a sector: the backend derives the categories and the
+ * role titles at the end, and this is where that decision is said out loud — "I will watch
+ * for Data Analyst, MIS Officer and Business Analyst" — so it is visible rather than implied.
+ *
+ * Written to survive a degraded derivation: with role titles it names them; with only the
+ * categories (the rules fallback, i.e. the model was unavailable) it names those; with
+ * neither it returns `null` and the caller omits the line rather than printing an empty list.
+ */
+export function watchingLine(profile: DiscordUser['match_profile']): string | null {
+  const roles = profile?.subcategories ?? [];
+  if (roles.length > 0) return `I will watch for ${plainList(roles)}.`;
+  const categories = profile?.categories ?? [];
+  if (categories.length > 0) return `I will watch for roles in ${plainList(categories)}.`;
+  return null;
 }
 
 /**
@@ -408,6 +435,11 @@ export function completionPrompt(input: CompletionInput): {
     `Education: ${educationSummary(user.education)}`,
     `Last job: ${user.last_position || 'not set'} · Experience: ${experienceLabel(user.experience_years)}`,
   ];
+
+  // What the backend decided to watch for, in the member's own language. This is the only
+  // place the decision is visible: they were never asked to choose a sector.
+  const watching = watchingLine(user.match_profile);
+  if (watching) lines.push(watching);
 
   const alerts = user.alerts;
   lines.push(

@@ -49,7 +49,9 @@ interface Harness {
   calls: { saves: ProfilePatch[]; alerts: Array<{ enabled: boolean; mode?: string }>; matches: number };
 }
 
-function harness(options: { user?: Partial<DiscordUser>; matches?: MatchRow[] } = {}): Harness {
+function harness(
+  options: { user?: Partial<DiscordUser>; matches?: MatchRow[]; decidedSubcategories?: string[] } = {},
+): Harness {
   const user: DiscordUser = {
     id: 'u1',
     name: 'Discord user',
@@ -95,6 +97,19 @@ function harness(options: { user?: Partial<DiscordUser>; matches?: MatchRow[] } 
         alerts.enabled = true;
         alerts.mode = 'daily';
       }
+      // What the backend decides at completion. The bot only ever READS this: it must never
+      // derive categories or role titles of its own, so the fixture makes the decision here
+      // exactly where the real backend does.
+      if (complete && user.match_profile === null) {
+        user.match_profile = {
+          categories: ['health'],
+          subcategories: options.decidedSubcategories ?? ['Programme Officer', 'MIS Officer'],
+          keywords: ['programme'],
+          locations: [],
+          category_source: 'llm',
+          updated_at: '',
+        };
+      }
       return { user, onboarding_complete: complete, alerts_enabled: user.alerts.enabled };
     },
     getUser: async (): Promise<UserEnvelope> => ({
@@ -112,9 +127,19 @@ function harness(options: { user?: Partial<DiscordUser>; matches?: MatchRow[] } 
       },
       credits: { balance: 0, monthly_allowance: 30, used_this_period: 0, period_end: '', remaining_this_period: 30 },
     }),
-    matches: async () => {
+    jobsForUser: async () => {
       calls.matches += 1;
-      return options.matches ?? matchRows;
+      const rows = options.matches ?? matchRows;
+      return {
+        rows,
+        meta: {
+          reason: user.match_profile ? 'ok' : 'no_match_profile',
+          total: rows.length,
+          categories: user.match_profile?.categories ?? [],
+          subcategories: user.match_profile?.subcategories ?? [],
+          categorySource: user.match_profile?.category_source ?? '',
+        },
+      };
     },
     setAlerts: async (_discordId: string, enabled: boolean, mode?: string) => {
       calls.alerts.push({ enabled, ...(mode ? { mode } : {}) });
@@ -477,8 +502,8 @@ test('a member who said /stop is shown alerts off after finishing', async () => 
 
 test('when the match read fails the setup still completes', async () => {
   const { ctx, calls } = harness();
-  // The first matches() call throws, as it would against a backend without the route.
-  (ctx.backend as unknown as { matches: () => Promise<MatchRow[]> }).matches = async () => {
+  // The for-user read throws, as it would if the backend were mid-deploy.
+  (ctx.backend as unknown as { jobsForUser: () => Promise<unknown> }).jobsForUser = async () => {
     calls.matches += 1;
     throw new Error('404');
   };

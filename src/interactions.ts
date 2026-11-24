@@ -263,9 +263,11 @@ async function completeInterview(
     await ctx.backend.saveProfile({ discord_id: discordId, experience_years: years });
     const envelope = await ctx.backend.getUser(discordId);
 
-    let matches: Awaited<ReturnType<BotContext['backend']['matches']>> = [];
+    let matches: Awaited<ReturnType<BotContext['backend']['jobsForUser']>>['rows'] = [];
     try {
-      matches = await ctx.backend.matches(discordId, MAX_DIGEST_ROWS);
+      // The backend's own for-user read: it decided the categories and role titles, so the
+      // first digest is exactly the list `/jobs` will show.
+      matches = (await ctx.backend.jobsForUser(discordId, { limit: MAX_DIGEST_ROWS })).rows;
     } catch (err) {
       // Setup itself succeeded; a failed match read must not turn a finished interview into
       // an error message. `/jobs` still works, and the digest will fill in later.

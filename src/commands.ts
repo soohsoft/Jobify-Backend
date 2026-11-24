@@ -90,9 +90,14 @@ function feedRow(job: FeedJob): RowInput {
 }
 
 /**
- * The "plain list from the matcher": the newest live rows in the member's own sectors.
- * The public feed accepts one category at a time, so up to three are fetched and merged by
- * id — fetching only the first would quietly hide most of a multi-sector profile.
+ * The "plain list from the matcher": the newest live rows for the member, as the BACKEND
+ * decided them.
+ *
+ * One call (`GET /internal/jobs/for-user/{discord_id}`), not one per category: the backend
+ * owns the multi-category filter, the subcategory ranking and the kind narrowing, so `/jobs`
+ * and the portal's `/jobs/match` show the same thing in the same order. Fetching the public
+ * feed once per category — what this used to do — could not see subcategories at all and
+ * could not narrow on `kind` without losing rows to the page limit.
  */
 async function browse(
   ctx: BotContext,
@@ -100,9 +105,9 @@ async function browse(
   kind: 'job' | 'tender',
 ): Promise<void> {
   const discordId = interaction.user.id;
-  const envelope = await ctx.backend.getUser(discordId);
-  const categories = envelope.user.match_profile?.categories ?? [];
-  if (categories.length === 0) {
+  const { rows, meta } = await ctx.backend.jobsForUser(discordId, { limit: MAX_BROWSE_ROWS, kind });
+  const areas = meta.subcategories.length > 0 ? meta.subcategories : meta.categories;
+  if (meta.categories.length === 0) {
     await interaction.editReply({
       content:
         'I do not have a work area for you yet — run `/start` and I will ask you four quick questions.',
@@ -110,36 +115,21 @@ async function browse(
     return;
   }
 
-  const pages = await Promise.all(
-    categories.slice(0, 3).map((category) =>
-      ctx.backend.listJobs({ kind, category, limit: MAX_BROWSE_ROWS }),
-    ),
-  );
-  const seen = new Set<string>();
-  const merged: FeedJob[] = [];
-  for (const page of pages) {
-    for (const job of page.items) {
-      if (seen.has(job._id)) continue;
-      seen.add(job._id);
-      merged.push(job);
-    }
-  }
-  merged.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
-
-  if (merged.length === 0) {
+  const noun = kind === 'tender' ? 'tenders' : 'jobs';
+  if (rows.length === 0) {
     await interaction.editReply({
       content:
-        `Nothing live in your fields right now (${categories.join(', ')}).\n` +
+        `Nothing live in your fields right now (${areas.join(', ')}).\n` +
         'I check again every day and will DM you when something matches — or ask me for something specific.',
     });
     return;
   }
 
-  const noun = kind === 'tender' ? 'tenders' : 'jobs';
   const content = [
-    `**Newest ${noun} in your fields** (${categories.join(', ')})`,
+    `**Newest ${noun} for you**`,
+    `I watch for: ${areas.join(', ')}`,
     '',
-    formatRows(merged.map(feedRow), { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS }),
+    formatRows(rows.map((row) => feedRow(row.job)), { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS }),
     '',
     `Ask for something specific, for example \`/${noun === 'tenders' ? 'tenders' : 'jobs'} monitoring and evaluation\`.`,
   ].join('\n');

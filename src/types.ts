@@ -6,9 +6,15 @@
  */
 
 export interface MatchProfile {
+  /** Canonical category slugs. These are the backend's query filter for this member. */
   categories: string[];
+  /** Role titles the backend decided the member can apply for ("Data Analyst"). Empty when
+   *  the derivation was unavailable and the deterministic fallback produced the categories. */
+  subcategories: string[];
   keywords: string[];
   locations: string[];
+  /** "llm" or "rules" — recorded by the backend, never chosen here. */
+  category_source: string;
   updated_at: string;
 }
 
@@ -58,10 +64,28 @@ export interface DiscordUser {
   discord_id?: string | null;
 }
 
-/** One scored row from `GET /internal/discord/matches/{discord_id}`. */
+/** One scored row from `GET /jobs/match` or `GET /internal/jobs/for-user/{discord_id}`. */
 export interface MatchRow {
   job: FeedJob;
   matchScore: number;
+}
+
+/**
+ * `meta` of the two match reads. The backend reports the decision it made there, so the bot
+ * renders what the backend decided instead of re-deriving it from the profile.
+ */
+export interface MatchMeta {
+  /** `no_match_profile` is a normal state on the way into onboarding, not an error. */
+  reason: string;
+  total: number;
+  categories: string[];
+  subcategories: string[];
+  categorySource?: string;
+}
+
+export interface MatchList {
+  rows: MatchRow[];
+  meta: MatchMeta;
 }
 
 export interface Credits {

@@ -226,3 +226,56 @@ test('marking an empty page sent is a no-op, not a request', async () => {
   assert.equal(await backend.markSent([]), 0);
   assert.equal(calls.length, 0);
 });
+
+test('jobsForUser asks the backend for the member by snowflake and unwraps rows and meta', async () => {
+  const { fetchImpl, calls } = stubFetch([
+    json({
+      status: 'success',
+      data: [{ job: { _id: 'job-1', title: 'Data Analyst', organization: 'ACTED' }, matchScore: 4.5 }],
+      meta: {
+        reason: 'ok',
+        total: 5,
+        categories: ['ict'],
+        subcategories: ['Data Analyst', 'MIS Officer'],
+        categorySource: 'llm',
+      },
+    }),
+  ]);
+  const backend = new Backend({ baseUrl: 'http://backend.test', apiKey: KEY, fetchImpl, sleep: noSleep });
+
+  const { rows, meta } = await backend.jobsForUser('900000000000009401', { limit: 3, kind: 'tender' });
+
+  // The route addresses the member by their own snowflake: no token, no email round-trip.
+  assert.equal(
+    calls[0]?.url,
+    'http://backend.test/internal/jobs/for-user/900000000000009401?limit=3&kind=tender',
+  );
+  assert.equal(calls[0]?.headers['authorization'], undefined, 'internal routes carry the key, not a bearer');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.matchScore, 4.5);
+  // The decision is rendered from meta, never re-derived in the bot.
+  assert.deepEqual(meta.categories, ['ict']);
+  assert.deepEqual(meta.subcategories, ['Data Analyst', 'MIS Officer']);
+  assert.equal(meta.categorySource, 'llm');
+  assert.equal(meta.reason, 'ok');
+});
+
+test('jobsForUser tolerates a meta-less backend and an unknown member is an error', async () => {
+  const { fetchImpl } = stubFetch([
+    json({ status: 'success', data: [] }),
+    json({ status: 'error', error: { code: 'not_found', message: 'no such user' } }, 404),
+  ]);
+  const backend = new Backend({ baseUrl: 'http://backend.test', apiKey: KEY, fetchImpl, sleep: noSleep });
+
+  const { rows, meta } = await backend.jobsForUser('1');
+  assert.deepEqual(rows, []);
+  assert.deepEqual(meta.categories, []);
+  assert.deepEqual(meta.subcategories, []);
+  assert.equal(meta.total, 0);
+
+  await assert.rejects(() => backend.jobsForUser('unknown'), (err: unknown) => {
+    assert.ok(err instanceof BackendError);
+    assert.equal(err.status, 404);
+    return true;
+  });
+});

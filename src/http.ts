@@ -19,6 +19,7 @@ import type {
   FeedPage,
   LinkInfo,
   LinkToken,
+  MatchList,
   MatchRow,
   ProfilePatch,
   UserEnvelope,
@@ -210,12 +211,38 @@ export class Backend {
     };
   }
 
-  /** The member's current matches, scored by the backend's own matcher. */
-  async matches(discordId: string, limit = 5): Promise<MatchRow[]> {
-    return this.request<MatchRow[]>(
+  /**
+   * The member's own list, from the route that addresses them by their snowflake.
+   *
+   * The backend decides the categories and subcategories at the end of onboarding and this is
+   * the same read the portal's `/jobs/match` makes: identical rows, identical `matchScore`,
+   * identical `meta`. `kind` narrows to jobs or tenders and is applied to the query, not after
+   * the fact, so `/tenders` cannot be crowded out by jobs.
+   */
+  async jobsForUser(
+    discordId: string,
+    options: { limit?: number; kind?: 'job' | 'tender' } = {},
+  ): Promise<MatchList> {
+    const search = new URLSearchParams();
+    search.set('limit', String(options.limit ?? 5));
+    if (options.kind) search.set('kind', options.kind);
+    const envelope = await this.requestEnvelope<MatchRow[]>(
       'GET',
-      `/internal/discord/matches/${encodeURIComponent(discordId)}?limit=${limit}`,
+      `/internal/jobs/for-user/${encodeURIComponent(discordId)}?${search.toString()}`,
     );
+    const meta = envelope.meta ?? {};
+    const strings = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+    return {
+      rows: envelope.data,
+      meta: {
+        reason: typeof meta.reason === 'string' ? meta.reason : 'ok',
+        total: typeof meta.total === 'number' ? meta.total : envelope.data.length,
+        categories: strings(meta.categories),
+        subcategories: strings(meta.subcategories),
+        ...(typeof meta.categorySource === 'string' ? { categorySource: meta.categorySource } : {}),
+      },
+    };
   }
 
   async getUser(discordId: string): Promise<UserEnvelope> {

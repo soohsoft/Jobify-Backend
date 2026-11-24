@@ -118,7 +118,6 @@ async function browse(
     return;
   }
 
-  const noun = kind === 'tender' ? 'tenders' : 'jobs';
   if (rows.length === 0) {
     // Below the bar is an ANSWER, not an empty corpus: the backend scored rows and none
     // matched closely enough. The member gets the product sentence — the scoring behind it
@@ -135,19 +134,14 @@ async function browse(
     return;
   }
 
-  const content = [
-    `**Newest ${noun} for you**`,
-    `I watch for: ${areas.join(', ')}`,
-    '',
-    formatRows(
-      rows.map((row) => feedRow(row.job, row.matchScore)),
-      { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS },
-    ),
-    '',
-    `Ask for something specific, for example \`/${noun === 'tenders' ? 'tenders' : 'jobs'} monitoring and evaluation\`.`,
-  ].join('\n');
+  // ONLY the rows: the owner's line format IS the message. No header, no "I watch for…",
+  // no hint at the bottom, and no match percentage — the list is the jobs.
+  const content = formatRows(
+    rows.map((row) => feedRow(row.job, row.matchScore)),
+    { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS },
+  );
 
-  await interaction.editReply({ content: clampContent(content) });
+  await interaction.editReply({ content: clampContent(content.trimEnd()) });
 }
 
 async function search(

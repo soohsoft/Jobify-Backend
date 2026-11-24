@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import type { Message } from 'discord.js';
 
-import type { BotContext } from '../src/context.js';
+import { RequestGuard, type BotContext } from '../src/context.js';
 import type { Backend } from '../src/http.js';
 import type { Logger } from '../src/log.js';
 import { handleMessage } from '../src/messages.js';
@@ -150,6 +150,7 @@ function setup(options: BackendOptions = {}): {
     sessions: new OnboardingSessions(),
     categories: async () => categories,
     sendDm: async () => undefined,
+    guard: new RequestGuard(),
     ...(options.freeChannelId ? { freeChannelId: options.freeChannelId } : {}),
   };
 
@@ -196,7 +197,8 @@ test('an onboarded member still gets exactly one assistant answer', async () => 
 
   assert.equal(calls.assistant, 1);
   assert.equal(replies.length, 1);
-  assert.ok((replies[0]?.content ?? '').startsWith(assistantAnswer.reply));
+  // The answer is the owner's job block, not a sentence about the search.
+  assert.ok((replies[0]?.content ?? '').startsWith('1. **Data Analyst**'), replies[0]?.content);
   // Exactly the three-row ceiling, even though the assistant returned four.
   assert.equal((replies[0]?.content ?? '').match(/\/jobs\/job-/g)?.length, 3);
   assert.equal(sessions.get(MEMBER), undefined);
@@ -210,7 +212,8 @@ test('when the upsert omits the flag, onboarding state comes from GET /user', as
 
   assert.equal(calls.getUser, 1);
   assert.equal(calls.assistant, 1);
-  assert.ok((replies[0]?.content ?? '').startsWith(assistantAnswer.reply));
+  // The answer is the owner's job block, not a sentence about the search.
+  assert.ok((replies[0]?.content ?? '').startsWith('1. **Data Analyst**'), replies[0]?.content);
 });
 
 // ---------------------------------------------------------------------------
@@ -307,7 +310,8 @@ test('an onboarded member in the free-text channel reaches the assistant', async
   await handleMessage(message, ctx, BOT_ID);
 
   assert.equal(calls.assistant, 1);
-  assert.ok((replies[0]?.content ?? '').startsWith(assistantAnswer.reply));
+  // The answer is the owner's job block, not a sentence about the search.
+  assert.ok((replies[0]?.content ?? '').startsWith('1. **Data Analyst**'), replies[0]?.content);
 });
 
 test('guild messages in any other channel are ignored without a mention', async () => {

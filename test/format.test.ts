@@ -6,6 +6,7 @@ import {
   NO_MATCHES_SENTENCE,
   assistantFailureCopy,
   capRows,
+  dateOnly,
   deliveryRow,
   digestMessage,
   dmFailureReason,
@@ -17,6 +18,7 @@ import {
   noMatchesCopy,
   rowLine,
   sourceLink,
+  uniqueRows,
 } from '../src/format.js';
 import type { AssistantAnswer, Delivery, JobRow } from '../src/types.js';
 import type { RowInput } from '../src/format.js';
@@ -39,7 +41,7 @@ function row(overrides: Partial<JobRow> = {}): JobRow {
 // Assistant reply mapping
 // ---------------------------------------------------------------------------
 
-test('an assistant answer keeps its own sentence and appends the real rows as links', () => {
+test('an assistant answer is the rows and nothing else: no sentence, no footer', () => {
   const answer: AssistantAnswer = {
     intent: 'search',
     reply: 'I found three ICT roles in Mogadishu.',
@@ -53,15 +55,17 @@ test('an assistant answer keeps its own sentence and appends the real rows as li
 
   const content = formatAssistantReply(answer, { appBaseUrl: APP, maxRows: 3 });
 
-  assert.ok(content.startsWith('I found three ICT roles in Mogadishu.'));
+  assert.ok(!content.includes('I found three ICT roles'), 'no commentary around the list');
+  assert.ok(content.startsWith('1. **Data Analyst**'));
   assert.ok(content.includes('**Data Analyst** — Horn Relief — Mogadishu — closes 2026-12-03'));
   assert.ok(content.includes(`${APP}/jobs/job-1`));
   assert.ok(content.includes(`${APP}/jobs/job-3`));
   // Exactly the three rows the backend returned: no invented fourth.
   assert.equal(content.match(/\/jobs\/job-/g)?.length, 3);
+  assert.ok(!content.includes('% match'), 'the list view has no percentage');
 });
 
-test('rows beyond the reply cap are counted, not silently dropped', () => {
+test('the reply cap holds the list at three rows', () => {
   const answer: AssistantAnswer = {
     intent: 'search',
     reply: 'Six matches.',
@@ -71,7 +75,7 @@ test('rows beyond the reply cap are counted, not silently dropped', () => {
 
   const content = formatAssistantReply(answer, { appBaseUrl: APP, maxRows: 3 });
   assert.equal(content.match(/\/jobs\/job-/g)?.length, 3);
-  assert.ok(content.includes('_…and 3 more in the portal._'));
+  assert.ok(!content.includes('…and'), 'no footer around the rows');
 });
 
 test('an empty result is answered with the product sentence, never the internal phrasing', () => {
@@ -149,7 +153,7 @@ test('a local portal base renders the row as text, not as a dead localhost link'
   assert.ok(!rendered.includes('localhost'));
   assert.ok(!digest.includes('localhost'));
   // The line is complete; it simply has nowhere to send the reader.
-  assert.equal(rendered, rowLine(rowInput(), 1));
+  assert.equal(rendered, `${rowLine(rowInput(), 1)}\n`);
 });
 
 test('localhost on the row itself is dropped as a destination', () => {
@@ -165,7 +169,7 @@ test('a row with no source url at all renders text only', () => {
   );
   assert.equal(
     rendered,
-    rowLine({ title: 'Driver', organization: 'NGO', location: null, deadline: null }, 1),
+    `${rowLine({ title: 'Driver', organization: 'NGO', location: null, deadline: null }, 1)}\n`,
   );
   assert.ok(!rendered.includes('http'));
 });
@@ -185,7 +189,7 @@ test('the portal is only a fallback when the row has no source page', () => {
   assert.ok(rendered.includes(`${APP}/jobs/job-1`));
 });
 
-test('a digest row links whether the url rides the row or the embedded job', () => {
+test('a digest row links from the row or the embedded job, and one vacancy is sent once', () => {
   const nested: Delivery = {
     notificationId: 'n1',
     userId: 'u1',
@@ -199,10 +203,11 @@ test('a digest row links whether the url rides the row or the embedded job', () 
   assert.equal(deliveryRow(nested).url, SOURCE);
   assert.equal(deliveryRow(atRow).url, SOURCE);
 
+  // Both deliveries are the SAME vacancy (job-7); the digest must send it once.
   const rendered = digestMessage([deliveryRow(nested), deliveryRow(atRow)], { appBaseUrl: LOCAL });
-  assert.equal(rendered.match(/somalijobs\.com/g)?.length, 2);
+  assert.equal(rendered.match(/somalijobs\.com/g)?.length, 1);
   assert.ok(!rendered.includes('localhost'));
-  assert.ok(rendered.includes('**2 new matches for you on Jobify**'));
+  assert.ok(rendered.includes('**1 new match for you on Jobify**'), rendered);
 });
 
 // ---------------------------------------------------------------------------
@@ -309,7 +314,7 @@ test('a delivery prefers the embedded job document and falls back to the notific
 // The per-row match percentage, and the empty state that keeps scoring internal
 // ---------------------------------------------------------------------------
 
-test('the percentage is rendered beside the title, from the backend number', () => {
+test('the list line is exactly title, employer, place and date — no percentage', () => {
   assert.equal(matchLabel(87), '87% match');
   assert.equal(matchLabel(70), '70% match');
   assert.equal(matchLabel(87.4), '87% match');
@@ -320,9 +325,11 @@ test('the percentage is rendered beside the title, from the backend number', () 
   assert.equal(matchLabel(undefined), null);
   assert.equal(matchLabel(Number.NaN), null);
 
-  const line = rowLine(rowInput({ matchScore: 87 }));
-  assert.equal(line, '**Data Analyst** — 87% match — Horn Relief — Mogadishu — closes 2026-12-03');
-  // A row with no score is unchanged: the label is not a placeholder.
+  // The owner's exact line, with and without a score on the row: the score never appears.
+  assert.equal(
+    rowLine(rowInput({ matchScore: 87 }), 1),
+    '1. **Data Analyst** — Horn Relief — Mogadishu — closes 2026-12-03',
+  );
   assert.equal(rowLine(rowInput()), '**Data Analyst** — Horn Relief — Mogadishu — closes 2026-12-03');
 });
 
@@ -365,6 +372,83 @@ test('the digest with nothing to send says the same sentence, never "0 new match
   const message = digestMessage([row], { appBaseUrl: APP });
   assert.ok(message.includes('87% match'), message);
   assert.ok(message.startsWith('**1 new match for you on Jobify**'), message);
+});
+
+// ---------------------------------------------------------------------------
+// The owner's exact line format
+// ---------------------------------------------------------------------------
+
+const SOURCE_TWO = 'https://somalijobs.com/jobs/hargeisa/2222/driver';
+
+test('a job block is the numbered line, then the bare URL, then a blank line', () => {
+  const rendered = formatRows(
+    [
+      rowInput({ url: SOURCE }),
+      rowInput({
+        jobId: 'job-2',
+        title: 'Driver',
+        organization: 'NGO',
+        location: 'Hargeisa',
+        deadline: '2026-01-09',
+        url: SOURCE_TWO,
+      }),
+    ],
+    { appBaseUrl: APP, max: 5 },
+  );
+
+  assert.equal(
+    rendered,
+    '1. **Data Analyst** — Horn Relief — Mogadishu — closes 2026-12-03\n' +
+      `${SOURCE}\n\n` +
+      '2. **Driver** — NGO — Hargeisa — closes 2026-01-09\n' +
+      `${SOURCE_TWO}\n`,
+  );
+  // Nothing around the rows: no header, no footer, no count, no percentage.
+  assert.ok(!rendered.includes('%'));
+  assert.ok(!rendered.includes('Jobify'));
+});
+
+test('a deadline is rendered as a date, and a missing one says so', () => {
+  assert.equal(dateOnly('2026-12-03'), '2026-12-03');
+  assert.equal(dateOnly('2026-12-03T00:00:00Z'), '2026-12-03');
+  assert.equal(
+    rowLine({ title: 'Driver', organization: 'NGO', location: 'Baidoa', deadline: '2026-12-03T00:00:00Z' }, 1),
+    '1. **Driver** — NGO — Baidoa — closes 2026-12-03',
+  );
+  assert.equal(
+    rowLine({ title: 'Driver', organization: 'NGO', location: 'Baidoa', deadline: null }, 1),
+    '1. **Driver** — NGO — Baidoa — no deadline listed',
+  );
+  // A missing employer keeps its slot rather than shifting the line.
+  assert.equal(
+    rowLine({ title: 'Driver', organization: '', location: 'Baidoa', deadline: '' }, 1),
+    '1. **Driver** — organisation not listed — Baidoa — no deadline listed',
+  );
+});
+
+test('the same job is printed once even when the caller passes it twice', () => {
+  const rows = [
+    rowInput({ url: SOURCE }),
+    rowInput({ url: SOURCE }),
+    rowInput({ jobId: 'job-2', title: 'Driver', url: SOURCE_TWO }),
+  ];
+  assert.equal(uniqueRows(rows).length, 2);
+
+  const rendered = formatRows(rows, { appBaseUrl: APP });
+  assert.equal(rendered.match(/\*\*Data Analyst\*\*/g)?.length, 1);
+  assert.equal(rendered.match(/somalijobs\.com/g)?.length, 2, 'one link per surviving row');
+  assert.equal((rendered.match(/^\d+\. /gm) ?? []).length, 2, 'numbering never repeats');
+});
+
+test('two genuinely different jobs with the same title both survive', () => {
+  const rendered = formatRows(
+    [
+      rowInput({ jobId: 'job-1', organization: 'WADAAG INSURANCE' }),
+      rowInput({ jobId: 'job-2', organization: 'DAHABSHIIL MOTORS' }),
+    ],
+    { appBaseUrl: APP },
+  );
+  assert.equal(rendered.match(/\*\*Data Analyst\*\*/g)?.length, 2);
 });
 
 test('help is at most ten lines', () => {

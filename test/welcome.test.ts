@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { BotContext, ChannelPayload, MessagePayload } from '../src/context.js';
+import { RequestGuard, type BotContext, type ChannelPayload, type MessagePayload } from '../src/context.js';
 import type { Backend } from '../src/http.js';
 import type { Logger } from '../src/log.js';
 import { CID, OnboardingSessions } from '../src/onboarding.js';
@@ -116,6 +116,7 @@ function setup(options: SetupOptions = {}): {
       channelPosts.push({ channelId, payload });
       if (options.sendChannelFails) throw new Error('Missing Access');
     },
+    guard: new RequestGuard(),
     ...(options.freeChannelId ? { freeChannelId: options.freeChannelId } : {}),
   };
 

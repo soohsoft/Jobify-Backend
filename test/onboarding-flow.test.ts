@@ -11,7 +11,7 @@ import { test } from 'node:test';
 
 import type { ButtonInteraction, ModalSubmitInteraction } from 'discord.js';
 
-import type { BotContext } from '../src/context.js';
+import { RequestGuard, type BotContext } from '../src/context.js';
 import type { Backend } from '../src/http.js';
 import type { Logger } from '../src/log.js';
 import { handleInteraction } from '../src/interactions.js';
@@ -168,6 +168,7 @@ function harness(
     sessions,
     categories: async () => [],
     sendDm: async () => undefined,
+    guard: new RequestGuard(),
   };
 
   return { ctx, sessions, user, calls };

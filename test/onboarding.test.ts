@@ -207,9 +207,10 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
   // Five rows is the digest ceiling, and each one is a real link to the job.
   assert.equal(prompt.content.match(/\/jobs\/job-/g)?.length, 5);
   assert.ok(!prompt.content.includes('Programme Officer 6'), 'the sixth row is not shown');
-  // Each line carries the backend's percentage beside the title.
-  assert.ok(prompt.content.includes('**Programme Officer 1** — 92% match'), prompt.content);
-  assert.ok(prompt.content.includes('**Programme Officer 5** — 88% match'), prompt.content);
+  // The list view carries NO percentage: the line is title, employer, place, closing date.
+  assert.ok(prompt.content.includes('**Programme Officer 1** — '), prompt.content);
+  assert.ok(prompt.content.includes('**Programme Officer 5** — '), prompt.content);
+  assert.ok(!prompt.content.includes('% match'), 'the list view drops the match label');
   assert.ok(prompt.content.includes('`/jobs` lists everything for you at any time'));
   assert.equal(
     (prompt.components[0]?.toJSON().components[0] as { custom_id?: string } | undefined)?.custom_id,

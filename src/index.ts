@@ -12,6 +12,7 @@ import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 
 import { buildCommands } from './commands.js';
 import {
+  RequestGuard,
   createCategoryCache,
   createChannelSender,
   createDmSender,
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
     categories: createCategoryCache(backend),
     sendDm: createDmSender(client),
     sendChannel: createChannelSender(client),
+    guard: new RequestGuard(),
   };
 
   const scheduler = new DailyDigestScheduler({
@@ -122,6 +124,12 @@ async function main(): Promise<void> {
   });
 
   client.on(Events.InteractionCreate, (interaction) => {
+    // One answer per interaction. A redelivered event would otherwise run the command again
+    // and send the same list twice.
+    if (!ctx.guard.claim(interaction.id)) {
+      logger.warn('duplicate interaction ignored', { id: interaction.id, type: interaction.type });
+      return;
+    }
     void handleInteraction(interaction, ctx).catch((err) => {
       logger.error('interaction handler threw', {
         type: interaction.type,
@@ -131,6 +139,10 @@ async function main(): Promise<void> {
   });
 
   client.on(Events.MessageCreate, (message) => {
+    if (!ctx.guard.claim(`msg:${message.id}`)) {
+      logger.warn('duplicate message ignored', { id: message.id });
+      return;
+    }
     const botId = client.user?.id ?? config.discordAppId;
     void handleMessage(message, ctx, botId).catch((err) => {
       logger.error('message handler threw', errorFields(err));

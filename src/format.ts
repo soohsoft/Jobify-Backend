@@ -105,34 +105,90 @@ export function jobLink(appBaseUrl: string, jobId: string | null | undefined): s
   return `${base}/jobs/${jobId}`;
 }
 
-/** `Title — 87% match — Org — Location — closes DATE`, skipping what the source did not publish. */
-export function rowLine(row: RowInput, index?: number): string {
+/**
+ * The date part of a deadline, as the owner's line format spells it.
+ *
+ * A source that sends `2026-12-03T00:00:00Z` must render `closes 2026-12-03`, not the raw
+ * timestamp: the line is a date, and a time of day is noise the board never published.
+ */
+export function dateOnly(value: string): string {
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(value.trim());
+  return match ? match[1] : value.trim();
+}
+
+/**
+ * One job, in the owner's exact shape:
+ *
+ *   1. **<Title>** — <ORGANISATION> — <Location> — closes <YYYY-MM-DD>
+ *
+ * A missing organisation or location keeps its slot ("organisation not listed", "location
+ * not listed") so every line reads the same way, and an undated job ends with
+ * "no deadline listed" instead of an invented date.
+ *
+ * `matchScore` is deliberately NOT part of this line unless `withScore` says so, and only
+ * the daily digest says so. The percentage belongs to the digest; a chat list is a list of
+ * jobs, and a score beside each one is noise the member did not ask for.
+ */
+export function rowLine(row: RowInput, index?: number, withScore = false): string {
   const parts: string[] = [`**${truncate(row.title, 110)}**`];
-  // The fit sits right beside the title, so the ranking is visible on the line itself.
-  const score = matchLabel(row.matchScore);
-  if (score) parts.push(score);
-  if (row.organization?.trim()) parts.push(truncate(row.organization.trim(), 60));
+  if (withScore) {
+    const score = matchLabel(row.matchScore);
+    if (score) parts.push(score);
+  }
+  parts.push(row.organization?.trim() ? truncate(row.organization.trim(), 60) : 'organisation not listed');
   parts.push(row.location?.trim() ? truncate(row.location.trim(), 50) : 'location not listed');
-  parts.push(row.deadline?.trim() ? `closes ${row.deadline.trim()}` : 'no deadline listed');
+  parts.push(row.deadline?.trim() ? `closes ${dateOnly(row.deadline)}` : 'no deadline listed');
   const body = parts.join(' — ');
   return index === undefined ? body : `${index}. ${body}`;
 }
 
+/** The identity of a row, so the same job can never be printed twice in one list. */
+function rowKey(row: RowInput): string {
+  const norm = (value: string | null | undefined): string =>
+    (value ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  if (row.jobId) return `id:${row.jobId}`;
+  return `t:${norm(row.title)}|${norm(row.organization)}|${norm(row.location)}`;
+}
+
+/**
+ * Rows with duplicates removed, first occurrence kept.
+ *
+ * The backend de-duplicates too, but a list is the thing the member reads: if two rows ever
+ * arrive for one vacancy (a retry, a second source, a caller that concatenated two pages)
+ * this is what stops the same job appearing twice on screen.
+ */
+export function uniqueRows(rows: RowInput[]): RowInput[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    const key = rowKey(row);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * The rows, each on its own blank-line-separated block: the numbered line, the bare source
+ * URL on the next line, then a blank line. Nothing else — no header, no footer, no count.
+ */
 export function formatRows(
   rows: RowInput[],
-  options: { appBaseUrl: string; max?: number; startAt?: number },
+  options: { appBaseUrl: string; max?: number; startAt?: number; showScore?: boolean },
 ): string {
   const max = options.max ?? MAX_DIGEST_ROWS;
-  return rows
+  const blocks = uniqueRows(rows)
     .slice(0, max)
     .map((row, i) => {
-      const head = rowLine(row, (options.startAt ?? 1) + i);
+      const head = rowLine(row, (options.startAt ?? 1) + i, options.showScore ?? false);
       // The source page is the only useful destination; the portal is a fallback for rows the
       // backend could not resolve, and a local portal renders no link at all.
       const link = sourceLink(row.url) ?? jobLink(options.appBaseUrl, row.jobId);
       return link ? `${head}\n${link}` : head;
-    })
-    .join('\n');
+    });
+  return blocks.length === 0 ? '' : `${blocks.join('\n\n')}\n`;
 }
 
 /** The reply to one assistant answer: its own sentence, then the real rows as links. */
@@ -147,12 +203,12 @@ export function formatAssistantReply(
   if (answer.jobs.length === 0) {
     return reply === BACKEND_NOTHING_MATCHES ? NO_MATCHES_SENTENCE : reply;
   }
-  const rows = formatRows(answer.jobs.map(jobRowToInput), {
+  // ONLY the rows. The owner's list format is the whole message: no sentence about what was
+  // searched for, and no "…and N more" footer — a chat list is the jobs, nothing around them.
+  return formatRows(answer.jobs.map(jobRowToInput), {
     appBaseUrl: options.appBaseUrl,
     max: maxRows,
-  });
-  const extra = answer.jobs.length > maxRows ? `\n_…and ${answer.jobs.length - maxRows} more in the portal._` : '';
-  return `${reply}\n\n${rows}${extra}`;
+  }).trimEnd();
 }
 
 /**
@@ -169,11 +225,15 @@ export function digestMessage(
   options: { appBaseUrl: string; max?: number; extraWaiting?: number },
 ): string {
   const max = options.max ?? MAX_DIGEST_ROWS;
-  const { delivered, remaining } = capRows(rows, max);
+  // Count the rows the member will actually see: the same vacancy delivered twice is one
+  // match, and a header saying "2 new matches" over a single line is a lie.
+  const { delivered, remaining } = capRows(uniqueRows(rows), max);
   // A digest with nothing to send says the product sentence, never "0 new matches".
   if (delivered.length === 0) return NO_MATCHES_SENTENCE;
   const title = delivered.length === 1 ? '**1 new match for you on Jobify**' : `**${delivered.length} new matches for you on Jobify**`;
-  const lines = [title, '', formatRows(delivered, { appBaseUrl: options.appBaseUrl, max })];
+  // The digest is the ONE surface that keeps the percentage: it is the list the member gets
+  // unprompted, and the score is how the backend decided to send it at all.
+  const lines = [title, '', formatRows(delivered, { appBaseUrl: options.appBaseUrl, max, showScore: true })];
   const waiting = remaining + (options.extraWaiting ?? 0);
   if (waiting > 0) lines.push('', `_${waiting} more waiting — they'll come in tomorrow's digest._`);
   lines.push('', '_Reply here to ask about any of them, /alerts to change the schedule, /stop to switch these off._');

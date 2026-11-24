@@ -27,6 +27,34 @@ export type SendDm = (discordId: string, payload: string | MessagePayload) => Pr
 /** A message posted into a known channel. */
 export type SendChannel = (channelId: string, payload: ChannelPayload) => Promise<void>;
 
+/**
+ * Answers an event once.
+ *
+ * Discord can deliver the same interaction or message more than once (a resumed gateway
+ * session, a client retry, a double registration), and every handler here sends a list.
+ * Claiming the id once is what keeps one request from producing two identical messages.
+ * In-memory and time-bounded on purpose: a duplicate arrives within seconds, not hours.
+ */
+export class RequestGuard {
+  private seen = new Map<string, number>();
+
+  constructor(private readonly ttlMs = 10 * 60_000, private readonly maxEntries = 2_000) {}
+
+  /** True the first time an id is seen, false for every repeat. */
+  claim(id: string | undefined | null): boolean {
+    if (!id) return true;
+    const now = Date.now();
+    if (this.seen.has(id)) return false;
+    this.seen.set(id, now);
+    if (this.seen.size > this.maxEntries) {
+      for (const [key, at] of this.seen) {
+        if (now - at > this.ttlMs) this.seen.delete(key);
+      }
+    }
+    return true;
+  }
+}
+
 export interface BotContext {
   backend: Backend;
   appBaseUrl: string;
@@ -42,6 +70,8 @@ export interface BotContext {
   sendDm: SendDm;
   /** Posts into a known channel; used for the join fallback and the pinned intro. */
   sendChannel?: SendChannel;
+  /** Answers each interaction/message once, so a list is never sent twice for one request. */
+  guard: RequestGuard;
 }
 
 export function createCategoryCache(backend: Backend, ttlMs = 10 * 60_000): () => Promise<Category[]> {

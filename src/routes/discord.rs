@@ -737,7 +737,7 @@ async fn get_matches(
     let link = link_for(&state, &discord_id).await?;
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
 
-    let outcome = jobs::match_rows(&state, &link.user_id, limit, None).await?;
+    let outcome = jobs::match_rows(&state, &link.user_id, limit, None, None).await?;
     let data: Vec<serde_json::Value> = outcome
         .rows
         .iter()

@@ -22,6 +22,11 @@ pub struct JobDoc {
     pub organization: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// The country the location text resolves to (`"so"`, `"dj"`, …) or null when the text
+    /// names no place the mapping knows. Derived once at ingest by `src/country.rs` and
+    /// stored, so every list filters on a field instead of re-parsing free text.
+    #[serde(default)]
+    pub country: Option<String>,
     #[serde(default)]
     pub description: String,
     #[serde(default)]

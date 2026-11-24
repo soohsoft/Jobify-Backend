@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use crate::auth::AuthUser;
+use crate::country::{self, ALL_COUNTRIES, SOMALIA};
 use crate::error::AppError;
 use crate::models::{
     AlertPrefs, JobDoc, JobInput, KIND_JOB, KIND_TENDER, MatchProfile, NotificationDoc,
@@ -50,18 +51,293 @@ pub fn protected_router() -> Router<AppState> {
 /// falling back to `created_at` when the board never showed a posting date.
 pub const UNDATED_JOB_LIFETIME_DAYS: i64 = 14;
 
-/// The single definition of "live" for the feed AND the matcher, so the two can never
-/// disagree about what a user is allowed to see.
+// The single definition of "live" for the feed AND the matcher, so the two can never
+// disagree about what a user is allowed to see.
+//
+// A job is live when:
+//   - it has a closing date that has not passed, or
+//   - it has no closing date and was posted within 14 days — or, when no posting date is
+//     known, was first recorded within 14 days.
+//
+// This is a VISIBILITY rule and nothing more. It deliberately does not write or derive a
+// closing date: an undated job keeps `deadline: null` in every response, so no client can
+// render a deadline the board never published. Do not turn `UNDATED_JOB_LIFETIME_DAYS`
+// into a synthetic deadline.
+
+/// How many rows the feed reads before collapsing and paging them. A page is at most 100
+/// rows, so this is the headroom dedupe needs; `meta.scanned` and `meta.total` show when a
+/// caller has run into it.
+pub const FEED_SCAN_CAP: i64 = 500;
+
+/// The country a request is asking for: `?country=` when given, otherwise the member's own
+/// country, otherwise Somalia. `all` is passed through as its own sentinel and turns the
+/// filter off.
+pub fn resolve_country(
+    requested: Option<&str>,
+    member_location: Option<&str>,
+) -> Result<String, AppError> {
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(country::default_for_member(member_location).to_string());
+    };
+    let requested = requested.to_ascii_lowercase();
+    if requested == ALL_COUNTRIES {
+        return Ok(requested);
+    }
+    // A two- or three-letter code, nothing else. A typo must not silently answer "all".
+    if requested.len() > 3 || !requested.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(AppError::BadRequest(format!(
+            "country must be a short country code or \"{ALL_COUNTRIES}\" — got '{requested}'"
+        )));
+    }
+    Ok(requested)
+}
+
+/// The Mongo clause for a country filter. `None` means every country (the `all` escape).
 ///
-/// A job is live when:
-///   - it has a closing date that has not passed, or
-///   - it has no closing date and was posted within 14 days — or, when no posting date is
-///     known, was first recorded within 14 days.
+/// The Somali default also admits rows with NO stored country: whether such a row belongs
+/// is decided from its location text in Rust (`country_accepts`), because "unknown and
+/// foreign-looking" cannot be expressed as a clause without re-implementing the mapping as
+/// a regex.
+pub fn country_query_clause(wanted: &str) -> Option<Document> {
+    if wanted == ALL_COUNTRIES {
+        return None;
+    }
+    if wanted == SOMALIA {
+        Some(doc! {
+            "$or": [
+                { "country": SOMALIA },
+                { "country": null },
+            ]
+        })
+    } else {
+        Some(doc! { "country": wanted })
+    }
+}
+
+/// The country of one job: the stored field when it has one, otherwise the location text.
+/// The fallback makes a document written before `country` existed behave exactly like one
+/// ingested today.
+fn job_country(job: &JobDoc) -> Option<&str> {
+    match job.country.as_deref().map(str::trim) {
+        Some(code) if !code.is_empty() => Some(code),
+        _ => country::from_location(job.location.as_deref()),
+    }
+}
+
+/// Whether one job belongs in a list for `wanted`.
 ///
-/// This is a VISIBILITY rule and nothing more. It deliberately does not write or derive a
-/// closing date: an undated job keeps `deadline: null` in every response, so no client can
-/// render a deadline the board never published. Do not turn `UNDATED_JOB_LIFETIME_DAYS`
-/// into a synthetic deadline.
+/// A job with no derivable country is kept only in the Somali default and only when its
+/// location says nothing foreign: the conservative side of the error is "do not show a
+/// Djibouti job to a Somali member", so an unknown-but-unforeign row ("Multiple Locations")
+/// stays, and an unknown row that names another country does not.
+pub fn country_accepts(job: &JobDoc, wanted: &str) -> bool {
+    if wanted == ALL_COUNTRIES {
+        return true;
+    }
+    match job_country(job) {
+        Some(code) => code.eq_ignore_ascii_case(wanted),
+        None => wanted == SOMALIA && !country::is_foreign_looking(job.location.as_deref()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// De-duplication: the same vacancy carried by two boards
+// ---------------------------------------------------------------------------
+//
+// Two sources routinely carry one posting — somalijobs and unjobs both list "Chief of
+// Section, Human Resources Management" — and a member sees the same job twice. There is no
+// shared id to join on, so the match is on the only thing both boards agree about: the
+// title, the employer, and the place. Anything less certain is kept, because hiding a real
+// job is worse than showing one twice.
+
+/// Lowercased alphanumeric words joined by single spaces. Punctuation is dropped, so
+/// "Chief of Section, Human Resources Management, P5" and "Chief Of Section Human Resources
+/// Management P5" are the same key. Apostrophes are DELETED rather than turned into a space,
+/// because the two boards spell the same employer "Children's" and "CHILDRENS" — splitting
+/// there would make one employer look like two ("children s" versus "childrens").
+pub(crate) fn normalised(value: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for character in value.chars() {
+        if character.is_alphanumeric() {
+            for lower in character.to_lowercase() {
+                current.push(lower);
+            }
+        } else if character == '\'' || character == '\u{2019}' {
+            // Delete the apostrophe, keep the word joined.
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words.join(" ")
+}
+
+/// `shorter` is the opening words of `longer` — "UNICEF" against "UNICEF United Nations
+/// Childrens Fund". Four characters minimum and a word boundary, so a two-letter stub cannot
+/// prefix-match a different employer.
+fn is_word_prefix(shorter: &str, longer: &str) -> bool {
+    shorter.chars().count() >= 4
+        && longer.starts_with(shorter)
+        && longer[shorter.len()..].starts_with(' ')
+}
+
+fn at_most_one_edit(left: &str, right: &str) -> bool {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.len().abs_diff(right.len()) > 1 {
+        return false;
+    }
+    let (longer, shorter) = if left.len() >= right.len() {
+        (&left, &right)
+    } else {
+        (&right, &left)
+    };
+    let mut i = 0;
+    let mut j = 0;
+    let mut edits = 0;
+    while i < longer.len() && j < shorter.len() {
+        if longer[i] == shorter[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        edits += 1;
+        if edits > 1 {
+            return false;
+        }
+        if longer.len() == shorter.len() {
+            i += 1;
+            j += 1;
+        } else {
+            i += 1;
+        }
+    }
+    edits + (longer.len() - i) + (shorter.len() - j) <= 1
+}
+
+/// Two employers are the same when their words are the same (in any order) or one is the
+/// opening words of the other. The boards carry "UNICEF" and "UNICEF - United Nations
+/// Children's Fund" for one vacancy, and "ICRC (International Committee of the Red Cross)"
+/// and "International Committee of the Red Cross (ICRC)" for another.
+fn organisations_related(left: &str, right: &str) -> bool {
+    let left_key = organisation_key(left);
+    let right_key = organisation_key(right);
+    if left_key.is_empty() || right_key.is_empty() {
+        return left_key == right_key;
+    }
+    if left_key == right_key {
+        return true;
+    }
+    let left_text = normalised(left);
+    let right_text = normalised(right);
+    is_word_prefix(&left_text, &right_text) || is_word_prefix(&right_text, &left_text)
+}
+
+/// The employer as an order-insensitive key. The boards disagree about where the acronym
+/// goes — "ICRC (International Committee of the Red Cross)" and "International Committee of
+/// the Red Cross (ICRC)" are one employer — so the words are sorted before comparing.
+fn organisation_key(value: &str) -> String {
+    let normalised = normalised(value);
+    let mut words: Vec<&str> = normalised.split(' ').collect();
+    words.sort_unstable();
+    words.join(" ")
+}
+
+/// Two locations name the same place when one is a prefix of the other: "Hargeisa" and
+/// "Hargeisa, Somaliland" are one place, while "Garowe" and "Baidoa" are not. A missing
+/// location only matches another missing one, because a shared title and employer in two
+/// different cities can genuinely be two postings.
+fn locations_related(left: Option<&str>, right: Option<&str>) -> bool {
+    let left = left.map(normalised).unwrap_or_default();
+    let right = right.map(normalised).unwrap_or_default();
+    match (left.is_empty(), right.is_empty()) {
+        (true, true) => true,
+        (true, false) | (false, true) => false,
+        (false, false) => {
+            if left == right {
+                return true;
+            }
+            // "Mogadishu" opens "Mogadishu, Somalia", and is also contained in "Heliwa,
+            // Mogadishu, Somalia" — both are the same place.
+            let shorter_opens = is_word_prefix(&left, &right) || is_word_prefix(&right, &left);
+            let shorter_inside = format!(" {right} ").contains(&format!(" {left} "))
+                || format!(" {left} ").contains(&format!(" {right} "));
+            if shorter_opens || shorter_inside {
+                return true;
+            }
+            // A one-letter spelling difference in the TOWN is the same place:
+            // Garowe/Garoowe, Dhobley/Dhoobley, Hargeisa/Hargeysa — including when one
+            // board appends the country ("Garoowe, Somalia"). Two different towns
+            // ("Garowe"/"Baidoa") are three edits apart, so this cannot merge them.
+            let left_town = left.split(' ').next().unwrap_or("");
+            let right_town = right.split(' ').next().unwrap_or("");
+            left_town.chars().count() >= 5
+                && right_town.chars().count() >= 5
+                && at_most_one_edit(left_town, right_town)
+        }
+    }
+}
+
+/// Which source wins when two rows are the same vacancy and everything else is equal.
+/// Somalijobs is the primary Somalia board, so it holds the canonical URL and description.
+fn source_rank(source: &str) -> u8 {
+    match source.trim().to_ascii_lowercase().as_str() {
+        "somalijobs" => 0,
+        "qaranjobs" => 1,
+        "reliefweb" => 2,
+        "unjobs" => 3,
+        _ => 4,
+    }
+}
+
+pub(crate) fn same_vacancy(left: &JobDoc, right: &JobDoc) -> bool {
+    let title = normalised(&left.title);
+    if title.is_empty() || title != normalised(&right.title) {
+        return false;
+    }
+    if !organisations_related(&left.organization, &right.organization) {
+        return false;
+    }
+    locations_related(left.location.as_deref(), right.location.as_deref())
+}
+
+/// Collapse duplicate vacancies, keeping one row per vacancy.
+///
+/// The winner is the best row for the member, not the first one read: highest `matchScore`,
+/// then the newest `created_at`, then the source priority (somalijobs > qaranjobs >
+/// reliefweb > unjobs), then the id so the choice is deterministic. The returned count is
+/// how many rows were collapsed, which every list reports as `meta.duplicatesRemoved`.
+pub(crate) fn dedupe_rows(rows: Vec<(i64, JobDoc)>) -> (Vec<(i64, JobDoc)>, usize) {
+    let mut ordered = rows;
+    ordered.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.created_at.cmp(&left.1.created_at))
+            .then_with(|| source_rank(&left.1.source).cmp(&source_rank(&right.1.source)))
+            .then_with(|| right.1.id.cmp(&left.1.id))
+    });
+
+    let mut kept: Vec<(i64, JobDoc)> = Vec::with_capacity(ordered.len());
+    let mut collapsed = 0usize;
+    for candidate in ordered {
+        if kept
+            .iter()
+            .any(|(_, winner)| same_vacancy(winner, &candidate.1))
+        {
+            collapsed += 1;
+            continue;
+        }
+        kept.push(candidate);
+    }
+    (kept, collapsed)
+}
+
+/// The visibility rule: a job is visible while its closing date has not passed, or while it
+/// is recent enough to be plausibly open (see the note above).
 pub fn live_job_filter() -> Document {
     let today = nairobi_today();
     let cutoff = nairobi_days_ago(UNDATED_JOB_LIFETIME_DAYS);
@@ -89,6 +365,10 @@ pub struct JobsQuery {
     organization: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    /// `so` (the default), another short country code, or `all`. Absent means the member's
+    /// own country: their stored location when it maps to one, Somalia otherwise.
+    #[serde(default)]
+    country: Option<String>,
     /// `job` or `tender`. Absent means both — which is what the 55 listings stored before
     /// `kind` existed need, since they carry no field at all.
     #[serde(default)]
@@ -124,6 +404,14 @@ async fn list(
         Some(Extension(user)) => state.users().find_one(doc! { "_id": &user.id }).await?,
         None => None,
     };
+
+    // The country every row must be in. An absent `?country=` means the member's own
+    // country — their stored location when it maps to one — and Somalia when there is no
+    // account at all. Browsing is never "the whole world": the product is Somalia-wide.
+    let country_wanted = resolve_country(
+        query.country.as_deref(),
+        viewer.as_ref().and_then(|doc| doc.location.as_deref()),
+    )?;
 
     let location = query
         .location
@@ -184,6 +472,9 @@ async fn list(
     if let Some(kind) = kind_clause {
         clauses.push(kind);
     }
+    if let Some(country) = country_query_clause(&country_wanted) {
+        clauses.push(country);
+    }
     let filter = if clauses.len() == 1 {
         clauses.remove(0)
     } else {
@@ -192,39 +483,64 @@ async fn list(
 
     let page = query.page.max(1);
     let limit = query.limit.clamp(1, 100);
-    let (data, total) = paginate(
-        &state.jobs(),
-        filter,
-        page,
-        limit,
+    let profile = viewer
+        .and_then(|doc| doc.match_profile)
+        .filter(|profile| !profile.categories.is_empty());
+
+    // De-duplication has to happen BEFORE paging, or page 1 and page 2 can each carry half
+    // of the same vacancy and the member still sees it twice. The feed therefore reads one
+    // bounded window, collapses it, and pages the collapsed rows in memory. The window is
+    // far larger than any page and than anything the boards currently hold; `meta.scanned`
+    // reports how much of it was read so a truncated window is visible rather than silent.
+    let options = FindOptions::builder()
         // Secondary sort on _id keeps pagination stable when many jobs share the same
         // created_at second (batch ingest), instead of repeating or skipping rows.
-        doc! { "created_at": -1, "_id": -1 },
-    )
-    .await?;
+        .sort(doc! { "created_at": -1, "_id": -1 })
+        .limit(FEED_SCAN_CAP)
+        .build();
+    let mut cursor = state.jobs().find(filter).with_options(options).await?;
+    let mut scanned = 0usize;
+    let mut rows: Vec<(i64, JobDoc)> = Vec::new();
+    while let Some(job) = cursor.try_next().await? {
+        // The country gate is re-applied here because a row whose `country` was never
+        // derived is decided from its location text, which a Mongo clause cannot do.
+        if !country_accepts(&job, &country_wanted) {
+            continue;
+        }
+        scanned += 1;
+        let score = profile
+            .as_ref()
+            .map(|profile| score_job(&job, profile))
+            .unwrap_or(0);
+        rows.push((score, job));
+    }
+
+    let (mut rows, duplicates_removed) = dedupe_rows(rows);
+    rows.sort_by(|a, b| {
+        b.1.created_at
+            .cmp(&a.1.created_at)
+            .then_with(|| b.1.id.cmp(&a.1.id))
+    });
+    let total = rows.len() as u64;
+    let skip = ((page - 1) * limit) as usize;
+    let window: Vec<(i64, JobDoc)> = rows.into_iter().skip(skip).take(limit as usize).collect();
 
     // The feed keeps its shape — the same job objects and the same `meta` — and adds ONE
     // field per row for a signed-in member with a profile: `matchScore`, the same 0–100 the
     // dedicated list returns, from the same `score_job`. Browsing is not the matcher, so the
     // feed is deliberately NOT cut off at the threshold: a member searching for a category
     // still sees every live listing in it, but can no longer mistake a 30% row for a 75% one.
-    let profile = viewer
-        .and_then(|doc| doc.match_profile)
-        .filter(|profile| !profile.categories.is_empty());
-    let data: Vec<Value> = match profile {
-        Some(profile) => data
-            .into_iter()
-            .map(|job| {
-                let score = score_job(&job, &profile);
-                let mut value = json!(&job);
-                if let Some(map) = value.as_object_mut() {
-                    map.insert("matchScore".to_string(), json!(score));
-                }
-                value
-            })
-            .collect(),
-        None => data.into_iter().map(|job| json!(job)).collect(),
-    };
+    let scoring = profile.is_some();
+    let data: Vec<Value> = window
+        .into_iter()
+        .map(|(score, job)| {
+            let mut value = json!(&job);
+            if scoring && let Some(map) = value.as_object_mut() {
+                map.insert("matchScore".to_string(), json!(score));
+            }
+            value
+        })
+        .collect();
 
     Ok((
         StatusCode::OK,
@@ -236,7 +552,12 @@ async fn list(
                 "limit": limit,
                 "total": total,
                 "totalPages": total_pages(total, limit),
-                "threshold": state.config.match_threshold
+                "threshold": state.config.match_threshold,
+                "country": country_wanted,
+                // How many rows this list collapsed as the same vacancy, and how much of
+                // the corpus was read to do it.
+                "duplicatesRemoved": duplicates_removed,
+                "scanned": scanned
             }
         })),
     ))
@@ -468,6 +789,10 @@ async fn ingest_jobs(
         }
         if let Some(value) = input.location.as_deref().filter(|s| !s.trim().is_empty()) {
             set.insert("location", value);
+            // The country is derived from the SAME text, in the same write, so a row can
+            // never carry a location and a contradicting country. `null` when the text
+            // names no known place: an unrecognised location is not guessed at.
+            set.insert("country", country::from_location(Some(value)));
         }
         if let Some(value) = input
             .posted_date
@@ -578,6 +903,10 @@ pub struct MatchQuery {
     /// manual path leaves it false, so asking twice for "my jobs" never consumes alert state.
     #[serde(default)]
     record: bool,
+    /// `so` (the default), another short code, or `all`. Absent means the member's own
+    /// country; the same rule as `GET /jobs`.
+    #[serde(default)]
+    country: Option<String>,
 }
 
 fn default_match_limit() -> u64 {
@@ -745,14 +1074,21 @@ async fn match_jobs(
     };
 
     let threshold = state.config.match_threshold;
+    let country_wanted = resolve_country(
+        query.country.as_deref(),
+        user_doc.as_ref().and_then(|doc| doc.location.as_deref()),
+    )?;
     let ranked = ranked_candidates(
         &state,
         &profile,
         &exclusions,
         &exclude,
-        limit as i64,
-        threshold,
-        kind_preference_clause("both"),
+        &Ranking {
+            limit: limit as i64,
+            threshold,
+            kind_clause: kind_preference_clause("both"),
+            country: &country_wanted,
+        },
     )
     .await?;
     let queued_count = if query.record {
@@ -787,6 +1123,8 @@ async fn match_jobs(
                 "considered": ranked.considered,
                 "qualified": ranked.qualified,
                 "queued": queued_count,
+                "country": country_wanted,
+                "duplicatesRemoved": ranked.duplicates_removed,
                 "categories": profile.categories,
                 "subcategories": profile.subcategories,
                 "categorySource": profile.category_source,
@@ -803,6 +1141,9 @@ pub struct ForUserQuery {
     /// because that is the vocabulary `wants` uses.
     #[serde(default)]
     kind: Option<String>,
+    /// `so` (the default), another short code, or `all`; same rule as `GET /jobs`.
+    #[serde(default)]
+    country: Option<String>,
 }
 
 /// `GET /internal/jobs/for-user/{discord_id}` — the member's own list, addressed by the
@@ -852,7 +1193,14 @@ async fn jobs_for_user(
         ));
     };
 
-    let outcome = match_rows(&state, &link.user_id, limit as i64, kind).await?;
+    let outcome = match_rows(
+        &state,
+        &link.user_id,
+        limit as i64,
+        kind,
+        query.country.as_deref(),
+    )
+    .await?;
     let data: Vec<Value> = outcome
         .rows
         .iter()
@@ -882,6 +1230,8 @@ async fn jobs_for_user(
                 "considered": outcome.considered,
                 "qualified": outcome.qualified,
                 "queued": 0,
+                "country": outcome.country,
+                "duplicatesRemoved": outcome.duplicates_removed,
                 "categories": outcome.areas.categories,
                 "subcategories": outcome.areas.subcategories,
                 "categorySource": outcome.areas.source,
@@ -937,6 +1287,17 @@ pub(crate) struct Ranked {
     pub rows: Vec<(i64, JobDoc)>,
     pub considered: usize,
     pub qualified: usize,
+    /// Rows this read collapsed as the same vacancy carried by two boards.
+    pub duplicates_removed: usize,
+}
+
+/// The narrowing one matcher read applies, as one value so the call sites cannot pass the
+/// country and the kind clause in the wrong order.
+pub(crate) struct Ranking<'a> {
+    pub limit: i64,
+    pub threshold: i64,
+    pub kind_clause: Option<Document>,
+    pub country: &'a str,
 }
 
 async fn ranked_candidates(
@@ -944,17 +1305,26 @@ async fn ranked_candidates(
     profile: &MatchProfile,
     exclusions: &AlertPrefs,
     exclude_job_ids: &[String],
-    limit: i64,
-    threshold: i64,
-    kind_clause: Option<Document>,
+    ranking: &Ranking<'_>,
 ) -> Result<Ranked, AppError> {
+    let limit = ranking.limit;
+    let threshold = ranking.threshold;
+    let country = ranking.country;
     let mut filter = live_job_filter();
 
-    // What the member asked for. Applied as its own `$and` element because `live_job_filter`
-    // already owns the top-level `$or`, and a Document cannot hold one key twice; `None`
-    // ("both", and every account with no preference stored) adds nothing.
-    if let Some(clause) = kind_clause {
-        filter.insert("$and", vec![clause]);
+    // What the member asked for, and where they are. Applied as its own `$and` element
+    // because `live_job_filter` already owns the top-level `$or`, and a Document cannot hold
+    // one key twice; `None` ("both", and every account with no preference stored) adds
+    // nothing, and `?country=all` adds nothing either.
+    let mut extra: Vec<Document> = Vec::new();
+    if let Some(clause) = ranking.kind_clause.clone() {
+        extra.push(clause);
+    }
+    if let Some(clause) = country_query_clause(country) {
+        extra.push(clause);
+    }
+    if !extra.is_empty() {
+        filter.insert("$and", extra);
     }
 
     let mut categories = doc! { "$in": &profile.categories };
@@ -988,6 +1358,11 @@ async fn ranked_candidates(
     let mut scored: Vec<(i64, JobDoc)> = Vec::new();
     let mut considered = 0usize;
     while let Some(job) = cursor.try_next().await? {
+        // Country first: a member in Somalia is never shown a Djibouti row, and a row whose
+        // country was never derived is decided from its location text.
+        if !country_accepts(&job, country) {
+            continue;
+        }
         considered += 1;
         let score = score_job(&job, profile);
         // A 0 means the category gate rejected the row (the query already excludes those, so
@@ -997,6 +1372,10 @@ async fn ranked_candidates(
         }
         scored.push((score, job));
     }
+
+    // Two boards carrying the same vacancy are one row here too, and BEFORE the limit slices
+    // the list: otherwise a duplicate can occupy a slot a real job would have taken.
+    let (mut scored, duplicates_removed) = dedupe_rows(scored);
     let qualified = scored.len();
 
     // Recency, then id, as tie-breakers so paging is stable.
@@ -1010,6 +1389,7 @@ async fn ranked_candidates(
         rows: scored,
         considered,
         qualified,
+        duplicates_removed,
     })
 }
 
@@ -1083,14 +1463,20 @@ pub async fn queue_matches_for_user(
     let exclude = queued_job_ids(state, user_id).await?;
     // A member who asked for tenders only must not be queued jobs they will never be sent.
     let kind_clause = kind_preference_clause(user.wants.as_deref().unwrap_or("both"));
+    // The digest is a Somalia-only list unless the member's own location says otherwise:
+    // the same country default the portal and `/jobs` use.
+    let country_wanted = country::default_for_member(user.location.as_deref());
     let ranked = ranked_candidates(
         state,
         &profile,
         &exclusions,
         &exclude,
-        limit,
-        threshold,
-        kind_clause,
+        &Ranking {
+            limit,
+            threshold,
+            kind_clause,
+            country: country_wanted,
+        },
     )
     .await?;
     queue_notifications(state, user_id, &ranked.rows, threshold).await
@@ -1106,6 +1492,10 @@ pub(crate) struct MatchOutcome {
     /// Rows at or above the cut-off, before `limit`.
     pub qualified: usize,
     pub threshold: i64,
+    /// The country this read was filtered to, so a caller can report it.
+    pub country: String,
+    /// Rows collapsed as the same vacancy carried by two boards.
+    pub duplicates_removed: usize,
 }
 
 impl MatchOutcome {
@@ -1142,24 +1532,29 @@ pub(crate) async fn match_rows(
     user_id: &str,
     limit: i64,
     kind: Option<&str>,
+    country_requested: Option<&str>,
 ) -> Result<MatchOutcome, AppError> {
-    let empty = MatchOutcome {
+    let empty = |country: &str| MatchOutcome {
         rows: Vec::new(),
         areas: crate::models::MatchAreas::default(),
         considered: 0,
         qualified: 0,
         threshold: state.config.match_threshold,
+        country: country.to_string(),
+        duplicates_removed: 0,
     };
     let Some(user) = state.users().find_one(doc! { "_id": user_id }).await? else {
-        return Ok(empty);
+        return Ok(empty(SOMALIA));
     };
+    // An explicit `?country=` wins, otherwise the member's own country, otherwise Somalia.
+    let country_wanted = resolve_country(country_requested, user.location.as_deref())?;
     let exclusions = user.alerts.clone().unwrap_or_default();
     let Some(profile) = user
         .match_profile
         .clone()
         .filter(|profile| !profile.categories.is_empty())
     else {
-        return Ok(empty);
+        return Ok(empty(&country_wanted));
     };
 
     let threshold = state.config.match_threshold;
@@ -1168,9 +1563,12 @@ pub(crate) async fn match_rows(
         &profile,
         &exclusions,
         &[],
-        limit,
-        threshold,
-        kind_preference_clause(kind.unwrap_or("both")),
+        &Ranking {
+            limit,
+            threshold,
+            kind_clause: kind_preference_clause(kind.unwrap_or("both")),
+            country: &country_wanted,
+        },
     )
     .await?;
     let areas = crate::models::MatchAreas {
@@ -1183,6 +1581,8 @@ pub(crate) async fn match_rows(
         areas,
         considered: ranked.considered,
         qualified: ranked.qualified,
+        country: country_wanted,
+        duplicates_removed: ranked.duplicates_removed,
         threshold,
     })
 }
@@ -1531,6 +1931,7 @@ mod tests {
             Query(ForUserQuery {
                 limit: 5,
                 kind: None,
+                country: None,
             }),
         )
         .await
@@ -1583,6 +1984,7 @@ mod tests {
             Query(ForUserQuery {
                 limit: 5,
                 kind: Some("job".to_string()),
+                country: None,
             }),
         )
         .await
@@ -1711,6 +2113,7 @@ mod tests {
             Query(ForUserQuery {
                 limit: 5,
                 kind: None,
+                country: None,
             }),
         )
         .await
@@ -1735,6 +2138,7 @@ mod tests {
             Query(ForUserQuery {
                 limit: 5,
                 kind: None,
+                country: None,
             }),
         )
         .await
@@ -1756,6 +2160,7 @@ mod tests {
             Query(MatchQuery {
                 limit: 5,
                 record: false,
+                country: None,
             }),
         )
         .await
@@ -1804,6 +2209,7 @@ mod tests {
                 location: None,
                 organization: None,
                 category: None,
+                country: None,
                 kind: None,
                 page: 1,
                 limit: 20,
@@ -1887,6 +2293,7 @@ mod tests {
             location: location.map(str::to_string),
             organization: None,
             category: None,
+            country: None,
             kind: None,
             page: 1,
             limit: 20,
@@ -1920,5 +2327,295 @@ mod tests {
         assert_eq!(filtered["data"][0]["_id"], "job-mog");
 
         let _ = db.drop().await;
+    }
+
+    /// The Somalia default is a real filter, not a sorting preference: a Djibouti row that
+    /// lives in the same collection must be absent from it, and `?country=all` must bring it
+    /// back. Rows ingested before `country` existed are decided from their location text.
+    #[tokio::test]
+    async fn the_default_feed_is_somalia_and_all_brings_the_foreign_rows_back() {
+        use super::{JobsQuery, list};
+        use crate::config::Config;
+        use crate::state::AppState;
+        use axum::extract::{Query, State};
+
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return;
+        };
+        let db = client.database("jobify_test_country_filter");
+        let _ = db.drop().await;
+        let state = AppState::new(db.clone(), Config::from_env());
+        let live = crate::util::nairobi_days_ago(-5);
+        let now = crate::util::now_iso();
+
+        db.collection::<Document>("jobs")
+            .insert_many([
+                // Somalia, with the derived country stored.
+                doc! { "_id": "job-mog", "title": "Data Analyst", "organization": "ACTED", "location": "Mogadishu", "country": "so", "deadline": &live, "created_at": &now },
+                // The owner's complaint: a Djibouti vacancy on a Somali board.
+                doc! { "_id": "job-dji", "title": "Focal Person For Fertilizer And Soil Health Hub", "organization": "IGAD", "location": "Djibouti", "country": "dj", "deadline": &live, "created_at": &now },
+                doc! { "_id": "job-addis", "title": "Programme Officer", "organization": "AU", "location": "Addis Ababa", "country": "et", "deadline": &live, "created_at": &now },
+                // Written before `country` existed: the location text still decides.
+                doc! { "_id": "job-nairobi-legacy", "title": "Regional Advisor", "organization": "UN", "location": "Nairobi", "deadline": &live, "created_at": &now },
+                // Unknown, but nothing foreign about it: kept in the Somali default.
+                doc! { "_id": "job-unknown", "title": "Multiple Locations Roster", "organization": "NRC", "location": "Multiple Locations", "deadline": &live, "created_at": &now },
+            ])
+            .await
+            .unwrap();
+
+        let query = |country: Option<&str>| JobsQuery {
+            q: None,
+            search: None,
+            location: None,
+            organization: None,
+            category: None,
+            country: country.map(str::to_string),
+            kind: None,
+            page: 1,
+            limit: 20,
+        };
+        let ids = |body: &serde_json::Value| -> Vec<String> {
+            let mut ids: Vec<String> = body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["_id"].as_str().unwrap().to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        // 1. No `?country=`: Somalia only. The Djibouti row is in the DB and not in the list.
+        let (_, Json(default_feed)) = list(State(state.clone()), None, Query(query(None)))
+            .await
+            .unwrap();
+        assert_eq!(default_feed["meta"]["country"], "so");
+        assert_eq!(
+            ids(&default_feed),
+            vec!["job-mog".to_string(), "job-unknown".to_string()],
+            "the Somali default must exclude Djibouti, Ethiopia and Nairobi: {default_feed}"
+        );
+        assert!(
+            !ids(&default_feed).contains(&"job-dji".to_string()),
+            "a Djibouti vacancy must not reach a Somali member"
+        );
+
+        // 2. `?country=all` turns the filter off — the row is there, so 1 proves it exists.
+        let (_, Json(everything)) = list(State(state.clone()), None, Query(query(Some("all"))))
+            .await
+            .unwrap();
+        assert_eq!(everything["meta"]["country"], "all");
+        assert!(
+            ids(&everything).contains(&"job-dji".to_string()),
+            "?country=all must include the Djibouti row: {everything}"
+        );
+        assert_eq!(everything["meta"]["total"], 5);
+
+        // 3. An explicit country is honoured on its own.
+        let (_, Json(djibouti)) = list(State(state.clone()), None, Query(query(Some("dj"))))
+            .await
+            .unwrap();
+        assert_eq!(ids(&djibouti), vec!["job-dji".to_string()]);
+
+        // 4. A member whose own location is Djibouti defaults to Djibouti, not Somalia.
+        db.collection::<Document>("users")
+            .insert_one(doc! { "_id": "user-dji", "name": "Hodan", "location": "Djibouti" })
+            .await
+            .unwrap();
+        let (_, Json(member)) = list(
+            State(state.clone()),
+            Some(axum::Extension(crate::auth::AuthUser {
+                id: "user-dji".to_string(),
+                role: "user".to_string(),
+            })),
+            Query(query(None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(member["meta"]["country"], "dj");
+        assert_eq!(ids(&member), vec!["job-dji".to_string()]);
+
+        let _ = db.drop().await;
+    }
+
+    /// Two boards carrying one vacancy are ONE row, and the row kept is the best one for the
+    /// member. A same-title row from a different employer is a genuinely different vacancy
+    /// and must survive, which is the failure mode a title-only rule would introduce.
+    #[test]
+    fn duplicates_collapse_keeping_the_higher_score_and_different_employers_survive() {
+        use super::dedupe_rows;
+
+        let unjobs = job_from(serde_json::json!({
+            "_id": "job-un",
+            "title": "Chief of Section, Human Resources Management",
+            "organization": "UNSOS",
+            "location": "Mogadishu",
+            "source": "unjobs",
+            "created_at": "2026-11-20T09:00:00Z",
+        }));
+        let somalijobs = job_from(serde_json::json!({
+            "_id": "job-so",
+            "title": "Chief Of Section  Human Resources Management",
+            "organization": "UNSOS",
+            "location": "Mogadishu, Somalia",
+            "source": "somalijobs",
+            "created_at": "2026-11-19T09:00:00Z",
+        }));
+        let other_employer = job_from(serde_json::json!({
+            "_id": "job-other",
+            "title": "Chief of Section, Human Resources Management",
+            "organization": "UNICEF",
+            "location": "Mogadishu",
+            "source": "somalijobs",
+            "created_at": "2026-11-20T09:00:00Z",
+        }));
+
+        let (kept, collapsed) = dedupe_rows(vec![
+            (75, unjobs.clone()),
+            (80, somalijobs.clone()),
+            (75, other_employer),
+        ]);
+        assert_eq!(collapsed, 1, "one pair collapsed");
+        assert_eq!(kept.len(), 2, "the other employer stays");
+        // The 80 wins even though the 75 was read first.
+        assert!(
+            kept.iter()
+                .any(|(score, job)| job.id == "job-so" && *score == 80),
+            "the better-scoring row is the one kept"
+        );
+        assert!(!kept.iter().any(|(_, job)| job.id == "job-un"));
+
+        // Same score and same age: the source priority decides, somalijobs over unjobs.
+        let tie = job_from(serde_json::json!({
+            "_id": "job-un-tie",
+            "title": "Driver",
+            "organization": "ICRC",
+            "location": "Mogadishu",
+            "source": "unjobs",
+            "created_at": "2026-11-20T09:00:00Z",
+        }));
+        let preferred = job_from(serde_json::json!({
+            "_id": "job-so-tie",
+            "title": "Driver",
+            "organization": "ICRC",
+            "location": "Mogadishu",
+            "source": "somalijobs",
+            "created_at": "2026-11-20T09:00:00Z",
+        }));
+        let (kept, collapsed) = dedupe_rows(vec![(90, tie), (90, preferred)]);
+        assert_eq!(collapsed, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1.id, "job-so-tie", "somalijobs outranks unjobs");
+
+        // Two cities, same title and employer: two real postings, both kept.
+        let garowe = job_from(serde_json::json!({
+            "_id": "job-garowe",
+            "title": "Housekeeper",
+            "organization": "ICRC",
+            "location": "Garowe",
+            "source": "somalijobs",
+        }));
+        let baidoa = job_from(serde_json::json!({
+            "_id": "job-baidoa",
+            "title": "Housekeeper",
+            "organization": "ICRC",
+            "location": "Baidoa",
+            "source": "somalijobs",
+        }));
+        let (kept, collapsed) = dedupe_rows(vec![(80, garowe), (80, baidoa)]);
+        assert_eq!(collapsed, 0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// The country parameter is validated, never silently widened to "all" on a typo.
+    #[test]
+    fn a_country_parameter_must_be_a_code_or_all() {
+        use super::resolve_country;
+
+        assert_eq!(resolve_country(None, None).unwrap(), "so");
+        assert_eq!(resolve_country(Some("  "), None).unwrap(), "so");
+        assert_eq!(
+            resolve_country(None, Some("Hargeisa, Somaliland")).unwrap(),
+            "so"
+        );
+        assert_eq!(resolve_country(None, Some("Djibouti")).unwrap(), "dj");
+        assert_eq!(
+            resolve_country(Some("ALL"), Some("Djibouti")).unwrap(),
+            "all"
+        );
+        assert_eq!(resolve_country(Some("ke"), Some("Djibouti")).unwrap(), "ke");
+        assert!(resolve_country(Some("europe"), None).is_err());
+        assert!(resolve_country(Some("s0"), None).is_err());
+    }
+
+    /// The exact shapes the live collection has: an employer suffix on one board, the same
+    /// acronym in a different position, and one-letter spelling variants of a town.
+    #[test]
+    fn the_employer_and_town_shapes_the_boards_really_use_are_one_vacancy() {
+        use super::same_vacancy;
+
+        let somalijobs = job_from(serde_json::json!({
+            "_id": "job-a",
+            "title": "Climate Education Consultant",
+            "organization": "UNICEF",
+            "location": "Mogadishu",
+        }));
+        let unjobs = job_from(serde_json::json!({
+            "_id": "job-b",
+            "title": "Climate Education Consultant",
+            "organization": "UNICEF - United Nations Children's Fund",
+            "location": "Mogadishu",
+        }));
+        assert!(
+            same_vacancy(&somalijobs, &unjobs),
+            "an employer suffix must not make a second vacancy"
+        );
+
+        let icrc_a = job_from(serde_json::json!({
+            "_id": "job-c",
+            "title": "Housekeeper",
+            "organization": "INTERNATIONAL COMMITTEE OF THE RED CROSS (ICRC)",
+            "location": "Garowe",
+        }));
+        let icrc_b = job_from(serde_json::json!({
+            "_id": "job-d",
+            "title": "Housekeeper",
+            "organization": "ICRC - International Committee of the Red Cross",
+            "location": "Garoowe, Somalia",
+        }));
+        assert!(same_vacancy(&icrc_a, &icrc_b), "word order and spelling");
+
+        // ... but two towns of the same vacancy stay two rows.
+        let dhobley = job_from(serde_json::json!({
+            "_id": "job-e",
+            "title": "Housekeeper",
+            "organization": "ICRC - International Committee of the Red Cross",
+            "location": "Dhobley, Somalia",
+        }));
+        assert!(
+            !same_vacancy(&icrc_a, &dhobley),
+            "Garowe and Dhobley are two postings, not one"
+        );
+
+        // A different employer with the same title is never merged.
+        let other = job_from(serde_json::json!({
+            "_id": "job-f",
+            "title": "Housekeeper",
+            "organization": "NRC",
+            "location": "Garowe",
+        }));
+        assert!(!same_vacancy(&icrc_a, &other));
+
+        // A common word is not a prefix: "UN" must not swallow "UNICEF".
+        let un = job_from(serde_json::json!({
+            "_id": "job-g",
+            "title": "Housekeeper",
+            "organization": "UN",
+            "location": "Garowe",
+        }));
+        assert!(!same_vacancy(&icrc_a, &un));
     }
 }

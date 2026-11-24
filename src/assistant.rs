@@ -32,8 +32,8 @@ use crate::categories::Category;
 use crate::credits;
 use crate::error::AppError;
 use crate::llm::{LlmMessage, LlmRequest};
-use crate::models::{KIND_JOB, KIND_TENDER};
-use crate::routes::jobs::live_job_filter;
+use crate::models::{JobDoc, KIND_JOB, KIND_TENDER};
+use crate::routes::jobs::{country_accepts, country_query_clause, dedupe_rows, live_job_filter};
 use crate::routes::subscription::subscription_for;
 use crate::state::AppState;
 use crate::util::{escape_regex, nairobi_today, now_iso, uuid_id};
@@ -498,6 +498,11 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
     if let Some(keyword) = keyword_clause(&routed.keywords) {
         clauses.push(keyword);
     }
+    // The same Somalia-first default the feed uses. A free-text answer is a list too, and a
+    // Djibouti row must not reach a Somali member through the assistant.
+    if let Some(clause) = country_query_clause(crate::country::SOMALIA) {
+        clauses.push(clause);
+    }
     // Same rule as `GET /jobs`: "job" must also match the legacy rows that have no `kind`
     // field, so it is a separate clause rather than another key on a shared document.
     match routed.kind {
@@ -516,25 +521,41 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
         .build();
 
     let mut cursor = state.jobs().find(filter).with_options(options).await?;
-    let mut rows: Vec<SearchRow> = Vec::new();
+    let mut found: Vec<(i64, JobDoc)> = Vec::new();
     while let Some(job) = cursor.try_next().await? {
-        // A blank URL is no URL: the payload says `null` rather than an empty string a
-        // client would render as a dead link.
-        let url = if job.url.trim().is_empty() {
-            None
-        } else {
-            Some(job.url.clone())
-        };
-        rows.push(SearchRow {
-            job_id: job.id,
-            title: job.title,
-            organization: job.organization,
-            location: job.location,
-            kind: job.kind,
-            deadline: job.deadline,
-            url,
-        });
+        // A row whose country was never derived is decided from its location text, exactly
+        // as the feed and the matcher do it.
+        if !country_accepts(&job, crate::country::SOMALIA) {
+            continue;
+        }
+        found.push((0, job));
     }
+
+    // The same vacancy from two boards is one answer: an assistant reply must not repeat a
+    // job. `0` for every row means "no score", so the tie-breaks pick the newest row and
+    // then the preferred source.
+    let (found, _) = dedupe_rows(found);
+    let rows: Vec<SearchRow> = found
+        .into_iter()
+        .map(|(_, job)| {
+            // A blank URL is no URL: the payload says `null` rather than an empty string a
+            // client would render as a dead link.
+            let url = if job.url.trim().is_empty() {
+                None
+            } else {
+                Some(job.url.clone())
+            };
+            SearchRow {
+                job_id: job.id,
+                title: job.title,
+                organization: job.organization,
+                location: job.location,
+                kind: job.kind,
+                deadline: job.deadline,
+                url,
+            }
+        })
+        .collect();
     Ok(rows)
 }
 

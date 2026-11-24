@@ -4,6 +4,8 @@ mod auth;
 // exist for clients that render the list.
 mod categories;
 mod config;
+/// Country derivation from a location string — the filter every list applies.
+mod country;
 mod credits;
 mod db;
 mod error;

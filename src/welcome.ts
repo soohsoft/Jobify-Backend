@@ -14,7 +14,7 @@
  */
 import type { BotContext, MessagePayload } from './context.js';
 import { errorFields } from './log.js';
-import { educationPrompt } from './onboarding.js';
+import { namePrompt } from './onboarding.js';
 import { clampContent } from './ui.js';
 
 /** Discord's "you cannot DM this user" code. Logged, never matched for control flow alone. */
@@ -46,7 +46,7 @@ export function welcomeLines(name: string | null): string {
   return [
     greeting,
     'I find Somali job and tender openings and send the ones that match you straight to your DMs.',
-    'Three quick questions set it up — then your matches arrive daily at 08:00 EAT.',
+    'Four quick questions set it up — then your matches arrive daily at 08:00 EAT.',
   ].join('\n');
 }
 
@@ -65,7 +65,7 @@ export function plainWelcome(member: JoinMember): MessagePayload {
 }
 
 export function interviewWelcome(member: JoinMember): MessagePayload {
-  const prompt = educationPrompt();
+  const prompt = namePrompt();
   return {
     content: clampContent(`${welcomeLines(nameFor(member))}\n\n${prompt.content}`),
     components: prompt.components,
@@ -98,14 +98,24 @@ export async function handleMemberJoin(member: JoinMember, ctx: BotContext): Pro
 
   const discordId = member.user.id;
   let onboarded = true;
-  let sectors: string[] = [];
+  let existing: { education: import('./types.js').EducationEntry[]; name: string; lastPosition: string | null; experienceYears: number | null } = {
+    education: [],
+    name: member.user.globalName ?? member.user.username,
+    lastPosition: null,
+    experienceYears: null,
+  };
   try {
     const upsert = await ctx.backend.upsertUser({
       discord_id: discordId,
       username: member.user.username,
       global_name: member.user.globalName ?? null,
     });
-    sectors = upsert.user.sectors ?? [];
+    existing = {
+      education: upsert.user.education ?? [],
+      name: upsert.user.name ?? existing.name,
+      lastPosition: upsert.user.last_position ?? null,
+      experienceYears: upsert.user.experience_years ?? null,
+    };
     // Older backends omit the flag on the upsert response; then the GET is authoritative.
     const flag = (upsert as { onboarding_complete?: boolean }).onboarding_complete;
     onboarded = flag ?? (await ctx.backend.getUser(discordId)).onboarding_complete;
@@ -119,7 +129,12 @@ export async function handleMemberJoin(member: JoinMember, ctx: BotContext): Pro
   }
 
   const interview = !onboarded;
-  if (interview) ctx.sessions.start(discordId, { sectors });
+  if (interview) ctx.sessions.start(discordId, {
+    previousEducation: existing.education,
+    name: existing.name || undefined,
+    lastPosition: existing.lastPosition ?? undefined,
+    experienceYears: existing.experienceYears ?? undefined,
+  });
 
   const payload = interview ? interviewWelcome(member) : plainWelcome(member);
 

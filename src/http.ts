@@ -19,6 +19,7 @@ import type {
   FeedPage,
   LinkInfo,
   LinkToken,
+  MatchRow,
   ProfilePatch,
   UserEnvelope,
 } from './types.js';
@@ -53,6 +54,12 @@ interface RequestOptions {
   authenticate?: boolean;
 }
 
+/** The backend's envelope: `{status, data, meta?}`. Callers that need `meta` use this. */
+interface Envelope<T> {
+  data: T;
+  meta?: Record<string, unknown>;
+}
+
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_ATTEMPTS = 3;
 const RETRY_BASE_MS = 400;
@@ -79,6 +86,19 @@ export class Backend {
   }
 
   private async request<T>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
+    return (await this.requestEnvelope<T>(method, path, options)).data;
+  }
+
+  /**
+   * The same call, keeping `meta`. Used where the backend reports a decision in `meta`
+   * rather than in `data` — `POST /internal/discord/profile` says `onboarding_complete` and
+   * `alerts_enabled` there, and deriving them again in the bot is how the two drift.
+   */
+  private async requestEnvelope<T>(
+    method: string,
+    path: string,
+    options: RequestOptions = {},
+  ): Promise<Envelope<T>> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = { accept: 'application/json' };
     if (options.authenticate !== false) headers['x-api-key'] = this.apiKey;
@@ -113,7 +133,7 @@ export class Backend {
     url: string,
     headers: Record<string, string>,
     body: unknown,
-  ): Promise<T> {
+  ): Promise<Envelope<T>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Response;
@@ -152,11 +172,11 @@ export class Backend {
       throw new BackendError(response.status, code, message);
     }
 
-    const envelope = parsed as { status?: string; data?: T } | undefined;
+    const envelope = parsed as { status?: string; data?: T; meta?: Record<string, unknown> } | undefined;
     if (!envelope || envelope.data === undefined) {
       throw new BackendError(response.status, 'bad_payload', 'The backend returned an unexpected payload');
     }
-    return envelope.data;
+    return { data: envelope.data, ...(envelope.meta ? { meta: envelope.meta } : {}) };
   }
 
   // -------------------------------------------------------------------------
@@ -171,11 +191,31 @@ export class Backend {
     return this.request('POST', '/internal/discord/users', { body: input });
   }
 
-  async saveProfile(patch: ProfilePatch): Promise<{ user: UserEnvelope['user']; onboarding_complete: boolean }> {
-    const user = await this.request<UserEnvelope['user']>('POST', '/internal/discord/profile', { body: patch });
-    // The backend also reports this in `meta`; deriving it from the user keeps the two
-    // call sites from disagreeing about what "onboarded" means.
-    return { user, onboarding_complete: (user.match_profile?.categories.length ?? 0) > 0 };
+  async saveProfile(
+    patch: ProfilePatch,
+  ): Promise<{ user: UserEnvelope['user']; onboarding_complete: boolean; alerts_enabled: boolean }> {
+    const envelope = await this.requestEnvelope<UserEnvelope['user']>('POST', '/internal/discord/profile', {
+      body: patch,
+    });
+    const meta = envelope.meta ?? {};
+    // The backend is the authority on both: it knows that an "Other" degree completes
+    // onboarding and whether `/stop` must be respected, and the bot must not re-derive either.
+    return {
+      user: envelope.data,
+      onboarding_complete:
+        typeof meta.onboarding_complete === 'boolean'
+          ? meta.onboarding_complete
+          : envelope.data.name.trim().length > 0 && envelope.data.education.length > 0,
+      alerts_enabled: typeof meta.alerts_enabled === 'boolean' ? meta.alerts_enabled : false,
+    };
+  }
+
+  /** The member's current matches, scored by the backend's own matcher. */
+  async matches(discordId: string, limit = 5): Promise<MatchRow[]> {
+    return this.request<MatchRow[]>(
+      'GET',
+      `/internal/discord/matches/${encodeURIComponent(discordId)}?limit=${limit}`,
+    );
   }
 
   async getUser(discordId: string): Promise<UserEnvelope> {

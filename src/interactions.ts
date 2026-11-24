@@ -1,6 +1,6 @@
 /**
- * Component, select and modal handling: the interview's step machine plus the small buttons
- * attached to `/alerts`, `/credits` and the summary.
+ * Component and modal handling: the four-step interview plus the small buttons attached to
+ * `/alerts`, `/credits` and the completion message.
  *
  * Every branch starts by checking the session, because an old message can outlive a restart
  * or a finished interview. A dead session gets a plain "run /start again" rather than a
@@ -12,21 +12,26 @@ import { alertsPanel, handleCommand } from './commands.js';
 import type { BotContext } from './context.js';
 import {
   CID,
+  DEGREE_LEVELS,
   EDUCATION_OPTIONS,
-  MAX_SECTORS,
+  FIELD_OPTIONS,
+  MAX_EDUCATION,
+  anotherPrompt,
+  completionPrompt,
   educationPrompt,
   experiencePrompt,
-  locationModal,
-  locationPrompt,
-  sectorPage,
-  sectorsPrompt,
-  skillsModal,
-  skillsPrompt,
-  summaryPrompt,
-  wantsPrompt,
+  fieldModal,
+  fieldPrompt,
+  nameModal,
+  namePrompt,
+  positionModal,
+  positionPrompt,
+  type OnboardingSession,
 } from './onboarding.js';
-import { assistantErrorReply, clampContent } from './ui.js';
+import type { EducationEntry } from './types.js';
+import { assistantErrorReply } from './ui.js';
 import { BackendError } from './http.js';
+import { MAX_DIGEST_ROWS } from './format.js';
 
 export async function handleInteraction(interaction: Interaction, ctx: BotContext): Promise<void> {
   if (interaction.isChatInputCommand()) {
@@ -38,7 +43,7 @@ export async function handleInteraction(interaction: Interaction, ctx: BotContex
     return;
   }
   if (interaction.isStringSelectMenu()) {
-    await handleSelect(interaction, ctx);
+    await handleSelect(interaction);
     return;
   }
   if (interaction.isModalSubmit()) {
@@ -71,7 +76,9 @@ async function stepFailed(
   const content =
     err instanceof BackendError && err.status === 0
       ? 'I could not reach Jobify just now — your answer was not saved. Please try again.'
-      : 'I could not save that answer. Please try again — if it keeps failing, run `/start` again.';
+      : err instanceof BackendError && err.status === 400
+        ? `That answer was refused: ${err.message}`
+        : 'I could not save that answer. Please try again — if it keeps failing, run `/start` again.';
   ctx.logger.error('onboarding step failed', {
     discordId: interaction.user.id,
     step: interaction.customId,
@@ -115,122 +122,113 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
     return;
   }
 
+  // Step 1 — the name. A modal has to be the interaction's first response: no defer here.
+  if (id === CID.nameOpen) {
+    await interaction.showModal(nameModal(session.name));
+    return;
+  }
+
+  // Step 2a — the level.
   if (id.startsWith('onb:edu:')) {
-    const value = id.slice('onb:edu:'.length);
-    if (!EDUCATION_OPTIONS.some((option) => option.value === value)) {
+    const level = id.slice('onb:edu:'.length);
+    if (!EDUCATION_OPTIONS.some((option) => option.value === level)) {
+      await expired(interaction);
+      return;
+    }
+    if (DEGREE_LEVELS.includes(level)) {
+      // Needs a field first; nothing is saved until that answer exists.
+      session.pendingLevel = level;
+      session.step = 'education_field';
+      await interaction.update(fieldPrompt(level));
+      return;
+    }
+    await interaction.deferUpdate();
+    await addDegree(interaction, ctx, session, { level, field: '' });
+    return;
+  }
+
+  // Step 2b — the field, only for bachelor / master / PhD.
+  if (id.startsWith('onb:field:')) {
+    const key = id.slice('onb:field:'.length);
+    const option = FIELD_OPTIONS.find((candidate) => candidate.key === key);
+    const level = session.pendingLevel;
+    if (!option || !level) {
+      await expired(interaction);
+      return;
+    }
+    if (option.key === 'other') {
+      // "Other" is free text, and the modal keeps `pendingLevel` for the submit.
+      await interaction.showModal(fieldModal());
+      return;
+    }
+    await interaction.deferUpdate();
+    await addDegree(interaction, ctx, session, { level, field: option.label });
+    return;
+  }
+
+  // Step 2c — "another degree?"
+  if (id.startsWith('onb:another:')) {
+    const answer = id.slice('onb:another:'.length);
+    if (answer !== 'yes' && answer !== 'no') {
       await expired(interaction);
       return;
     }
     await interaction.deferUpdate();
-    try {
-      await ctx.backend.saveProfile({ discord_id: discordId, education_level: value });
-    } catch (err) {
-      await stepFailed(interaction, ctx, err);
+    if (answer === 'yes' && session.education.length < MAX_EDUCATION) {
+      session.step = 'education_level';
+      await interaction.editReply(educationPrompt(session));
       return;
     }
-    session.education = value;
-    session.step = 'experience';
-    await interaction.editReply(experiencePrompt());
+    // "no", or "yes" after the fourth degree: on to the job history.
+    session.step = 'position';
+    await interaction.editReply(positionPrompt());
     return;
   }
 
+  // Step 3a — the last job title.
+  if (id === CID.positionOpen) {
+    await interaction.showModal(positionModal(session.lastPosition));
+    return;
+  }
+
+  // Step 3b — the years band, and then step 4: done.
   if (id.startsWith('onb:exp:')) {
     const band = id.slice('onb:exp:'.length);
-    const option = experienceYarsFromBand(band);
-    if (option === null) {
+    const years = experienceYearsFromBand(band);
+    if (years === null) {
       await expired(interaction);
       return;
     }
     await interaction.deferUpdate();
-    try {
-      await ctx.backend.saveProfile({ discord_id: discordId, experience_years: option });
-    } catch (err) {
-      await stepFailed(interaction, ctx, err);
-      return;
-    }
-    session.experienceYears = option;
-    session.step = 'sectors';
-    await interaction.editReply(sectorsPrompt(session, await ctx.categories()));
-    return;
-  }
-
-  if (id.startsWith('onb:sectors:page:')) {
-    const page = Number.parseInt(id.slice('onb:sectors:page:'.length), 10);
-    if (!Number.isInteger(page)) {
-      await expired(interaction);
-      return;
-    }
-    await interaction.deferUpdate();
-    session.sectorPage = page;
-    await interaction.editReply(sectorsPrompt(session, await ctx.categories()));
-    return;
-  }
-
-  if (id === CID.sectorsDone) {
-    await interaction.deferUpdate();
-    const categories = await ctx.categories();
-    if (session.sectors.length === 0) {
-      const view = sectorsPrompt(session, categories);
-      await interaction.editReply({
-        ...view,
-        content: `Pick at least one sector — I need something to match against.\n\n${view.content}`,
-      });
-      return;
-    }
-    try {
-      await ctx.backend.saveProfile({ discord_id: discordId, sectors: session.sectors });
-    } catch (err) {
-      await stepFailed(interaction, ctx, err);
-      return;
-    }
-    session.step = 'location';
-    await interaction.editReply(locationPrompt());
-    return;
-  }
-
-  if (id === CID.locationOpen) {
-    // A modal has to be the interaction's first response: no defer here.
-    await interaction.showModal(locationModal());
-    return;
-  }
-
-  if (id === CID.skillsOpen) {
-    await interaction.showModal(skillsModal());
-    return;
-  }
-
-  if (id.startsWith('onb:want:')) {
-    const raw = id.slice('onb:want:'.length);
-    if (raw !== 'jobs' && raw !== 'tenders' && raw !== 'both') {
-      await expired(interaction);
-      return;
-    }
-    await interaction.deferUpdate();
-    try {
-      await ctx.backend.saveProfile({ discord_id: discordId, wants: raw });
-      // A finished interview turns the daily digest on. `/stop` is the way out, and it says
-      // so — switching alerts on silently would be the wrong default.
-      await ctx.backend.setAlerts(discordId, true, 'daily');
-      const envelope = await ctx.backend.getUser(discordId);
-      const matchCount = await countLiveMatches(ctx, envelope.user.match_profile?.categories ?? [], raw);
-      ctx.sessions.clear(discordId);
-      await interaction.editReply(
-        summaryPrompt({
-          user: envelope.user,
-          matchCount,
-          digestTz: ctx.digestTz,
-          digestHour: ctx.digestHour,
-          appBaseUrl: ctx.appBaseUrl,
-        }),
-      );
-      ctx.logger.info('onboarding complete', { discordId, matchCount, wants: raw });
-    } catch (err) {
-      await stepFailed(interaction, ctx, err);
-    }
+    session.experienceYears = years;
+    await completeInterview(interaction, ctx, session, years);
   }
 }
 
-function experienceYarsFromBand(band: string): number | null {
+/** Appends one education entry, writes the WHOLE list, and asks for the next one. */
+async function addDegree(
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  ctx: BotContext,
+  session: OnboardingSession,
+  entry: EducationEntry,
+): Promise<void> {
+  const education = [...session.education, entry].slice(0, MAX_EDUCATION);
+  try {
+    await ctx.backend.saveProfile({ discord_id: interaction.user.id, education });
+  } catch (err) {
+    await stepFailed(interaction, ctx, err);
+    return;
+  }
+  session.education = education;
+  session.pendingLevel = undefined;
+  session.step = 'another_degree';
+
+  const prompt = anotherPrompt(session);
+  if (interaction.deferred || interaction.replied) await interaction.editReply(prompt);
+  else await interaction.reply({ ...prompt, flags: MessageFlags.Ephemeral });
+}
+
+function experienceYearsFromBand(band: string): number | null {
   switch (band) {
     case '0':
       return 0;
@@ -248,28 +246,79 @@ function experienceYarsFromBand(band: string): number | null {
 }
 
 /**
- * How many live openings match: the sectors the member picked, narrowed to the kind they
- * asked for. Read from the public feed rather than the assistant, because a summary must not
- * cost a query.
+ * Step 4: the last answer, then "Setup complete" with the member's CURRENT matches.
+ *
+ * The bot does not enable alerts here — the backend does it when onboarding completes, and
+ * skips it for anyone who said `/stop`. Re-enabling from the bot would quietly undo that.
+ * The matches are the backend's own scored rows (max 5), rendered by the digest formatter.
  */
-async function countLiveMatches(ctx: BotContext, categories: string[], wants: string): Promise<number> {
-  if (categories.length === 0) return 0;
-  const wanted = new Set(categories);
-  const page = await ctx.backend.listJobs({ limit: 200 });
-  return page.items.filter((job) => {
-    if (!job.category || !wanted.has(job.category)) return false;
-    if (wants === 'jobs') return (job.kind ?? 'job') !== 'tender';
-    if (wants === 'tenders') return job.kind === 'tender';
-    return true;
-  }).length;
+async function completeInterview(
+  interaction: ButtonInteraction,
+  ctx: BotContext,
+  session: OnboardingSession,
+  years: number,
+): Promise<void> {
+  const discordId = interaction.user.id;
+  try {
+    await ctx.backend.saveProfile({ discord_id: discordId, experience_years: years });
+    const envelope = await ctx.backend.getUser(discordId);
+
+    let matches: Awaited<ReturnType<BotContext['backend']['matches']>> = [];
+    try {
+      matches = await ctx.backend.matches(discordId, MAX_DIGEST_ROWS);
+    } catch (err) {
+      // Setup itself succeeded; a failed match read must not turn a finished interview into
+      // an error message. `/jobs` still works, and the digest will fill in later.
+      ctx.logger.warn('first match digest could not be read', {
+        discordId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    ctx.sessions.clear(discordId);
+    await interaction.editReply(
+      completionPrompt({
+        user: envelope.user,
+        matches,
+        digestTz: ctx.digestTz,
+        digestHour: ctx.digestHour,
+        appBaseUrl: ctx.appBaseUrl,
+      }),
+    );
+    ctx.logger.info('onboarding complete', {
+      discordId,
+      education: envelope.user.education.length,
+      matches: matches.length,
+      alertsEnabled: envelope.alerts_enabled,
+      experienceYears: years,
+      // Kept for the log only: the session is gone after this.
+      sessionName: session.name ?? null,
+    });
+  } catch (err) {
+    await stepFailed(interaction, ctx, err);
+  }
 }
 
 async function restartInterview(interaction: ButtonInteraction, ctx: BotContext): Promise<void> {
   await interaction.deferUpdate();
   const existing = await ctx.backend.getUser(interaction.user.id).catch(() => null);
-  ctx.sessions.start(interaction.user.id, { sectors: existing?.user.sectors ?? [] });
-  await interaction.editReply(educationPrompt());
+  ctx.sessions.start(interaction.user.id, {
+    previousEducation: existing?.user.education ?? [],
+    name: existing?.user.name ?? undefined,
+    lastPosition: existing?.user.last_position ?? undefined,
+    experienceYears: existing?.user.experience_years ?? undefined,
+  });
+  await interaction.editReply(namePromptForRestart());
   ctx.logger.info('onboarding restarted', { discordId: interaction.user.id });
+}
+
+/** The name prompt, with a line saying a re-run replaces what is on file. */
+function namePromptForRestart(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
+  const prompt = namePrompt();
+  return {
+    content: `${prompt.content}\nYour current answers are filled in where they can be — answering again replaces them.`,
+    components: prompt.components,
+  };
 }
 
 async function alertsButton(interaction: ButtonInteraction, ctx: BotContext, action: string): Promise<void> {
@@ -319,39 +368,18 @@ async function buyCredits(interaction: ButtonInteraction, ctx: BotContext): Prom
 }
 
 // ---------------------------------------------------------------------------
-// Select menu: the sector multi-select, paged
+// Select menus
+//
+// The interview has no select menus any more (sectors went with the old flow), but the
+// interaction router still needs to answer one politely if an old message is clicked.
 // ---------------------------------------------------------------------------
 
-async function handleSelect(interaction: StringSelectMenuInteraction, ctx: BotContext): Promise<void> {
-  if (interaction.customId !== CID.sectorSelect) return;
-
-  const session = ctx.sessions.get(interaction.user.id);
-  if (!session) {
-    await expired(interaction);
-    return;
-  }
-
-  const categories = await ctx.categories();
-  const view = sectorPage(categories, session.sectorPage);
-  const onThisPage = new Set(view.items.map((category) => category.slug));
-  // Replace this page's contribution and keep the other page's choices: selecting on page 2
-  // must not erase what was picked on page 1.
-  const kept = session.sectors.filter((slug) => !onThisPage.has(slug));
-  const chosen = [...new Set([...kept, ...interaction.values])].slice(0, MAX_SECTORS);
-  session.sectors = chosen;
-
-  const prompt = sectorsPrompt(session, categories);
-  const overflow = kept.length + interaction.values.length > MAX_SECTORS;
-  await interaction.update({
-    ...prompt,
-    content: overflow
-      ? `Only the first ${MAX_SECTORS} sectors are kept.\n\n${prompt.content}`
-      : prompt.content,
-  });
+async function handleSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+  await expired(interaction);
 }
 
 // ---------------------------------------------------------------------------
-// Modals: location, skills and the company profile
+// Modals: name, field of study, last position, and the company profile
 // ---------------------------------------------------------------------------
 
 async function handleModal(interaction: ModalSubmitInteraction, ctx: BotContext): Promise<void> {
@@ -366,33 +394,52 @@ async function handleModal(interaction: ModalSubmitInteraction, ctx: BotContext)
     return;
   }
 
-  if (interaction.customId === CID.locationModal) {
-    const location = interaction.fields.getTextInputValue('location').trim();
-    if (location.length === 0) {
-      await interaction.reply({ content: 'A city or region is needed — try `/start` again.', flags: MessageFlags.Ephemeral });
+  // Step 1 — the name.
+  if (interaction.customId === CID.nameModal) {
+    const name = interaction.fields.getTextInputValue('name').trim();
+    if (name.length === 0) {
+      await interaction.reply({ content: 'I need a name — run `/start` and try again.', flags: MessageFlags.Ephemeral });
       return;
     }
     await advanceFromModal(interaction, ctx, async () => {
-      await ctx.backend.saveProfile({ discord_id: interaction.user.id, location });
-      session.step = 'skills';
-      return skillsPrompt();
+      await ctx.backend.saveProfile({ discord_id: interaction.user.id, name });
+      session.name = name;
+      session.step = 'education_level';
+      return educationPrompt(session);
     });
     return;
   }
 
-  if (interaction.customId === CID.skillsModal) {
-    const raw = interaction.fields.getTextInputValue('skills');
-    const skills = raw
-      .split(',')
-      .map((skill) => skill.trim())
-      .filter((skill) => skill.length > 0)
-      .slice(0, 20);
+  // Step 2b — "Other" as free text. It becomes keywords, never a category.
+  if (interaction.customId === CID.fieldModal) {
+    const text = interaction.fields.getTextInputValue('field').trim();
+    const level = session.pendingLevel;
+    if (!level) {
+      await expired(interaction);
+      return;
+    }
+    if (text.length === 0) {
+      await interaction.reply({ content: 'Tell me the field, or pick one of the buttons.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (interaction.isFromMessage()) await interaction.deferUpdate();
+    else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await addDegree(interaction, ctx, session, { level, field: `Other: ${text}` });
+    return;
+  }
+
+  // Step 3a — the last job title.
+  if (interaction.customId === CID.positionModal) {
+    const position = interaction.fields.getTextInputValue('position').trim();
+    if (position.length === 0) {
+      await interaction.reply({ content: 'A job title is needed — run `/start` and try again.', flags: MessageFlags.Ephemeral });
+      return;
+    }
     await advanceFromModal(interaction, ctx, async () => {
-      if (skills.length > 0) {
-        await ctx.backend.saveProfile({ discord_id: interaction.user.id, skills });
-      }
-      session.step = 'wants';
-      return wantsPrompt();
+      await ctx.backend.saveProfile({ discord_id: interaction.user.id, last_position: position });
+      session.lastPosition = position;
+      session.step = 'years';
+      return experiencePrompt();
     });
     return;
   }
@@ -413,7 +460,7 @@ async function advanceFromModal(
     else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const next = await work();
     await interaction.editReply({
-      content: clampContent(next.content),
+      content: next.content,
       components: next.components,
     });
   } catch (err) {

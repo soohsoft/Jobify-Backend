@@ -30,8 +30,13 @@ export interface IntroMessage {
 export interface IntroChannel {
   id: string;
   messages: {
-    /** discord.js >= 14.26; the deprecated `fetchPinned` is kept as a fallback. */
-    fetchPins?(): Promise<{ items: Collection<string, IntroMessage> }>;
+    /**
+     * discord.js >= 14.26: `{ hasMore, items: MessagePin[] }`, where each pin WRAPS its
+     * message (`{ message, pinnedAt }`) and `items` is a plain array. Older 14.x returned a
+     * Collection of Messages. Both shapes are accepted — reading `items` as a Collection of
+     * messages silently matched nothing and crashed on `content.includes`.
+     */
+    fetchPins?(): Promise<{ items: Iterable<unknown> } | Iterable<unknown>>;
     fetchPinned?(): Promise<Collection<string, IntroMessage>>;
     fetch(options: { limit: number }): Promise<Collection<string, IntroMessage>>;
   };
@@ -55,7 +60,7 @@ export function introContent(digestHour = 8, digestTz = 'Africa/Nairobi'): strin
       "Type a role and a place — e.g. `nurse jobs in Mogadishu` — and I answer with live openings. You can type right here in this channel, no @mention needed.",
       '',
       '**Commands**',
-      '`/start` — set up or redo your 3-question interview',
+      '`/start` — set up or redo your four-question interview',
       '`/jobs` · `/tenders` — browse everything',
       '`/alerts` — turn the daily digest on or off',
       '`/account` — payment and company profile',
@@ -94,12 +99,32 @@ export function ensureIntro(
  */
 async function fetchPinned(channel: IntroChannel): Promise<Collection<string, IntroMessage>> {
   if (channel.messages.fetchPins) {
-    return (await channel.messages.fetchPins()).items;
+    const response = await channel.messages.fetchPins();
+    const items: Iterable<unknown> = 'items' in response ? response.items : response;
+    const messages = Array.from(items).map(asIntroMessage).filter(isIntroMessage);
+    return new Collection(messages.map((message) => [message.id, message]));
   }
   if (channel.messages.fetchPinned) {
     return channel.messages.fetchPinned();
   }
   return new Collection<string, IntroMessage>();
+}
+
+/** A pin wraps its message (`{ message, pinnedAt }`); an older 14.x Collection held messages. */
+function asIntroMessage(item: unknown): unknown {
+  if (item && typeof item === 'object' && 'message' in item) {
+    return (item as { message: unknown }).message;
+  }
+  return item;
+}
+
+function isIntroMessage(item: unknown): item is IntroMessage {
+  return (
+    !!item &&
+    typeof item === 'object' &&
+    typeof (item as IntroMessage).id === 'string' &&
+    typeof (item as IntroMessage).content === 'string'
+  );
 }
 
 async function ensureIntroOnce(channel: IntroChannel, logger: Logger, content: string): Promise<IntroOutcome> {

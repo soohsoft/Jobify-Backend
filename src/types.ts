@@ -16,6 +16,9 @@ export interface AlertPrefs {
   enabled: boolean;
   mode: string;
   last_sent_at: string;
+  /** True when the MEMBER switched alerts off (`/stop`, `/alerts off`), so onboarding
+   *  (including a re-run) must not switch them back on. */
+  user_disabled: boolean;
   excluded_employers: string[];
   excluded_categories: string[];
 }
@@ -25,6 +28,12 @@ export interface CompanyProfile {
   services: string[];
   website?: string | null;
   description?: string | null;
+}
+
+export interface EducationEntry {
+  level: string;
+  /** The backend's canonical label, `Other: <their words>`, or empty for a non-degree level. */
+  field: string;
 }
 
 export interface DiscordUser {
@@ -38,12 +47,21 @@ export interface DiscordUser {
   match_profile?: MatchProfile | null;
   alerts?: AlertPrefs | null;
   education_level?: string | null;
+  /** Always present: an empty list means no degree has been recorded yet. */
+  education: EducationEntry[];
+  last_position?: string | null;
   experience_years?: number | null;
   sectors: string[];
   skills: string[];
   wants?: string | null;
   company?: CompanyProfile | null;
   discord_id?: string | null;
+}
+
+/** One scored row from `GET /internal/discord/matches/{discord_id}`. */
+export interface MatchRow {
+  job: FeedJob;
+  matchScore: number;
 }
 
 export interface Credits {
@@ -133,10 +151,13 @@ export interface LinkToken {
 export interface ProfilePatch {
   discord_id: string;
   name?: string;
-  location?: string;
   education_level?: string;
+  /** Sent WHOLE on every save: the backend replaces the stored list with it. */
+  education?: EducationEntry[];
+  last_position?: string;
   experience_years?: number;
   sectors?: string[];
   skills?: string[];
   wants?: string;
+  location?: string;
 }

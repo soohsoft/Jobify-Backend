@@ -11,7 +11,7 @@ Node 20.6+ (uses `--import` for tests), discord.js v14, TypeScript strict.
 
 | Command | What it does |
 |---|---|
-| `/start` | Registers the member by Discord id, then runs the six-step interview: education → experience → sectors (multi-select, 10 max) → location → skills → jobs/tenders/both. Each answer is written to the backend immediately, so stopping halfway still leaves a usable profile. Ends with how many live openings match. |
+| `/start` | Registers the member by Discord id, then runs the four-step interview: name → education (level, then field for bachelor/master/phd, with an "another degree?" loop up to 4) → last job title → years of experience. There is no location step: Jobify covers all of Somalia. Each answer is written to the backend immediately, so stopping halfway still leaves a usable profile. Ends with **Setup complete**, the member's current matches (up to 5) and a pointer at `/jobs`. |
 | `/jobs [query]` | With a query: the purpose-bound assistant. Without: the newest live jobs in the member's sectors. |
 | `/tenders [query]` | The same, `kind=tender`. |
 | `/alerts` | On/off, instant vs daily, and a button to re-run the interview. |
@@ -24,7 +24,7 @@ Node 20.6+ (uses `--import` for tests), discord.js v14, TypeScript strict.
 Free text: a DM to the bot (or an @mention in a server) goes to the assistant with the
 sender's Discord id. The reply is the assistant's own sentence plus up to three real rows as
 links. A brand-new member is not answered by the assistant at all: their first message starts
-the same six-step interview as `/start` (pre-selecting any sectors already on file), and that
+the same four-step interview as `/start` (pre-filled with the answers already on file), and that
 welcome costs no query. Writing again mid-interview re-sends the current step rather than
 restarting it.
 
@@ -155,7 +155,7 @@ Internal routes, all `x-api-key`:
 | Route | Used for |
 |---|---|
 | `POST /internal/discord/users` | register/refresh on first contact |
-| `POST /internal/discord/profile` | one answer at a time (education, experience, sectors, location, skills, wants) |
+| `POST /internal/discord/profile` | one answer at a time (name, education list, last position, years; sectors/skills still accepted) |
 | `GET /internal/discord/user/{discord_id}` | profile, alerts, credits in one read |
 | `POST /internal/discord/link-token` | `/account`, Buy credits |
 | `GET /internal/discord/link/{user_id}` | digest: user id → Discord id |
@@ -192,7 +192,7 @@ tenders-only member would accumulate job notifications they are never sent.
   the delivery outcome mapping, the 5-per-DM cap (`test/format.test.ts`);
 - the digest with a mocked backend: one DM per member capped at five, four left pending,
   blocked → `blocked`, unlinked → `no_discord_link` (`test/digest.test.ts`);
-- onboarding components, sector paging 25+3, session lifecycle, summary copy
+- onboarding components, the four-step flow driven through fake interactions, session lifecycle, completion copy
   (`test/onboarding.test.ts`);
 - free text: first contact starts the interview with zero assistant calls, an onboarded
   member still gets one answer, mid-interview re-prompts reuse the session, and the optional

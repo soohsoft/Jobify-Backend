@@ -187,7 +187,7 @@ export function helpText(): string {
   return [
     '**Jobify — Somali jobs and tenders, inside Discord**',
     '`/start` — set up your profile (about a minute)',
-    '`/jobs [query]` — search jobs, or list the newest in your sectors',
+    '`/jobs [query]` — search jobs, or list the newest in your fields',
     '`/tenders [query]` — the same for tenders',
     '`/alerts` — instant, daily or off; the daily digest arrives at 08:00 EAT',
     '`/credits` — free searches left this period, and how to buy more',

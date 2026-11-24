@@ -16,21 +16,30 @@ import type { Message } from 'discord.js';
 
 import type { BotContext } from './context.js';
 import { formatAssistantReply } from './format.js';
-import { educationPrompt, promptForStep, type OnboardingSession } from './onboarding.js';
+import { namePrompt, promptForStep, type OnboardingSession } from './onboarding.js';
 import { assistantErrorReply, clampContent } from './ui.js';
 
 const MAX_INPUT = 300;
 
 const WELCOME =
-  'Welcome to Jobify. Three quick questions and I will start sending you matches. First: what is the highest level you finished?';
+  'Welcome to Jobify. Four quick questions and I will start sending you matches. First: what is your name?';
 
 /**
- * Starts the interview the same way `/start` does, carrying forward any sectors already on
- * file so the sector step pre-selects them rather than replacing them.
+ * Starts the interview the same way `/start` does, carrying forward the answers already on
+ * file so the modals are pre-filled rather than empty.
  */
-async function startInterview(message: Message, ctx: BotContext, sectors: string[]): Promise<void> {
-  ctx.sessions.start(message.author.id, { sectors });
-  const prompt = educationPrompt();
+async function startInterview(
+  message: Message,
+  ctx: BotContext,
+  existing: { education: import('./types.js').EducationEntry[]; name: string; lastPosition: string | null; experienceYears: number | null },
+): Promise<void> {
+  ctx.sessions.start(message.author.id, {
+    previousEducation: existing.education,
+    name: existing.name || undefined,
+    lastPosition: existing.lastPosition ?? undefined,
+    experienceYears: existing.experienceYears ?? undefined,
+  });
+  const prompt = namePrompt();
   await message.reply({
     content: clampContent(`${WELCOME}\n\n${prompt.content}`),
     components: prompt.components,
@@ -44,8 +53,7 @@ async function startInterview(message: Message, ctx: BotContext, sectors: string
  * both stay exactly as they were.
  */
 async function resumeInterview(message: Message, ctx: BotContext, session: OnboardingSession): Promise<void> {
-  const categories = session.step === 'sectors' ? await ctx.categories() : [];
-  const prompt = promptForStep(session.step, session, categories);
+  const prompt = promptForStep(session.step, session);
   await message.reply({
     content: clampContent(`You are part-way through setup — here is where we left off.\n\n${prompt.content}`),
     components: prompt.components,
@@ -96,7 +104,7 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
       global_name: message.author.globalName ?? null,
     });
 
-    // An open session wins over the onboarding flag: sectors are saved as soon as they are
+    // An open session wins over the onboarding flag: answers are saved as soon as they are
     // picked, so the backend can call a half-finished interview "onboarded". The member is
     // still mid-interview and should be answered with their next question, not the assistant.
     const session = ctx.sessions.get(message.author.id);
@@ -113,7 +121,12 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
     const flag = (upsert as { onboarding_complete?: boolean }).onboarding_complete;
     const onboarded = flag ?? (await ctx.backend.getUser(message.author.id)).onboarding_complete;
     if (!onboarded) {
-      await startInterview(message, ctx, upsert.user.sectors ?? []);
+      await startInterview(message, ctx, {
+        education: upsert.user.education ?? [],
+        name: upsert.user.name ?? '',
+        lastPosition: upsert.user.last_position ?? null,
+        experienceYears: upsert.user.experience_years ?? null,
+      });
       ctx.logger.info('onboarding started from free text', { discordId: message.author.id });
       return;
     }

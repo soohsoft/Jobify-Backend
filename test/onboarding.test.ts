@@ -1,28 +1,30 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import type { ActionRowBuilder, ButtonBuilder } from 'discord.js';
+
 import {
   CID,
+  DEGREE_LEVELS,
+  EDUCATION_OPTIONS,
   EXPERIENCE_OPTIONS,
+  FIELD_OPTIONS,
+  MAX_EDUCATION,
   OnboardingSessions,
-  SECTOR_OPTIONS_PER_PAGE,
   STEP_COUNT,
+  anotherPrompt,
+  completionPrompt,
+  educationEntryLabel,
+  educationLabel,
   educationPrompt,
+  educationSummary,
   experienceLabel,
   experiencePrompt,
-  sectorPage,
-  sectorsPrompt,
-  summaryPrompt,
-  wantsLabel,
-  wantsPrompt,
+  fieldPrompt,
+  namePrompt,
+  positionPrompt,
 } from '../src/onboarding.js';
-import type { Category, DiscordUser } from '../src/types.js';
-
-const categories: Category[] = Array.from({ length: 28 }, (_, index) => ({
-  slug: `sector_${index + 1}`,
-  label: `Sector ${index + 1}`,
-  group: 'all_fields',
-}));
+import type { DiscordUser, MatchRow } from '../src/types.js';
 
 /** The API component union includes SKU buttons, which have no custom_id. */
 function buttonId(component: unknown): string | undefined {
@@ -32,139 +34,191 @@ function buttonId(component: unknown): string | undefined {
 function user(overrides: Partial<DiscordUser> = {}): DiscordUser {
   return {
     id: 'u1',
-    name: 'Sahra',
+    name: 'Sahra Ali',
     email: '',
     role: 'user',
     provider: 'discord',
     email_verified: true,
-    location: 'Mogadishu',
-    match_profile: { categories: ['ict'], keywords: ['python'], locations: ['Mogadishu'], updated_at: '' },
-    alerts: { enabled: true, mode: 'daily', last_sent_at: '', excluded_employers: [], excluded_categories: [] },
+    location: null,
+    match_profile: { categories: ['health'], keywords: ['programme'], locations: [], updated_at: '' },
+    alerts: { enabled: true, mode: 'daily', last_sent_at: '', user_disabled: false, excluded_employers: [], excluded_categories: [] },
     education_level: 'bachelor',
+    education: [{ level: 'bachelor', field: 'Health' }],
+    last_position: 'Senior Programme Officer',
     experience_years: 3,
-    sectors: ['ict'],
-    skills: ['python'],
-    wants: 'jobs',
+    sectors: ['health'],
+    skills: [],
+    wants: null,
     ...overrides,
   };
 }
 
-test('the education step offers all seven answers across two rows', () => {
-  const prompt = educationPrompt();
-  const rows = prompt.components.map((row) => row.toJSON().components);
-  assert.equal(rows.length, 2);
-  assert.equal(rows[0]?.length, 5);
-  assert.equal(rows[1]?.length, 2);
-  const ids = rows.flat().map(buttonId);
-  assert.deepEqual(ids, [
-    CID.education('none'),
-    CID.education('primary'),
-    CID.education('secondary'),
-    CID.education('diploma'),
-    CID.education('bachelor'),
-    CID.education('master'),
-    CID.education('phd'),
-  ]);
-  assert.ok(prompt.content.includes(`Step 1 of ${STEP_COUNT}`));
-});
-
-test('the experience step maps each band to its lower bound in years', () => {
-  const years = EXPERIENCE_OPTIONS.map((option) => option.years);
-  assert.deepEqual(years, [0, 1, 3, 6, 11]);
-  const prompt = experiencePrompt();
-  const buttons = prompt.components[0]?.toJSON().components ?? [];
-  assert.equal(buttons.length, 5);
-  assert.equal(buttonId(buttons[2]), CID.experience('3-5'));
-});
-
-test('28 sectors page as 25 + 3, and the page number is clamped', () => {
-  assert.equal(SECTOR_OPTIONS_PER_PAGE, 25);
-  const first = sectorPage(categories, 0);
-  assert.equal(first.items.length, 25);
-  assert.equal(first.pages, 2);
-  assert.equal(first.offset, 0);
-
-  const second = sectorPage(categories, 1);
-  assert.equal(second.items.length, 3);
-  assert.equal(second.offset, 25);
-
-  // A stale custom id cannot point past the end.
-  assert.equal(sectorPage(categories, 9).page, 1);
-  assert.equal(sectorPage(categories, -3).page, 0);
-});
-
-test('the sector menu pre-selects what the member already chose', () => {
-  const sessions = new OnboardingSessions();
-  const session = sessions.start('900000000000000955', { sectors: ['sector_2', 'sector_27'] });
-
-  const prompt = sectorsPrompt(session, categories);
-  const menu = prompt.components[0]?.toJSON().components[0];
-  assert.ok(menu && 'options' in menu);
-  const defaults = menu.options.filter((option) => option.default).map((option) => option.value);
-  // Only page-1 choices can be shown as default on page 1.
-  assert.deepEqual(defaults, ['sector_2']);
-  assert.ok(prompt.content.includes('Sector 27'));
-
-  session.sectorPage = 1;
-  const secondPage = sectorsPrompt(session, categories);
-  const menuTwo = secondPage.components[0]?.toJSON().components[0];
-  assert.ok(menuTwo && 'options' in menuTwo);
-  assert.deepEqual(
-    menuTwo.options.filter((option) => option.default).map((option) => option.value),
-    ['sector_27'],
+function rows(components: ActionRowBuilder<ButtonBuilder>[]): string[][] {
+  return components.map((row) =>
+    row.toJSON().components.map((button) => (button as { custom_id?: string }).custom_id ?? ''),
   );
+}
+
+test('there are four steps and the first one asks for a name', () => {
+  assert.equal(STEP_COUNT, 4);
+  const prompt = namePrompt();
+  const ids = rows(prompt.components);
+  assert.deepEqual(ids, [[CID.nameOpen]]);
+  assert.ok(prompt.content.includes('Step 1 of 4'));
+  assert.ok(prompt.content.includes('no city to pick'), 'the location step is gone for good');
 });
 
-test('the last step asks what to watch and keeps three answers', () => {
-  const prompt = wantsPrompt();
-  const buttons = prompt.components[0]?.toJSON().components ?? [];
-  assert.deepEqual(
-    buttons.map(buttonId),
-    [CID.wants('jobs'), CID.wants('tenders'), CID.wants('both')],
-  );
-});
-
-test('a session survives until it is cleared, and carries the previous sectors forward', () => {
+test('the education step offers all seven levels across two rows', () => {
   const sessions = new OnboardingSessions();
-  const session = sessions.start('1', { sectors: ['health'] });
+  const session = sessions.start('1');
+  const prompt = educationPrompt(session);
+  const ids = rows(prompt.components);
+  assert.equal(ids.length, 2);
+  assert.equal(ids[0]?.length, 5);
+  assert.equal(ids[1]?.length, 2);
+  assert.deepEqual(ids.flat(), EDUCATION_OPTIONS.map((option) => CID.education(option.value)));
+  assert.ok(prompt.content.includes('Step 2 of 4'));
+  assert.ok(!prompt.content.includes('On file'), 'a first run has nothing to replace');
+});
+
+test('a re-run shows what is on file and says the next answer replaces it', () => {
+  const sessions = new OnboardingSessions();
+  const session = sessions.start('1', {
+    previousEducation: [
+      { level: 'bachelor', field: 'Health' },
+      { level: 'master', field: 'Business administration' },
+    ],
+  });
+  const prompt = educationPrompt(session);
+  assert.ok(prompt.content.includes('Bachelor — Health'));
+  assert.ok(prompt.content.includes('Master — Business administration'));
+  assert.ok(prompt.content.includes('replaces'));
+});
+
+test('only degree levels are asked for a field, and all thirteen answers are buttons', () => {
+  assert.deepEqual(DEGREE_LEVELS, ['bachelor', 'master', 'phd']);
+  const prompt = fieldPrompt('master');
+  const ids = rows(prompt.components).flat();
+  assert.equal(ids.length, FIELD_OPTIONS.length);
+  assert.equal(ids.length, 13);
+  assert.deepEqual(ids, FIELD_OPTIONS.map((option) => CID.field(option.key)));
+  assert.ok(ids.includes(CID.field('other')), 'Other is a button that opens a modal');
+  assert.ok(prompt.content.includes('Master'));
+});
+
+test('the another-degree question drops the Yes button at the cap', () => {
+  const sessions = new OnboardingSessions();
+  const session = sessions.start('1');
+  session.education = [{ level: 'bachelor', field: 'Health' }];
+
+  const first = anotherPrompt(session);
+  assert.deepEqual(rows(first.components).flat(), [CID.another('yes'), CID.another('no')]);
+
+  session.education = Array.from({ length: MAX_EDUCATION }, () => ({ level: 'bachelor', field: 'Health' }));
+  const atCap = anotherPrompt(session);
+  assert.deepEqual(rows(atCap.components).flat(), [CID.another('no')], 'no fifth degree is offered');
+  assert.ok(atCap.content.includes('maximum'));
+});
+
+test('the job-history step asks for the position and then the years band', () => {
+  const position = positionPrompt();
+  assert.deepEqual(rows(position.components).flat(), [CID.positionOpen]);
+  assert.ok(position.content.includes('Step 3 of 4'));
+
+  const years = experiencePrompt();
+  assert.deepEqual(rows(years.components).flat(), EXPERIENCE_OPTIONS.map((option) => CID.experience(option.value)));
+  // Each band stores its LOWER bound: "3–5" is three years, never five.
+  assert.deepEqual(EXPERIENCE_OPTIONS.map((option) => option.years), [0, 1, 3, 6, 11]);
+});
+
+test('labels render what was actually stored', () => {
+  assert.equal(educationLabel('bachelor'), 'Bachelor');
+  assert.equal(educationLabel('phd'), 'PhD');
+  assert.equal(educationLabel(null), 'not set');
+  assert.equal(experienceLabel(3), '3–5 years');
+  assert.equal(experienceLabel(0), 'No experience');
+  assert.equal(experienceLabel(null), 'not set');
+  assert.equal(educationEntryLabel({ level: 'master', field: 'Other: Marine biology' }), 'Master — Other: Marine biology');
+  assert.equal(educationEntryLabel({ level: 'diploma', field: '' }), 'Diploma');
+  assert.equal(
+    educationSummary([
+      { level: 'bachelor', field: 'Health' },
+      { level: 'master', field: 'Business administration' },
+    ]),
+    'Bachelor — Health; Master — Business administration',
+  );
+  assert.equal(educationSummary([]), 'not set');
+});
+
+test('a session starts at the name step and is cleared when the interview ends', () => {
+  const sessions = new OnboardingSessions();
+  const session = sessions.start('1', { previousEducation: [{ level: 'bachelor', field: 'Health' }], name: 'Sahra' });
   assert.equal(sessions.get('1'), session);
-  assert.deepEqual(session.sectors, ['health']);
-  assert.equal(session.step, 'education');
+  assert.equal(session.step, 'name');
+  assert.deepEqual(session.education, [], 'the new run collects its own list');
+  assert.equal(session.name, 'Sahra');
   sessions.clear('1');
   assert.equal(sessions.get('1'), undefined);
 });
 
-test('labels render what was actually stored', () => {
-  assert.equal(experienceLabel(3), '3–5 years');
-  assert.equal(experienceLabel(0), 'No experience');
-  assert.equal(experienceLabel(7), '7 years');
-  assert.equal(experienceLabel(null), 'not set');
-  assert.equal(wantsLabel('tenders'), 'tenders only');
-  assert.equal(wantsLabel(null), 'jobs and tenders');
-});
+test('the completion message says Setup complete, repeats the answers, shows five matches and points at /jobs', () => {
+  const matches: MatchRow[] = Array.from({ length: 7 }, (_, index) => ({
+    matchScore: 4 - index * 0.1,
+    job: {
+      _id: `job-${index + 1}`,
+      title: `Programme Officer ${index + 1}`,
+      organization: 'WFP',
+      location: 'Mogadishu',
+      deadline: null,
+      category: 'health',
+      kind: 'job',
+    },
+  }));
 
-test('the summary states the real match count and the alert schedule', () => {
-  const prompt = summaryPrompt({
+  const prompt = completionPrompt({
     user: user(),
-    matchCount: 12,
+    matches,
     digestTz: 'Africa/Nairobi',
     digestHour: 8,
     appBaseUrl: 'https://app.jobify.test',
   });
-  assert.ok(prompt.content.includes('**12 live openings**'));
-  assert.ok(prompt.content.includes('Alerts: daily at 08:00 (Africa/Nairobi)'));
-  assert.ok(prompt.content.includes('Bachelor'));
-  assert.ok(prompt.content.length <= 1900);
+
+  assert.ok(prompt.content.startsWith('**Setup complete**'));
+  assert.ok(prompt.content.includes('Sahra Ali'));
+  assert.ok(prompt.content.includes('Bachelor — Health'));
+  assert.ok(prompt.content.includes('Senior Programme Officer'));
+  assert.ok(prompt.content.includes('3–5 years'));
+  assert.ok(prompt.content.includes('Alerts: on, daily at 08:00 (Africa/Nairobi)'));
+  // Five rows is the digest ceiling, and each one is a real link to the job.
+  assert.equal(prompt.content.match(/\/jobs\/job-/g)?.length, 5);
+  assert.ok(!prompt.content.includes('Programme Officer 6'), 'the sixth row is not shown');
+  assert.ok(prompt.content.includes('`/jobs` lists everything for you at any time'));
+  assert.equal(
+    (prompt.components[0]?.toJSON().components[0] as { custom_id?: string } | undefined)?.custom_id,
+    CID.restart,
+  );
 });
 
-test('the summary says plainly when nothing matches yet', () => {
-  const prompt = summaryPrompt({
-    user: user({ match_profile: null }),
-    matchCount: 0,
+test('the completion message is honest when nothing matches or alerts are off', () => {
+  const prompt = completionPrompt({
+    user: user({
+      match_profile: null,
+      alerts: {
+        enabled: false,
+        mode: 'daily',
+        last_sent_at: '',
+        user_disabled: true,
+        excluded_employers: [],
+        excluded_categories: [],
+      },
+    }),
+    matches: [],
     digestTz: 'Africa/Nairobi',
     digestHour: 8,
     appBaseUrl: 'https://app.jobify.test',
   });
-  assert.ok(!prompt.content.includes('**0 live'));
-  assert.ok(prompt.content.includes('Nothing live matches your sectors'));
+
+  assert.ok(prompt.content.includes('Nothing live matches your answers this minute'));
+  assert.ok(prompt.content.includes('Alerts: off'), 'an explicit /stop is reported as off, not silently overridden');
+  assert.ok(!prompt.content.includes('/jobs/job-'));
 });

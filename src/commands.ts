@@ -26,11 +26,7 @@ import {
   type RowInput,
 } from './format.js';
 import { BackendError } from './http.js';
-import {
-  educationPrompt,
-  experienceLabel,
-  wantsLabel,
-} from './onboarding.js';
+import { educationSummary, experienceLabel, namePrompt } from './onboarding.js';
 import { assistantErrorReply, buyCreditsRow, clampContent, respond } from './ui.js';
 import type { FeedJob, UserEnvelope } from './types.js';
 
@@ -53,8 +49,8 @@ export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody
       .setName('start')
       .setDescription('Set up your profile so I can find matching openings')
       .toJSON(),
-    withQuery('jobs', 'Search jobs, or list the newest in your sectors'),
-    withQuery('tenders', 'Search tenders, or list the newest in your sectors'),
+    withQuery('jobs', 'Search jobs, or list the newest in your fields'),
+    withQuery('tenders', 'Search tenders, or list the newest in your fields'),
     new SlashCommandBuilder().setName('alerts').setDescription('Turn alerts on, off, or choose instant or daily').toJSON(),
     new SlashCommandBuilder().setName('credits').setDescription('How many searches you have left, and how to buy more').toJSON(),
     new SlashCommandBuilder().setName('account').setDescription('Get a private one-time link to your Jobify account').toJSON(),
@@ -108,7 +104,8 @@ async function browse(
   const categories = envelope.user.match_profile?.categories ?? [];
   if (categories.length === 0) {
     await interaction.editReply({
-      content: 'I do not know what you are looking for yet — run `/start` and I will ask you six quick questions.',
+      content:
+        'I do not have a work area for you yet — run `/start` and I will ask you four quick questions.',
     });
     return;
   }
@@ -132,7 +129,7 @@ async function browse(
   if (merged.length === 0) {
     await interaction.editReply({
       content:
-        `Nothing live in your sectors right now (${categories.join(', ')}).\n` +
+        `Nothing live in your fields right now (${categories.join(', ')}).\n` +
         'I check again every day and will DM you when something matches — or ask me for something specific.',
     });
     return;
@@ -140,7 +137,7 @@ async function browse(
 
   const noun = kind === 'tender' ? 'tenders' : 'jobs';
   const content = [
-    `**Newest ${noun} in your sectors** (${categories.join(', ')})`,
+    `**Newest ${noun} in your fields** (${categories.join(', ')})`,
     '',
     formatRows(merged.map(feedRow), { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS }),
     '',
@@ -199,11 +196,17 @@ async function search(
 export async function handleStart(interaction: ChatInputCommandInteraction, ctx: BotContext): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   await ensureUser(interaction, ctx);
-  // Re-running /start pre-selects the sectors already on file, so the interview edits rather
-  // than replaces what the member said last time.
+  // Re-running /start carries the answers already on file, so the modals are pre-filled and
+  // the member edits rather than retypes them. The education list is re-collected from the
+  // first level onwards, and written whole, so a re-run replaces it instead of duplicating it.
   const existing = await ctx.backend.getUser(interaction.user.id).catch(() => null);
-  ctx.sessions.start(interaction.user.id, { sectors: existing?.user.sectors ?? [] });
-  await interaction.editReply(educationPrompt());
+  ctx.sessions.start(interaction.user.id, {
+    previousEducation: existing?.user.education ?? [],
+    name: existing?.user.name ?? undefined,
+    lastPosition: existing?.user.last_position ?? undefined,
+    experienceYears: existing?.user.experience_years ?? undefined,
+  });
+  await interaction.editReply(namePrompt());
   ctx.logger.info('onboarding started', { discordId: interaction.user.id });
 }
 
@@ -240,8 +243,8 @@ export function alertsPanel(
   const lines = [
     `**Alerts are ${alerts.enabled ? 'on' : 'off'}** · cadence: ${alerts.enabled ? mode : '—'}`,
     `Daily digest at ${hours} (${ctx.digestTz}); instant sends as soon as something new is queued.`,
-    `Watching for: ${wantsLabel(data.user.wants)} · sectors: ${data.user.sectors.length ? data.user.sectors.join(', ') : 'none yet'}`,
-    `Education: ${data.user.education_level ?? 'not set'} · experience: ${experienceLabel(data.user.experience_years)}`,
+    `Education: ${educationSummary(data.user.education)} · experience: ${experienceLabel(data.user.experience_years)}`,
+    `Last job: ${data.user.last_position ?? 'not set'} · matching: ${data.user.match_profile?.categories.length ? data.user.match_profile.categories.join(', ') : 'keywords only'}`,
   ];
   if (!alerts.enabled) lines.push('', 'Alerts are off, so nothing is queued for you. Switch one back on below.');
 

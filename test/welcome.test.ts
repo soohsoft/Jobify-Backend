@@ -39,7 +39,9 @@ const user: DiscordUser = {
   match_profile: null,
   alerts: null,
   education_level: null,
-  experience_years: null,
+  education: [{ level: 'bachelor', field: 'Health' }],
+  last_position: 'Programme Officer',
+  experience_years: 3,
   sectors: ['health'],
   skills: [],
   wants: null,
@@ -51,7 +53,7 @@ function envelope(onboarded: boolean): UserEnvelope {
     subscription_status: 'free',
     onboarding_complete: onboarded,
     alerts_enabled: true,
-    alerts: { enabled: true, mode: 'daily', last_sent_at: '', excluded_employers: [], excluded_categories: [] },
+    alerts: { enabled: true, mode: 'daily', last_sent_at: '', user_disabled: false, excluded_employers: [], excluded_categories: [] },
     credits: { balance: 0, monthly_allowance: 30, used_this_period: 0, period_end: '', remaining_this_period: 30 },
   };
 }
@@ -161,7 +163,7 @@ function mentionCount(content: string, id: string): number {
 // A new member: account created, session started, interview in the DM
 // ---------------------------------------------------------------------------
 
-test('a new member is upserted, given a session and DM\'d the education step', async () => {
+test('a new member is upserted, given a session and DM\'d the name step', async () => {
   const { ctx, sessions, calls, lines } = setup({ onboarded: false });
   const joined = member();
 
@@ -175,13 +177,14 @@ test('a new member is upserted, given a session and DM\'d the education step', a
   const payload = joined.dms[0] as MessagePayload;
   assert.ok(payload.content.includes('Welcome to Jobify'));
   assert.ok(payload.content.includes('daily'), 'the welcome must say matches arrive daily');
-  assert.ok(payload.content.includes('Step 1 of 6'));
-  assert.ok(componentIds(payload).includes(CID.education('bachelor')), 'the education buttons must be attached');
+  assert.ok(payload.content.includes('Step 1 of 4'));
+  assert.ok(componentIds(payload).includes(CID.nameOpen), 'the name button must be attached');
 
   const session = sessions.get(MEMBER_ID);
   assert.ok(session);
-  assert.equal(session.step, 'education');
-  assert.deepEqual(session.sectors, ['health'], 'stored sectors carry forward');
+  assert.equal(session.step, 'name');
+  assert.deepEqual(session.education, [], 'the run collects its own list, so nothing is duplicated');
+  assert.deepEqual(session.previousEducation, [{ level: 'bachelor', field: 'Health' }], 'what is on file is carried for display');
   assert.equal(sessions.size, 1);
 
   const log = lines.find((line) => line.msg === 'member welcomed');
@@ -201,7 +204,7 @@ test('an already onboarded member gets the plain welcome and no interview', asyn
   const payload = joined.dms[0] as MessagePayload;
   assert.ok(payload.content.includes('Welcome to Jobify'));
   assert.ok(payload.content.includes('already set up'));
-  assert.ok(!payload.content.includes('Step 1 of 6'), 'no interview copy');
+  assert.ok(!payload.content.includes('Step 1 of 4'), 'no interview copy');
   assert.equal(payload.components, undefined, 'no interview buttons');
 });
 
@@ -253,7 +256,7 @@ test('a closed DM falls back to one channel message with exactly one mention', a
   assert.equal(payload.components, undefined, 'buttons in a shared channel would be ambiguous');
 
   // The session survives the fallback, so the member's next channel message resumes step 1.
-  assert.equal(sessions.get(MEMBER_ID)?.step, 'education');
+  assert.equal(sessions.get(MEMBER_ID)?.step, 'name');
 
   const log = lines.find((line) => line.msg === 'member welcomed');
   assert.equal(log?.fields.path, 'channel');
@@ -274,7 +277,7 @@ test('an onboarded member with a closed DM gets the plain channel welcome', asyn
   const content = channelPosts[0]?.payload.content ?? '';
   assert.equal(mentionCount(content, MEMBER_ID), 1);
   assert.ok(content.includes('already set up'));
-  assert.ok(!content.includes('Step 1 of 6'));
+  assert.ok(!content.includes('Step 1 of 4'));
 });
 
 test('with no free channel configured a closed DM is logged as failed, not thrown', async () => {

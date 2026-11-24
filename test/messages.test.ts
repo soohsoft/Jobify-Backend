@@ -83,7 +83,7 @@ interface BackendOptions {
   onboarded?: boolean;
   /** What `GET /internal/discord/user/{id}` would report. */
   storedOnboarded?: boolean;
-  sectors?: string[];
+  education?: DiscordUser['education'];
   answer?: AssistantAnswer;
   freeChannelId?: string;
 }
@@ -105,8 +105,10 @@ function setup(options: BackendOptions = {}): {
     match_profile: null,
     alerts: null,
     education_level: null,
+    education: options.education ?? [],
+    last_position: null,
     experience_years: null,
-    sectors: options.sectors ?? [],
+    sectors: [],
     skills: [],
     wants: null,
   };
@@ -115,7 +117,7 @@ function setup(options: BackendOptions = {}): {
     subscription_status: 'free',
     onboarding_complete: options.storedOnboarded ?? false,
     alerts_enabled: true,
-    alerts: { enabled: true, mode: 'daily', last_sent_at: '', excluded_employers: [], excluded_categories: [] },
+    alerts: { enabled: true, mode: 'daily', last_sent_at: '', user_disabled: false, excluded_employers: [], excluded_categories: [] },
     credits: { balance: 0, monthly_allowance: 30, used_this_period: 0, period_end: '', remaining_this_period: 30 },
   };
 
@@ -164,7 +166,7 @@ function componentIds(reply: Reply | undefined): string[] {
 // First contact
 // ---------------------------------------------------------------------------
 
-test('a brand-new member DMing starts onboarding and makes zero assistant calls', async () => {
+test('a brand-new member DMing starts onboarding at the name step and makes zero assistant calls', async () => {
   const { ctx, calls, sessions } = setup({ onboarded: false });
   const { message, replies } = messageFor({ content: 'Find me a job' });
 
@@ -176,13 +178,13 @@ test('a brand-new member DMing starts onboarding and makes zero assistant calls'
   assert.equal(replies.length, 1);
 
   const content = replies[0]?.content ?? '';
-  assert.ok(content.includes('Welcome to Jobify. Three quick questions and I will start sending you matches.'));
-  assert.ok(content.includes('Step 1 of 6'));
-  assert.ok(componentIds(replies[0]).includes(CID.education('bachelor')), 'the education buttons must be attached');
+  assert.ok(content.includes('Welcome to Jobify. Four quick questions and I will start sending you matches.'));
+  assert.ok(content.includes('Step 1 of 4'));
+  assert.ok(componentIds(replies[0]).includes(CID.nameOpen), 'the name button must be attached');
 
   const session = sessions.get(MEMBER);
   assert.ok(session);
-  assert.equal(session.step, 'education');
+  assert.equal(session.step, 'name');
   assert.equal(sessions.size, 1);
 });
 
@@ -212,18 +214,23 @@ test('when the upsert omits the flag, onboarding state comes from GET /user', as
 });
 
 // ---------------------------------------------------------------------------
-// Existing answers and idempotence
+// Existing answers and resumability
 // ---------------------------------------------------------------------------
 
-test('sectors already on file are carried into the new interview', async () => {
-  const { ctx, sessions } = setup({ onboarded: false, sectors: ['ict'] });
-  const { message } = messageFor({ content: 'Find me a job' });
+test('answers already on file are carried into the session for display and prefill', async () => {
+  const { ctx, sessions } = setup({
+    onboarded: false,
+    education: [{ level: 'bachelor', field: 'Health' }],
+  });
+  const { message, replies } = messageFor({ content: 'Find me a job' });
 
   await handleMessage(message, ctx, BOT_ID);
 
   const session = sessions.get(MEMBER);
   assert.ok(session);
-  assert.deepEqual(session.sectors, ['ict']);
+  assert.deepEqual(session.education, [], 'a re-run collects its own list');
+  assert.deepEqual(session.previousEducation, [{ level: 'bachelor', field: 'Health' }]);
+  assert.ok((replies[0]?.content ?? '').includes('Step 1 of 4'), 'the run starts at the name step');
 });
 
 test('a member mid-interview is re-prompted at their current step, not sent to the assistant', async () => {
@@ -234,9 +241,9 @@ test('a member mid-interview is re-prompted at their current step, not sent to t
   const session = sessions.get(MEMBER);
   assert.ok(session);
 
-  // Stand in for answers already given: education is saved server-side and in the session.
-  session.education = 'bachelor';
-  session.step = 'location';
+  // Stand in for answers already given: a bachelor whose field is the open question.
+  session.step = 'education_field';
+  session.pendingLevel = 'bachelor';
 
   const second = messageFor({ content: 'any jobs today?' });
   await handleMessage(second.message, ctx, BOT_ID);
@@ -244,30 +251,28 @@ test('a member mid-interview is re-prompted at their current step, not sent to t
   assert.equal(calls.assistant, 0, 'a mid-interview message must not be answered by the assistant');
   assert.equal(sessions.size, 1, 'no second session may be created');
   assert.equal(sessions.get(MEMBER), session, 'the same session object is reused');
-  assert.equal(session.education, 'bachelor', 'in-memory answers must survive the re-prompt');
-  assert.ok((second.replies[0]?.content ?? '').includes('Step 4 of 6'));
-  assert.ok(componentIds(second.replies[0]).includes(CID.locationOpen));
+  assert.equal(session.pendingLevel, 'bachelor', 'in-memory answers must survive the re-prompt');
+  const content = second.replies[0]?.content ?? '';
+  assert.ok(content.includes('Step 2 of 4'));
+  assert.ok(content.includes('Bachelor'), 'the prompt names the level whose field is being asked');
+  assert.ok(componentIds(second.replies[0]).includes(CID.field('health')));
+  assert.ok(!componentIds(second.replies[0]).some((id) => id.startsWith('onb:sectors')));
 });
 
-test('stored sectors are pre-selected when a mid-interview member is re-prompted at the sector step', async () => {
-  const { ctx, calls, sessions } = setup({ onboarded: false, sectors: ['ict'] });
-  const first = messageFor({ content: 'Find me a job' });
-  await handleMessage(first.message, ctx, BOT_ID);
+test('a member at the job-history step is re-prompted for their last job', async () => {
+  const { ctx, sessions } = setup({ onboarded: false });
+  await handleMessage(messageFor({ content: 'hello' }).message, ctx, BOT_ID);
 
   const session = sessions.get(MEMBER);
   assert.ok(session);
-  session.step = 'sectors';
+  session.step = 'position';
 
-  const second = messageFor({ content: 'hello again' });
+  const second = messageFor({ content: 'still there?' });
   await handleMessage(second.message, ctx, BOT_ID);
 
-  assert.equal(calls.assistant, 0);
-  const menu = second.replies[0]?.components?.[0]?.toJSON().components[0];
-  assert.ok(menu?.options);
-  assert.deepEqual(
-    menu.options.filter((option) => option.default).map((option) => option.value),
-    ['ict'],
-  );
+  const content = second.replies[0]?.content ?? '';
+  assert.ok(content.includes('Step 3 of 4'));
+  assert.ok(componentIds(second.replies[0]).includes(CID.positionOpen));
 });
 
 // ---------------------------------------------------------------------------

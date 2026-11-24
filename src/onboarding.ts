@@ -1,30 +1,38 @@
 /**
  * The onboarding interview: state, copy and component builders.
  *
+ * Four steps, in the owner's order: name → education (level + field, with an
+ * "another degree?" loop) → job history (last position + years) → done. There is no
+ * location step and no skills step: Jobify covers all of Somalia, and the matching
+ * inputs are derived by the backend from what these answers say.
+ *
  * Two rules shape this file:
  * - every answer is written to the backend as it is given, so a half-finished interview
  *   still leaves a usable profile (the matcher reads whatever exists);
- * - the interview state itself is in memory only. That is deliberate: losing a step on
- *   restart costs one re-click, and the answers are already stored server-side.
+ * - the education list is sent WHOLE on every save, so a re-run replaces the stored
+ *   degrees instead of appending a second copy of them. The in-memory session therefore
+ *   starts with an empty list and remembers what is on file only to display it.
+ *
+ * The session itself is in memory only. That is deliberate: losing a step on restart costs
+ * one re-click, and the answers are already stored server-side.
  */
 import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
   ModalBuilder,
-  StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder,
   TextInputBuilder,
   TextInputStyle,
 } from 'discord.js';
 
-import type { Category, DiscordUser } from './types.js';
+import type { DiscordUser, EducationEntry, MatchRow } from './types.js';
+import { formatRows, MAX_DIGEST_ROWS } from './format.js';
 
-export const STEP_COUNT = 6;
+/** Four steps: name, education, job history, done. */
+export const STEP_COUNT = 4;
 
-/** Discord allows at most 25 options in one select, so the 28 sectors are paged. */
-export const SECTOR_OPTIONS_PER_PAGE = 25;
-export const MAX_SECTORS = 10;
+/** The backend accepts at most four degrees; the interview stops offering a fifth. */
+export const MAX_EDUCATION = 4;
 
 export const EDUCATION_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'none', label: 'None' },
@@ -34,6 +42,30 @@ export const EDUCATION_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'bachelor', label: 'Bachelor' },
   { value: 'master', label: 'Master' },
   { value: 'phd', label: 'PhD' },
+];
+
+/** Only these ask the follow-up "which field?" question. Mirrors the backend's list. */
+export const DEGREE_LEVELS = ['bachelor', 'master', 'phd'];
+
+/**
+ * The field buttons, and the exact label the backend stores and maps to a job category.
+ * `key` is only the custom-id fragment, so a label with a space or an ampersand never
+ * becomes part of a custom id.
+ */
+export const FIELD_OPTIONS: Array<{ key: string; label: string }> = [
+  { key: 'health', label: 'Health' },
+  { key: 'education', label: 'Education' },
+  { key: 'business', label: 'Business administration' },
+  { key: 'finance', label: 'Finance & accounting' },
+  { key: 'ict', label: 'ICT' },
+  { key: 'engineering', label: 'Engineering' },
+  { key: 'agriculture', label: 'Agriculture' },
+  { key: 'law', label: 'Law' },
+  { key: 'logistics', label: 'Logistics & procurement' },
+  { key: 'social', label: 'Social science & development' },
+  { key: 'wash', label: 'WASH' },
+  { key: 'nutrition', label: 'Nutrition' },
+  { key: 'other', label: 'Other' },
 ];
 
 /**
@@ -48,28 +80,38 @@ export const EXPERIENCE_OPTIONS: Array<{ value: string; label: string; years: nu
   { value: '10+', label: '10+ years', years: 11 },
 ];
 
-export type Step = 'education' | 'experience' | 'sectors' | 'location' | 'skills' | 'wants';
+export type Step =
+  | 'name'
+  | 'education_level'
+  | 'education_field'
+  | 'another_degree'
+  | 'position'
+  | 'years';
 
 export interface OnboardingSession {
   step: Step;
-  education?: string;
+  /** What THIS run has collected. Sent whole, so it replaces the stored list. */
+  education: EducationEntry[];
+  /** What is already on file, shown as "answering this replaces them". */
+  previousEducation: EducationEntry[];
+  /** The level waiting for its field, between the two education prompts. */
+  pendingLevel?: string;
+  name?: string;
+  lastPosition?: string;
   experienceYears?: number;
-  sectors: string[];
-  sectorPage: number;
 }
 
 /** Custom ids in one place: a typo here would make a button silently do nothing. */
 export const CID = {
-  education: (value: string): string => `onb:edu:${value}`,
+  nameOpen: 'onb:name',
+  nameModal: 'onb:name:modal',
+  education: (level: string): string => `onb:edu:${level}`,
+  field: (key: string): string => `onb:field:${key}`,
+  fieldModal: 'onb:field:modal',
+  another: (value: 'yes' | 'no'): string => `onb:another:${value}`,
+  positionOpen: 'onb:position',
+  positionModal: 'onb:position:modal',
   experience: (value: string): string => `onb:exp:${value}`,
-  sectorSelect: 'onb:sectors:select',
-  sectorPage: (page: number): string => `onb:sectors:page:${page}`,
-  sectorsDone: 'onb:sectors:done',
-  locationOpen: 'onb:location:open',
-  locationModal: 'onb:location:modal',
-  skillsOpen: 'onb:skills:open',
-  skillsModal: 'onb:skills:modal',
-  wants: (value: string): string => `onb:want:${value}`,
   restart: 'onb:restart',
 } as const;
 
@@ -78,11 +120,12 @@ export class OnboardingSessions {
 
   start(discordId: string, existing: Partial<OnboardingSession> = {}): OnboardingSession {
     const session: OnboardingSession = {
-      step: 'education',
-      sectors: existing.sectors ?? [],
-      sectorPage: 0,
+      step: 'name',
+      education: [],
+      previousEducation: existing.previousEducation ?? [],
     };
-    if (existing.education !== undefined) session.education = existing.education;
+    if (existing.name !== undefined) session.name = existing.name;
+    if (existing.lastPosition !== undefined) session.lastPosition = existing.lastPosition;
     if (existing.experienceYears !== undefined) session.experienceYears = existing.experienceYears;
     this.sessions.set(discordId, session);
     return session;
@@ -103,6 +146,7 @@ export class OnboardingSessions {
 
 export function educationLabel(value: string | null | undefined): string {
   if (!value) return 'not set';
+  if (value === 'none') return 'None';
   return EDUCATION_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
@@ -120,6 +164,17 @@ export function wantsLabel(wants: string | null | undefined): string {
   return 'jobs and tenders';
 }
 
+/** "bachelor — Health", or the level alone when it was not asked for a field. */
+export function educationEntryLabel(entry: EducationEntry): string {
+  const level = educationLabel(entry.level);
+  return entry.field ? `${level} — ${entry.field}` : level;
+}
+
+export function educationSummary(education: EducationEntry[] | null | undefined): string {
+  if (!education || education.length === 0) return 'not set';
+  return education.map(educationEntryLabel).join('; ');
+}
+
 function stepHeader(step: number, title: string, hint?: string): string {
   const lines = [`**Step ${step} of ${STEP_COUNT} — ${title}**`];
   if (hint) lines.push(hint);
@@ -127,10 +182,46 @@ function stepHeader(step: number, title: string, hint?: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Step 1: education
+// Step 1: name
 // ---------------------------------------------------------------------------
 
-export function educationPrompt(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
+export function namePrompt(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
+  return {
+    content: stepHeader(
+      1,
+      'What is your name?',
+      'I use it in your digests. Jobify covers all of Somalia, so there is no city to pick.',
+    ),
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(CID.nameOpen).setLabel('Enter my name').setStyle(ButtonStyle.Primary),
+      ),
+    ],
+  };
+}
+
+export function nameModal(current?: string | null): ModalBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId('name')
+    .setLabel('Your name')
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(80)
+    .setRequired(true);
+  if (current && current.trim().length > 0) input.setValue(current.trim().slice(0, 80));
+  return new ModalBuilder()
+    .setCustomId(CID.nameModal)
+    .setTitle('Your name')
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
+// ---------------------------------------------------------------------------
+// Step 2: education — level, then field, then "another degree?"
+// ---------------------------------------------------------------------------
+
+export function educationPrompt(session: OnboardingSession): {
+  content: string;
+  components: ActionRowBuilder<ButtonBuilder>[];
+} {
   const buttons = EDUCATION_OPTIONS.map((option) =>
     new ButtonBuilder().setCustomId(CID.education(option.value)).setLabel(option.label).setStyle(ButtonStyle.Secondary),
   );
@@ -139,246 +230,215 @@ export function educationPrompt(): { content: string; components: ActionRowBuild
     new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(0, 5)),
     new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(5)),
   ];
+
+  const ordering = session.education.length === 0 ? 'highest level' : 'level';
+  const parts = [
+    stepHeader(2, `What is your ${ordering} of education?`, 'Only bachelor, master and PhD ask for a field.'),
+  ];
+  if (session.education.length > 0) {
+    parts.push(`Already added: ${educationSummary(session.education)}`);
+  } else if (session.previousEducation.length > 0) {
+    parts.push(
+      `On file: ${educationSummary(session.previousEducation)}. Answering this replaces that list — you can add every degree back in the next questions.`,
+    );
+  }
+  return { content: parts.join('\n'), components: rows };
+}
+
+export function fieldPrompt(level: string): {
+  content: string;
+  components: ActionRowBuilder<ButtonBuilder>[];
+} {
+  const buttons = FIELD_OPTIONS.map((option) =>
+    new ButtonBuilder().setCustomId(CID.field(option.key)).setLabel(option.label).setStyle(ButtonStyle.Secondary),
+  );
+  const rows = [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(0, 5)),
+    new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(5, 10)),
+    new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(10)),
+  ];
   return {
     content: stepHeader(
-      1,
-      'What is your highest level of education?',
-      'This shapes which openings I filter for — you can change it later by running `/start` again.',
+      2,
+      `Which field is your ${educationLabel(level)} in?`,
+      'This is what your matches are filtered by. "Other" asks you to type it, and becomes keywords instead.',
     ),
     components: rows,
   };
 }
 
+export function fieldModal(): ModalBuilder {
+  return new ModalBuilder()
+    .setCustomId(CID.fieldModal)
+    .setTitle('Your field of study')
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId('field')
+          .setLabel('Field of study')
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(60)
+          .setRequired(true),
+      ),
+    );
+}
+
+export function anotherPrompt(session: OnboardingSession): {
+  content: string;
+  components: ActionRowBuilder<ButtonBuilder>[];
+} {
+  const atLimit = session.education.length >= MAX_EDUCATION;
+  const hint = atLimit
+    ? `That is ${MAX_EDUCATION} degrees, which is the maximum. Next: your last job.`
+    : `Added: ${educationSummary(session.education)}`;
+  const row = new ActionRowBuilder<ButtonBuilder>();
+  if (!atLimit) {
+    row.addComponents(
+      new ButtonBuilder().setCustomId(CID.another('yes')).setLabel('Yes, add another').setStyle(ButtonStyle.Secondary),
+    );
+  }
+  row.addComponents(new ButtonBuilder().setCustomId(CID.another('no')).setLabel('No, that is all').setStyle(ButtonStyle.Primary));
+  return {
+    content: stepHeader(2, 'Do you have another degree?', hint),
+    components: [row],
+  };
+}
+
 // ---------------------------------------------------------------------------
-// Step 2: experience
+// Step 3: job history — last position, then years
 // ---------------------------------------------------------------------------
+
+export function positionPrompt(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
+  return {
+    content: stepHeader(
+      3,
+      'What was your last job?',
+      'The job title you last held — for example `Programme Officer`. It becomes the keywords your matches are ranked by.',
+    ),
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(CID.positionOpen).setLabel('Enter my last job title').setStyle(ButtonStyle.Primary),
+      ),
+    ],
+  };
+}
+
+export function positionModal(current?: string | null): ModalBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId('position')
+    .setLabel('Last job title')
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(120)
+    .setRequired(true);
+  if (current && current.trim().length > 0) input.setValue(current.trim().slice(0, 120));
+  return new ModalBuilder()
+    .setCustomId(CID.positionModal)
+    .setTitle('Your last job')
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
 
 export function experiencePrompt(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
   const buttons = EXPERIENCE_OPTIONS.map((option) =>
     new ButtonBuilder().setCustomId(CID.experience(option.value)).setLabel(option.label).setStyle(ButtonStyle.Secondary),
   );
   return {
-    content: stepHeader(2, 'How much relevant work experience do you have?'),
+    content: stepHeader(3, 'How much relevant work experience do you have?'),
     components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
   };
 }
 
-/**
- * The prompt for wherever a session currently is. Shared by the free-text path when a member
- * writes again mid-interview: re-sending the step they were on is what keeps their place
- * without starting a second session (and without losing answers already written server-side).
- */
+// ---------------------------------------------------------------------------
+// The prompt for wherever a session currently is
+// ---------------------------------------------------------------------------
+
 export interface StepPrompt {
   content: string;
-  components: Array<ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>>;
+  components: ActionRowBuilder<ButtonBuilder>[];
 }
 
-export function promptForStep(step: Step, session: OnboardingSession, categories: Category[]): StepPrompt {
+/**
+ * Shared by the free-text path when a member writes again mid-interview: re-sending the step
+ * they were on is what keeps their place without starting a second session (and without
+ * losing answers already written server-side).
+ */
+export function promptForStep(step: Step, session: OnboardingSession): StepPrompt {
   switch (step) {
-    case 'education':
-      return educationPrompt();
-    case 'experience':
+    case 'name':
+      return namePrompt();
+    case 'education_level':
+      return educationPrompt(session);
+    case 'education_field':
+      return fieldPrompt(session.pendingLevel ?? 'bachelor');
+    case 'another_degree':
+      return anotherPrompt(session);
+    case 'position':
+      return positionPrompt();
+    case 'years':
       return experiencePrompt();
-    case 'sectors':
-      return sectorsPrompt(session, categories);
-    case 'location':
-      return locationPrompt();
-    case 'skills':
-      return skillsPrompt();
-    case 'wants':
-      return wantsPrompt();
   }
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: sectors (paged multi-select)
+// Step 4: completion — "Setup complete", the current matches, and /jobs
 // ---------------------------------------------------------------------------
 
-export function sectorPage(categories: Category[], page: number): { page: number; pages: number; items: Category[]; offset: number } {
-  const pages = Math.max(1, Math.ceil(categories.length / SECTOR_OPTIONS_PER_PAGE));
-  const clamped = Math.min(Math.max(0, page), pages - 1);
-  const offset = clamped * SECTOR_OPTIONS_PER_PAGE;
-  return { page: clamped, pages, items: categories.slice(offset, offset + SECTOR_OPTIONS_PER_PAGE), offset };
-}
-
-export function sectorsPrompt(
-  session: OnboardingSession,
-  categories: Category[],
-): { content: string; components: Array<ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>> } {
-  const view = sectorPage(categories, session.sectorPage);
-  session.sectorPage = view.page;
-
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(CID.sectorSelect)
-    .setPlaceholder(`Sectors — page ${view.page + 1} of ${view.pages}`)
-    .setMinValues(0)
-    .setMaxValues(MAX_SECTORS);
-
-  for (const category of view.items) {
-    const option = new StringSelectMenuOptionBuilder()
-      .setLabel(category.label.slice(0, 100))
-      .setValue(category.slug);
-    if (session.sectors.includes(category.slug)) option.setDefault(true);
-    menu.addOptions(option);
-  }
-
-  const navRow = new ActionRowBuilder<ButtonBuilder>();
-  if (view.page > 0) {
-    navRow.addComponents(
-      new ButtonBuilder().setCustomId(CID.sectorPage(view.page - 1)).setLabel('◂ Previous sectors').setStyle(ButtonStyle.Secondary),
-    );
-  }
-  if (view.page < view.pages - 1) {
-    navRow.addComponents(
-      new ButtonBuilder().setCustomId(CID.sectorPage(view.page + 1)).setLabel('More sectors ▸').setStyle(ButtonStyle.Secondary),
-    );
-  }
-  navRow.addComponents(
-    new ButtonBuilder().setCustomId(CID.sectorsDone).setLabel('Done').setStyle(ButtonStyle.Primary),
-  );
-
-  const chosen = session.sectors.length
-    ? session.sectors
-        .map((slug) => categories.find((category) => category.slug === slug)?.label ?? slug)
-        .join(', ')
-    : 'nothing yet';
-
-  return {
-    content: stepHeader(
-      3,
-      'Which sectors do you want to work in?',
-      `Pick up to ${MAX_SECTORS}. Selected (${session.sectors.length}): ${chosen}`,
-    ),
-    components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu), navRow],
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Step 4: location
-// ---------------------------------------------------------------------------
-
-export function locationPrompt(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    content: stepHeader(
-      4,
-      'Where are you based — and where would you work?',
-      'A city or region is enough (for example `Mogadishu` or `Hargeisa`). It is used to rank nearby openings.',
-    ),
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(CID.locationOpen).setLabel('Enter my location').setStyle(ButtonStyle.Primary),
-      ),
-    ],
-  };
-}
-
-export function locationModal(): ModalBuilder {
-  return new ModalBuilder()
-    .setCustomId(CID.locationModal)
-    .setTitle('Your location')
-    .addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId('location')
-          .setLabel('City or region')
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(100)
-          .setRequired(true),
-      ),
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Step 5: skills
-// ---------------------------------------------------------------------------
-
-export function skillsPrompt(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    content: stepHeader(
-      5,
-      'Which skills should I look for?',
-      'Comma separated, up to 20 — for example `python, monitoring and evaluation, proposal writing`. They become the keywords I rank results by.',
-    ),
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(CID.skillsOpen).setLabel('Enter my skills').setStyle(ButtonStyle.Primary),
-      ),
-    ],
-  };
-}
-
-export function skillsModal(): ModalBuilder {
-  return new ModalBuilder()
-    .setCustomId(CID.skillsModal)
-    .setTitle('Your skills')
-    .addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId('skills')
-          .setLabel('Skills, comma separated')
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(400)
-          .setRequired(false),
-      ),
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Step 6: what to watch
-// ---------------------------------------------------------------------------
-
-export function wantsPrompt(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    content: stepHeader(
-      6,
-      'What should I watch for you?',
-      'This decides what the daily digest and your alerts include.',
-    ),
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(CID.wants('jobs')).setLabel('Jobs').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId(CID.wants('tenders')).setLabel('Tenders').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId(CID.wants('both')).setLabel('Both').setStyle(ButtonStyle.Primary),
-      ),
-    ],
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Summary
-// ---------------------------------------------------------------------------
-
-export interface SummaryInput {
+export interface CompletionInput {
   user: DiscordUser;
-  matchCount: number;
+  matches: MatchRow[];
   digestTz: string;
   digestHour: number;
   appBaseUrl: string;
 }
 
-export function summaryPrompt(input: SummaryInput): {
+/**
+ * The end of the interview. It repeats what was recorded (so the member can see the answers
+ * landed), then shows up to five CURRENT matches — the first digest — and the two things they
+ * can do next. Rows come from the backend's own matcher through `formatRows`, so this is the
+ * same renderer the daily digest uses.
+ */
+export function completionPrompt(input: CompletionInput): {
   content: string;
   components: ActionRowBuilder<ButtonBuilder>[];
 } {
   const { user } = input;
-  const categories = user.match_profile?.categories ?? [];
-  const sectorLabels = categories.length ? categories.join(', ') : 'none';
-  const skills = user.skills.length ? user.skills.join(', ') : 'none';
   const hours = `${String(input.digestHour).padStart(2, '0')}:00`;
   const lines = [
-    `**You're set up${user.name ? `, ${user.name}` : ''}.**`,
-    `Education: ${educationLabel(user.education_level)} · Experience: ${experienceLabel(user.experience_years)}`,
-    `Sectors: ${sectorLabels}`,
-    `Location: ${user.location ?? 'not set'} · Keywords: ${skills}`,
-    `Watching for: ${wantsLabel(user.wants)}`,
-    `Alerts: daily at ${hours} (${input.digestTz})`,
-    '',
-    input.matchCount > 0
-      ? `**${input.matchCount} live opening${input.matchCount === 1 ? '' : 's'}** match your sectors right now.`
-      : 'Nothing live matches your sectors this minute — the digest will tell you the moment something does.',
-    'Try `/jobs` to browse, or just tell me what you are looking for.',
-    `<${input.appBaseUrl}/settings|Open the portal> to manage payment and your company profile.`,
+    '**Setup complete**',
+    `Name: ${user.name || 'not set'}`,
+    `Education: ${educationSummary(user.education)}`,
+    `Last job: ${user.last_position || 'not set'} · Experience: ${experienceLabel(user.experience_years)}`,
   ];
+
+  const alerts = user.alerts;
+  lines.push(
+    alerts?.enabled
+      ? `Alerts: on, ${alerts.mode === 'instant' ? 'instant' : `daily at ${hours} (${input.digestTz})`}`
+      : 'Alerts: off — switch them on with `/alerts` whenever you want the digest.',
+  );
+
+  lines.push('');
+  if (input.matches.length > 0) {
+    lines.push(`**${input.matches.length === 1 ? '1 opening matches' : `${input.matches.length} openings match`} you right now:**`, '');
+    lines.push(
+      formatRows(
+        input.matches.map((row) => ({
+          title: row.job.title,
+          organization: row.job.organization,
+          location: row.job.location ?? null,
+          deadline: row.job.deadline ?? null,
+          kind: row.job.kind ?? null,
+          jobId: row.job._id,
+        })),
+        { appBaseUrl: input.appBaseUrl, max: MAX_DIGEST_ROWS },
+      ),
+    );
+  } else {
+    lines.push(
+      'Nothing live matches your answers this minute — I check again every day and will DM you the moment something does.',
+    );
+  }
+  lines.push('', '`/jobs` lists everything for you at any time, not just these five.');
+
   return {
     content: lines.join('\n').slice(0, 1900),
     components: [

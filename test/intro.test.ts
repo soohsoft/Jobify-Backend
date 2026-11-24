@@ -56,7 +56,10 @@ interface FakeChannel extends IntroChannel {
   pinFails?: boolean;
 }
 
-function fakeChannel(messages: FakeMessage[] = [], options: { pinFails?: boolean } = {}): FakeChannel {
+function fakeChannel(
+  messages: FakeMessage[] = [],
+  options: { pinFails?: boolean; pinShape?: 'collection' | 'wrapped' } = {},
+): FakeChannel {
   const stored = [...messages];
   const sent: Array<{ content: string; allowedMentions?: { parse: [] } }> = [];
   let sequence = stored.length;
@@ -65,9 +68,15 @@ function fakeChannel(messages: FakeMessage[] = [], options: { pinFails?: boolean
     stored,
     sent,
     messages: {
-      fetchPins: async () => ({
-        items: new Collection(stored.filter((message) => message.pinned).map((message) => [message.id, message])),
-      }),
+      fetchPins: async () => {
+        const pinned = stored.filter((message) => message.pinned);
+        // discord.js >= 14.26 returns `{ hasMore, items: MessagePin[] }` where each pin
+        // wraps its message; the older shape was a Collection of messages. Both must work.
+        if (options.pinShape === 'wrapped') {
+          return { items: pinned.map((message) => ({ message, pinnedAt: new Date() })) };
+        }
+        return { items: new Collection(pinned.map((message) => [message.id, message])) };
+      },
       fetch: async ({ limit }) =>
         new Collection(
           stored
@@ -108,6 +117,22 @@ test('the intro explains search, commands, the digest and carries the marker', (
   assert.ok(content.length <= 1900);
   assert.equal(zoneLabel('Africa/Nairobi'), 'EAT');
   assert.equal(zoneLabel('Europe/London'), 'Europe/London');
+});
+
+test('a pinned intro is found through the 14.26 pin objects, not just the old Collection', async () => {
+  const intro = fakeMessage('m1', introContent(), true);
+  const channel = fakeChannel([intro], { pinShape: 'wrapped' });
+  const outcome = await ensureIntro(channel, silentLogger, introContent());
+  assert.equal(outcome, 'exists');
+  assert.equal(channel.sent.length, 0, 'no duplicate is posted when the pinned intro is recognised');
+});
+
+test('a pin object without a message is skipped instead of crashing the boot', async () => {
+  const channel = fakeChannel([], { pinShape: 'wrapped' });
+  channel.messages.fetchPins = async () => ({ items: [{ pinnedAt: new Date() }] });
+  const outcome = await ensureIntro(channel, silentLogger, introContent());
+  assert.equal(outcome, 'posted');
+  assert.equal(channel.sent.length, 1);
 });
 
 test('the marker is found in real message text', () => {

@@ -16,17 +16,22 @@ use mongodb::options::ReturnDocument;
 use serde_json::json;
 
 use crate::categories::Category;
+use crate::credits;
 use crate::error::AppError;
 use crate::links;
 use crate::models::{
-    DiscordLinkDoc, DiscordProfileRequest, DiscordUserRequest, LinkTokenDoc, LinkTokenRequest,
-    MatchProfile, UserDoc, UserResponse,
+    CompanyRequest, DiscordAlertsRequest, DiscordCompanyRequest, DiscordLinkDoc,
+    DiscordProfileRequest, DiscordUserRequest, LinkTokenDoc, LinkTokenRequest, MatchProfile,
+    UserDoc, UserResponse,
 };
 use crate::state::AppState;
 use crate::util::{now_iso, uuid_id};
 
 use super::ApiResult;
-use super::auth::{MAX_PROFILE_CATEGORIES, MAX_PROFILE_KEYWORDS, MAX_PROFILE_TERM_CHARS};
+use super::alerts::apply_alert_prefs;
+use super::auth::{
+    MAX_PROFILE_CATEGORIES, MAX_PROFILE_KEYWORDS, MAX_PROFILE_TERM_CHARS, apply_company,
+};
 use super::subscription::subscription_for;
 
 /// A portal link is a convenience, not a credential: 15 minutes by default, and never
@@ -46,6 +51,11 @@ pub fn internal_router() -> Router<AppState> {
         .route("/internal/discord/profile", post(update_profile))
         .route("/internal/discord/link-token", post(mint_link_token))
         .route("/internal/discord/user/{discord_id}", get(get_user))
+        // The delivery queue carries a user id, so whoever drains it must be able to turn
+        // that into a Discord address without holding per-user credentials.
+        .route("/internal/discord/link/{user_id}", get(get_link))
+        .route("/internal/discord/company", post(set_company))
+        .route("/internal/discord/alerts", post(set_alert_prefs))
 }
 
 // ---------------------------------------------------------------------------
@@ -485,17 +495,16 @@ async fn mint_link_token(
 // GET /internal/discord/user/{discord_id}
 // ---------------------------------------------------------------------------
 
-/// Everything the bot needs to answer `/me` without a second round trip.
+/// Everything the bot needs to answer `/me`, `/alerts` and `/credits` without a second
+/// round trip — and without spending one: reading the ledger is not a query.
 async fn get_user(State(state): State<AppState>, Path(discord_id): Path<String>) -> ApiResult {
     let discord_id = snowflake(&discord_id)?;
     let link = link_for(&state, &discord_id).await?;
     let user = load_user(&state, &link.user_id).await?;
     let subscription = subscription_for(&state, &user.id).await?;
-    let alerts_enabled = user
-        .alerts
-        .as_ref()
-        .map(|alerts| alerts.enabled)
-        .unwrap_or(false);
+    let credits = credits::snapshot(&state, &user.id).await?;
+    let alerts = user.alerts.clone().unwrap_or_default();
+    let alerts_enabled = alerts.enabled;
 
     Ok((
         StatusCode::OK,
@@ -506,7 +515,115 @@ async fn get_user(State(state): State<AppState>, Path(discord_id): Path<String>)
                 "subscription_status": subscription.status,
                 "onboarding_complete": onboarding_complete(&user),
                 "alerts_enabled": alerts_enabled,
+                "alerts": alerts,
+                "credits": credits,
             }
+        })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// GET /internal/discord/link/{user_id}
+// ---------------------------------------------------------------------------
+
+/// The reverse of the link table: a user id (what the delivery queue carries) to the
+/// Discord address that can receive a DM.
+///
+/// 404 — not an empty object — when there is no link: the sender must be able to tell "this
+/// account has no Discord address" from "this address is fine" and record the difference.
+async fn get_link(State(state): State<AppState>, Path(user_id): Path<String>) -> ApiResult {
+    let user_id = user_id.trim().to_string();
+    if user_id.is_empty() {
+        return Err(AppError::BadRequest("user_id is required".to_string()));
+    }
+    let link = state
+        .discord_links()
+        .find_one(doc! { "user_id": &user_id })
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound("This account has no Discord identity linked.".to_string())
+        })?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": {
+                "user_id": link.user_id,
+                "discord_id": link.discord_id,
+                "username": link.username,
+                "global_name": link.global_name,
+            }
+        })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// POST /internal/discord/company
+// ---------------------------------------------------------------------------
+
+/// The employer side of an account, written from Discord.
+///
+/// `PATCH /me/company` is Bearer-only and the bot has no bearer token, so this route carries
+/// the snowflake instead and delegates to the SAME `apply_company` — one validator, one
+/// normalization, one clear-on-empty rule for both surfaces.
+async fn set_company(
+    State(state): State<AppState>,
+    Json(body): Json<DiscordCompanyRequest>,
+) -> ApiResult {
+    let discord_id = snowflake(&body.discord_id)?;
+    let link = link_for(&state, &discord_id).await?;
+    let updated = apply_company(
+        &state,
+        &link.user_id,
+        CompanyRequest {
+            name: body.name,
+            services: body.services,
+            website: body.website,
+            description: body.description,
+        },
+    )
+    .await?;
+
+    tracing::info!(
+        user_id = %updated.id,
+        company_set = updated.company.is_some(),
+        "discord company profile written"
+    );
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": UserResponse::from_doc(&updated),
+            "meta": { "company_set": updated.company.is_some() }
+        })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// POST /internal/discord/alerts
+// ---------------------------------------------------------------------------
+
+/// The `/alerts` toggle for a Discord member. Delegates to the same writer as `PUT /alerts`.
+async fn set_alert_prefs(
+    State(state): State<AppState>,
+    Json(body): Json<DiscordAlertsRequest>,
+) -> ApiResult {
+    let discord_id = snowflake(&body.discord_id)?;
+    let link = link_for(&state, &discord_id).await?;
+    let alerts = apply_alert_prefs(&state, &link.user_id, body.enabled, body.mode).await?;
+
+    tracing::info!(
+        user_id = %link.user_id,
+        enabled = alerts.enabled,
+        mode = %alerts.mode,
+        "discord alert preferences written"
+    );
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "alerts": alerts, "alerts_enabled": alerts.enabled }
         })),
     ))
 }
@@ -594,5 +711,52 @@ mod tests {
 
         user.match_profile.as_mut().unwrap().categories = vec!["ict".to_string()];
         assert!(onboarding_complete(&user));
+    }
+
+    async fn test_state(db_name: &str) -> Option<AppState> {
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return None;
+        };
+        let db = client.database(db_name);
+        let _ = db.drop().await;
+        Some(AppState::new(db, crate::config::Config::from_env()))
+    }
+
+    /// The delivery queue hands out a `userId`, so the drain must be able to turn that into
+    /// a Discord address — and must 404, not return an empty object, when there is none.
+    #[tokio::test]
+    async fn the_reverse_lookup_resolves_a_user_id_and_404s_when_unlinked() {
+        let Some(state) = test_state("jobify_test_discord_reverse_link").await else {
+            return;
+        };
+        state
+            .discord_links()
+            .insert_one(&DiscordLinkDoc {
+                id: "link-1".to_string(),
+                discord_id: "900000000000000777".to_string(),
+                user_id: "user-777".to_string(),
+                username: "sahra".to_string(),
+                global_name: Some("Sahra A.".to_string()),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let (status, Json(body)) = get_link(State(state.clone()), Path("user-777".to_string()))
+            .await
+            .expect("a linked user must resolve");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["discord_id"], "900000000000000777");
+        assert_eq!(body["data"]["username"], "sahra");
+        assert_eq!(body["data"]["global_name"], "Sahra A.");
+
+        let missing = get_link(State(state), Path("user-nobody".to_string()))
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, AppError::NotFound(_)));
     }
 }

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
-use crate::models::{NotificationDoc, UserDoc};
+use crate::models::{AlertPrefs, NotificationDoc, UserDoc};
 use crate::state::AppState;
 use crate::util::{nairobi_today, now_iso};
 
@@ -270,14 +270,18 @@ async fn get_alerts(
     ))
 }
 
-async fn set_alerts(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthUser>,
-    Json(body): Json<AlertsRequest>,
-) -> ApiResult {
+/// The ONE alert-preference write, shared by `PUT /alerts` (Bearer) and the bot's
+/// `POST /internal/discord/alerts` (internal key), so the mode validation and the
+/// `last_sent_at` stamping cannot differ between the portal and Discord.
+pub(crate) async fn apply_alert_prefs(
+    state: &AppState,
+    user_id: &str,
+    enabled: bool,
+    mode: Option<String>,
+) -> Result<AlertPrefs, AppError> {
     // Only two modes exist; anything else would silently never fire on the daily path, so
     // an unknown value is rejected rather than stored.
-    let mode = body.mode.unwrap_or_else(|| "daily".to_string());
+    let mode = mode.unwrap_or_else(|| "daily".to_string());
     if mode != "daily" && mode != "instant" {
         return Err(AppError::BadRequest(
             "mode must be \"daily\" or \"instant\"".to_string(),
@@ -286,19 +290,15 @@ async fn set_alerts(
 
     // Enabling clears the marker so today's run can fire; disabling stamps it so a later
     // re-enable does not immediately fire a stale batch.
-    let last_sent_at = if body.enabled {
-        String::new()
-    } else {
-        now_iso()
-    };
+    let last_sent_at = if enabled { String::new() } else { now_iso() };
 
     state
         .users()
         .update_one(
-            doc! { "_id": &auth.id },
+            doc! { "_id": user_id },
             doc! {
                 "$set": {
-                    "alerts.enabled": body.enabled,
+                    "alerts.enabled": enabled,
                     "alerts.mode": &mode,
                     "alerts.last_sent_at": &last_sent_at,
                 }
@@ -306,10 +306,19 @@ async fn set_alerts(
         )
         .await?;
 
-    let user = load_user(&state, &auth.id).await?;
+    let user = load_user(state, user_id).await?;
+    Ok(user.alerts.unwrap_or_default())
+}
+
+async fn set_alerts(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<AlertsRequest>,
+) -> ApiResult {
+    let alerts = apply_alert_prefs(&state, &auth.id, body.enabled, body.mode).await?;
     Ok((
         StatusCode::OK,
-        Json(json!({ "status": "success", "data": user.alerts.unwrap_or_default() })),
+        Json(json!({ "status": "success", "data": alerts })),
     ))
 }
 

@@ -8,6 +8,7 @@ use crate::state::AppState;
 mod alerts;
 mod assistant;
 mod auth;
+mod categories;
 mod common;
 mod credits;
 mod discord;
@@ -26,6 +27,9 @@ pub fn app(state: AppState) -> Router {
 
     let public = Router::new()
         .merge(health::router())
+        // The taxonomy is public: the bot's multi-select and the portal's filters both
+        // render it, and it holds no user data.
+        .merge(categories::router())
         .merge(auth::public_router())
         // Optional auth on the feed so a signed-in caller can have their profile location
         // applied, while the same routes stay public for everyone else.

@@ -623,6 +623,31 @@ pub struct LinkTokenRequest {
     pub ttl_seconds: Option<i64>,
 }
 
+/// `POST /internal/discord/company`. The same fields `PATCH /me/company` takes, with the
+/// snowflake in place of the bearer token; both routes write through `auth::apply_company`.
+#[derive(Deserialize)]
+pub struct DiscordCompanyRequest {
+    pub discord_id: String,
+    /// An empty name clears the company, exactly as it does on the portal.
+    pub name: String,
+    #[serde(default)]
+    pub services: Vec<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `POST /internal/discord/alerts`. `/alerts` is Bearer-only, so the bot's toggle needs its
+/// own identity-bearing route; both write through `alerts::apply_alert_prefs`.
+#[derive(Deserialize)]
+pub struct DiscordAlertsRequest {
+    pub discord_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
 /// `POST /auth/magic`.
 #[derive(Deserialize)]
 pub struct MagicLinkRequest {

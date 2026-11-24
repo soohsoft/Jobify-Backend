@@ -611,30 +611,28 @@ fn normalize_optional(
     Ok(Some(trimmed.to_string()))
 }
 
-/// `PATCH /me/company` — the employer/vendor side of an account.
+/// The ONE company write — the employer/vendor side of an account.
 ///
-/// An empty name CLEARS the company (200, not 400): the portal's company form needs a way
-/// to say "I am not a company after all", and a validation error is not that. Every other
-/// field is normalized here so the stored document is the canonical one.
-async fn update_company(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthUser>,
-    Json(body): Json<CompanyRequest>,
-) -> ApiResult {
+/// `PATCH /me/company` (Bearer) and the bot's `POST /internal/discord/company` (internal
+/// key) both call this, so the caps, the normalization and the clear-on-empty rule cannot
+/// drift between the portal and Discord. An empty name CLEARS the company (200, not 400):
+/// the portal's company form needs a way to say "I am not a company after all", and a
+/// validation error is not that.
+pub(crate) async fn apply_company(
+    state: &AppState,
+    user_id: &str,
+    body: CompanyRequest,
+) -> Result<UserDoc, AppError> {
     let name = body.name.trim().to_string();
     if name.is_empty() {
         state
             .users()
             .update_one(
-                doc! { "_id": &auth.id },
+                doc! { "_id": user_id },
                 doc! { "$unset": { "company": "" } },
             )
             .await?;
-        let updated = load_user(&state, &auth.id).await?;
-        return Ok((
-            StatusCode::OK,
-            Json(json!({ "status": "success", "data": UserResponse::from_doc(&updated) })),
-        ));
+        return load_user(state, user_id).await;
     }
 
     if name.chars().count() > MAX_COMPANY_NAME_CHARS {
@@ -658,13 +656,21 @@ async fn update_company(
     state
         .users()
         .update_one(
-            doc! { "_id": &auth.id },
+            doc! { "_id": user_id },
             doc! { "$set": { "company": stored } },
         )
         .await?;
 
     // Read back rather than echo, same rule as every other write in this file.
-    let updated = load_user(&state, &auth.id).await?;
+    load_user(state, user_id).await
+}
+
+async fn update_company(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Json(body): Json<CompanyRequest>,
+) -> ApiResult {
+    let updated = apply_company(&state, &auth.id, body).await?;
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": UserResponse::from_doc(&updated) })),

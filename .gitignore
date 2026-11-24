@@ -1,0 +1,9 @@
+# Secrets. The bot reads DISCORD_TOKEN and the internal API key from here; it is never
+# committed and never logged.
+.env
+
+node_modules/
+dist/
+dist-typecheck/
+*.log
+.DS_Store

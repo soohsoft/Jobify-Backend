@@ -1,17 +1,14 @@
 //! Canonical job-category taxonomy.
 //!
-//! Broad, flat, and deliberately few: fifteen categories a job seeker can recognise at a
-//! glance. The earlier 54-slug tree asked people to choose between "Public Health & Healthcare
-//! Management" and "Clinical Medicine & Nursing" before they could see a single job, and the
-//! distinctions rarely matched how anyone describes their own work.
+//! **The table below is copied verbatim from the previous backend.** Slugs are the wire and
+//! database contract: they are what the scraper sends in `JobInput.category` and what
+//! `GET /jobs?category=` matches against, so a variant must never be renamed without
+//! migrating stored values. `label()` is the human-facing display name and may change freely.
 //!
-//! **Slugs are the wire and database contract.** They are what the scraper sends in
-//! `JobInput.category` and what `GET /jobs?category=` matches against, so a variant must never
-//! be renamed without migrating stored values. `label()` is the human-facing display name and
-//! may change freely.
-//!
-//! `CategoryGroup` survives as a single group so callers that ask for "the group of this
-//! category" keep working; with a flat taxonomy there is nothing to group.
+//! Only a subset of these accessors is consumed by this service (the core jobs API
+//! validates slugs and never renders labels), so dead-code warnings are silenced rather
+//! than deleting the parts clients and future callers depend on.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 

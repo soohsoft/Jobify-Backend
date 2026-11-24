@@ -9,10 +9,9 @@ pub fn router() -> Router<AppState> {
         .route("/health", get(check))
 }
 
-/// The base URL is the first thing anyone curls when they wire up a client, and a bare 404
-/// with an empty body reads as "the backend is broken" rather than "there is nothing at
-/// the root". This answers with what the service is and where to look next, and keeps the
-/// house `{ status, data }` envelope so a client can parse it like every other response.
+/// A bare 404 at the root reads as "the backend is broken" rather than "there is nothing
+/// at the root". This answers with what the service is and where to look next, in the same
+/// `{ status, data }` envelope as every other response.
 async fn root() -> Json<Value> {
     Json(json!({
         "status": "success",
@@ -20,8 +19,8 @@ async fn root() -> Json<Value> {
             "service": "jobify-backend",
             "status": "ok",
             "health": "/health",
-            "public": ["/jobs", "/jobs/{id}", "/resumes/templates", "/auth/register", "/auth/login"],
-            "authenticated": ["/auth/me", "/chats", "/resumes", "/credits", "/jobs/saved", "/jobs/match", "/alerts", "/me/memory"],
+            "public": ["/jobs", "/jobs/{id}", "/auth/register", "/auth/login"],
+            "authenticated": ["/auth/me", "/jobs/match", "/jobs/saved", "/alerts", "/notifications"],
             "environment": std::env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string()),
             "timestamp": chrono::Utc::now().to_rfc3339()
         }

@@ -13,7 +13,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 use super::ApiResult;
-use super::common::paginate;
+use super::common::{paginate, total_pages};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -54,13 +54,17 @@ async fn list(
     )
     .await?;
 
-    let total_pages = (total as f64 / limit as f64).ceil() as u64;
     Ok((
         StatusCode::OK,
         Json(json!({
             "status": "success",
             "data": data,
-            "meta": { "page": page, "limit": limit, "total": total, "totalPages": total_pages }
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "totalPages": total_pages(total, limit)
+            }
         })),
     ))
 }
@@ -98,6 +102,7 @@ async fn read_all(
     ))
 }
 
+/// Scoped to the caller: `_id` alone would let anyone mark anyone's notification read.
 async fn read_one(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,

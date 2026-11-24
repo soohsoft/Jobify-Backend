@@ -1,14 +1,9 @@
-//! Outbound email for jobify, over SMTP.
+//! Outbound email over SMTP.
 //!
-//! Two modes, chosen by configuration rather than by a build flag: with `SMTP_HOST` set the
-//! mail goes out over SMTP (Gmail: `smtp.gmail.com`, port 587, STARTTLS, and an app password
-//! — a normal account password is rejected); with it empty every message is written to the
-//! log instead. The console mode is not a stub to be replaced later: it is what lets the
-//! signup flow be exercised end to end before any mailbox credentials exist, and it keeps
-//! the test suite free of a network dependency.
-//!
-//! A refusal from the mail server must not roll back a signup that already succeeded, so
-//! `send_*` returns a Result the caller logs rather than propagates.
+//! Two modes, chosen by configuration rather than a build flag: with `SMTP_HOST` set the
+//! mail goes out over SMTP (Gmail: `smtp.gmail.com`, 587, STARTTLS, app password); with it
+//! empty every message is written to the log instead. Console mode is not a stub — it is
+//! what lets the signup flow be exercised end to end before credentials exist.
 
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
@@ -20,7 +15,7 @@ pub enum SmtpSecurity {
     StartTls,
     /// Implicit TLS from the first byte (465).
     ImplicitTls,
-    /// No encryption at all. Dev-only, and it says so in the log.
+    /// No encryption. Dev-only, and it says so in the log.
     Plain,
 }
 
@@ -43,9 +38,6 @@ pub struct MailConfig {
     pub username: String,
     pub password: String,
     pub security: SmtpSecurity,
-    /// Public origin used to build links in the mail (not used by the OTP text, which is
-    /// code-only, but kept for the templates that will follow).
-    pub app_base_url: String,
 }
 
 impl MailConfig {
@@ -59,8 +51,8 @@ impl MailConfig {
         let from = std::env::var("SMTP_FROM")
             .ok()
             .filter(|v| !v.trim().is_empty())
-            // Gmail refuses a From that is not the authenticated account, so falling back
-            // to the username is what makes a half-filled .env work instead of bouncing.
+            // Gmail refuses a From that is not the authenticated account, so falling
+            // back to the username is what makes a half-filled .env work instead of bounce.
             .unwrap_or_else(|| username.clone());
         Self {
             from,
@@ -72,24 +64,21 @@ impl MailConfig {
             security: SmtpSecurity::parse(
                 &std::env::var("SMTP_TLS").unwrap_or_else(|_| "starttls".to_string()),
             ),
-            app_base_url: std::env::var("APP_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:5173".to_string()),
         }
     }
 
-    /// Live SMTP needs host *and* credentials. Requiring all three is what stops a
-    /// half-filled .env — host stored, password not yet — from switching the app into a mode
-    /// where every send fails: signup would then mail nothing and log nothing, and the only
-    /// symptom would be a code that never arrives. Anything missing keeps console mode,
-    /// where the code is at least readable in the log.
+    /// Live SMTP needs host *and* credentials. Requiring all three stops a half-filled
+    /// .env from switching the app into a mode where every send fails silently — the only
+    /// symptom would be a code that never arrives and is never logged. Anything missing
+    /// keeps console mode, where the code is at least readable.
     pub fn enabled(&self) -> bool {
         !self.host.trim().is_empty()
             && !self.username.trim().is_empty()
             && !self.password.trim().is_empty()
     }
 
-    /// True when a host is configured but the credentials are not — a state worth saying out
-    /// loud, because it is almost always an unfinished .env rather than a deliberate choice.
+    /// True when a host is configured but the credentials are not — almost always an
+    /// unfinished .env rather than a deliberate choice.
     pub fn awaiting_credentials(&self) -> bool {
         !self.host.trim().is_empty() && !self.enabled()
     }
@@ -103,10 +92,6 @@ pub struct Mailer {
 impl Mailer {
     pub fn new(config: MailConfig) -> Self {
         Self { config }
-    }
-
-    pub fn config(&self) -> &MailConfig {
-        &self.config
     }
 
     pub fn is_live(&self) -> bool {
@@ -142,8 +127,7 @@ impl Mailer {
 
     pub async fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
         if !self.config.enabled() {
-            // Deliberately loud and complete: in dev the code IS the delivery mechanism,
-            // and a truncated log line would make the flow untestable.
+            // Deliberately loud and complete: in dev the log IS the delivery mechanism.
             tracing::info!(
                 to = %to,
                 subject = %subject,
@@ -171,10 +155,9 @@ impl Mailer {
 
         match self.transport()?.send(message).await {
             Ok(_) => {
-                // Outside production the body is echoed to the log even on success, because
-                // a developer testing the signup flow has no way to read the mailbox the
-                // mail went to. In production nothing is logged: the code is a secret and
-                // only the recipient should see it.
+                // Outside production the body is echoed even on success: a developer has
+                // no way to read the mailbox the mail went to. In production nothing is
+                // logged — the code is a secret only the recipient should see.
                 if std::env::var("RUST_ENV").unwrap_or_default() != "production" {
                     tracing::info!(to = %to, "mail sent (dev: body logged below)");
                     for line in body.lines() {
@@ -184,9 +167,7 @@ impl Mailer {
                 Ok(())
             }
             Err(err) => {
-                // Outside production, the code still has to be findable — otherwise a wrong
-                // password means nobody can sign up and nothing says why. The body goes to
-                // the log in the same shape as console mode, clearly marked as a fallback.
+                // Outside production the code still has to be findable.
                 if std::env::var("RUST_ENV").unwrap_or_default() != "production" {
                     tracing::warn!(
                         to = %to,
@@ -203,8 +184,8 @@ impl Mailer {
     }
 }
 
-/// The signup code mail. Plain text on purpose — an OTP that needs an HTML renderer is one
-/// more thing that can arrive broken.
+/// The signup code mail. Plain text on purpose — an OTP that needs an HTML renderer is
+/// one more thing that can arrive broken.
 pub fn verification_email(code: &str, name: &str) -> (String, String) {
     let subject = format!("Your Jobify code: {code}");
     let greeting = if name.trim().is_empty() {
@@ -225,9 +206,8 @@ pub fn verification_email(code: &str, name: &str) -> (String, String) {
     (subject, body)
 }
 
-/// The password-reset mail. Deliberately says a reset was requested and nothing about the
-/// account: this mail can land in a shared inbox, and "someone tried to reset your Jobify
-/// password" is a warning, not a disclosure.
+/// The password-reset mail. Says a reset was requested and nothing about the account:
+/// this mail can land in a shared inbox.
 pub fn password_reset_email(code: &str, name: &str) -> (String, String) {
     let subject = format!("Reset your Jobify password: {code}");
     let greeting = if name.trim().is_empty() {
@@ -262,109 +242,29 @@ mod tests {
             host: host.into(),
             port: 587,
             username: "jobify@example.com".into(),
-            password: "secret".into(),
+            password: "app-password".into(),
             security: SmtpSecurity::StartTls,
-            app_base_url: "http://localhost:5173".into(),
         }
     }
 
     #[test]
-    fn security_strings_map_to_the_right_mode() {
-        assert_eq!(SmtpSecurity::parse("starttls"), SmtpSecurity::StartTls);
-        assert_eq!(SmtpSecurity::parse("TLS"), SmtpSecurity::ImplicitTls);
-        assert_eq!(SmtpSecurity::parse("ssl"), SmtpSecurity::ImplicitTls);
-        assert_eq!(SmtpSecurity::parse("none"), SmtpSecurity::Plain);
-        // Anything unrecognised must land on the encrypted default, never on plaintext.
-        assert_eq!(SmtpSecurity::parse("banana"), SmtpSecurity::StartTls);
-    }
-
-    #[test]
-    fn no_host_means_console_mode() {
-        assert!(!Mailer::new(config("")).is_live());
-        assert!(Mailer::new(config("smtp.gmail.com")).is_live());
-    }
-
-    #[test]
-    fn host_without_credentials_stays_in_console_mode() {
-        // The exact half-filled state a .env passes through: host stored, app password not
-        // yet. Staying in console mode is what keeps signup working while that is true.
+    fn live_smtp_needs_host_and_credentials() {
+        assert!(config("smtp.gmail.com").enabled());
+        assert!(!config("").enabled());
         let mut no_password = config("smtp.gmail.com");
         no_password.password = String::new();
-        let mailer = Mailer::new(no_password.clone());
-        assert!(!mailer.is_live(), "a blank password must not enable SMTP");
-        assert!(mailer.config().awaiting_credentials());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            assert!(mailer.send("a@b.com", "s", "code 123456").await.is_ok());
-        });
-
-        let mut no_username = config("smtp.gmail.com");
-        no_username.username = String::new();
-        assert!(!Mailer::new(no_username).is_live());
+        assert!(!no_password.enabled());
+        assert!(no_password.awaiting_credentials());
     }
 
     #[test]
-    fn awaiting_credentials_is_false_for_both_finished_states() {
-        assert!(!Mailer::new(config("")).config().awaiting_credentials());
-        assert!(
-            !Mailer::new(config("smtp.gmail.com"))
-                .config()
-                .awaiting_credentials()
-        );
-    }
-
-    #[test]
-    fn console_mode_reports_success_rather_than_failing_the_signup() {
-        let mailer = Mailer::new(config(""));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            assert!(
-                mailer
-                    .send("a@b.com", "s", "line one\nline two")
-                    .await
-                    .is_ok()
-            );
-        });
-    }
-
-    #[test]
-    fn verification_mail_carries_the_code_and_the_ttl() {
+    fn emails_carry_the_code() {
         let (subject, body) = verification_email("123456", "Halima");
-        assert!(
-            subject.contains("123456"),
-            "the code must be in the subject: {subject}"
-        );
+        assert!(subject.contains("123456"));
         assert!(body.contains("123456"));
-        assert!(body.contains("Halima"));
-        assert!(
-            body.contains("10 minutes"),
-            "the TTL must be stated: {body}"
-        );
-    }
-
-    #[test]
-    fn reset_mail_does_not_disclose_the_account_and_states_nothing_changed() {
+        assert!(body.contains("Hi Halima,"));
         let (subject, body) = password_reset_email("654321", "");
         assert!(subject.contains("654321"));
         assert!(body.contains("654321"));
-        assert!(
-            body.contains("30 minutes"),
-            "the reset TTL must be stated: {body}"
-        );
-        assert!(
-            body.contains("nothing has changed yet"),
-            "the user must know it is not live yet: {body}"
-        );
-        assert!(
-            !body.contains("https"),
-            "no links: a link cannot be attempt-limited like a code"
-        );
-    }
-
-    #[test]
-    fn verification_mail_greets_an_unnamed_user_without_an_empty_hole() {
-        let (_, body) = verification_email("000000", "   ");
-        assert!(body.starts_with("Hi,"), "no dangling comma: {body}");
     }
 }

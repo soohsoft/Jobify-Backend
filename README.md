@@ -1,54 +1,76 @@
-# Jobify Backend
+# jobify-backend
 
-Rust/Axum + MongoDB API for Jobify. This service is the source of truth for jobs, users, resume chats, CV data, credits, payments, and notifications.
+Core jobs-board API for Jobify: Rust + Axum 0.8, MongoDB (`mongodb` v3), JWT auth with
+email one-time codes, the public jobs feed, saved jobs, profile matching, alerts,
+notifications, and the scraper's internal ingest endpoints.
 
-The Node/Express code in `jobify-backend-Node` is being replaced by this Rust service. Web scraping stays in a separate Node application for Playwright/stealth reasons.
+Deliberately **not** in this service: the CV builder, the LLM chat, credits and payments.
+They were removed with the old code; the collections they used are untouched.
 
-## Architecture
+## Run
 
-- **Rust backend (this repo):** auth, job ingestion API, resume-building chat orchestration, CV data storage, credit/token accounting, WaafiPay payments, and notifications.
-- **Node scraper (separate server):** runs Playwright/stealth, fetches its target sites from `GET /internal/sources`, scrapes/refines each job, then pushes clean JSON to `POST /internal/jobs`.
-- **Frontend:** owns all visual CV templates, template selection UI, PDF export, and rendering. The backend only returns consistent structured profile data.
-
-## Scraper contract
-
-Protected by the `x-api-key` header matching `SCRAPER_INTERNAL_API_KEY`.
-
-- `GET /internal/sources` — returns target job-board source configurations.
-- `POST /internal/jobs` — accepts one job object or an array of job objects for upsert.
-
-## Public API
-
-- `GET /health`
-- `POST /auth/register`
-- `POST /auth/login`
-- `GET /jobs`
-- `GET /jobs/:id`
-- `GET /resumes/templates`
-- `POST /payments/waafipay/callback`
-
-Authenticated endpoints require `Authorization: Bearer <jwt>`.
-
-## Credits & pricing
-
-- DeepSeek blended cost baseline is **5,500,000 tokens per $1** at cost.
-- Jobify bills **1,100,000 tokens per $1** (80% profit margin on token cost).
-- A $1 top-up adds **1,100,000 tokens**.
-- Token usage is deducted from the user's token balance after every LLM-backed chat/edit.
-- Usage is recorded daily per user for auditing.
-
-## Setup
-
-```sh
-cp .env.example .env
-# fill in MongoDB, DeepSeek, and WaafiPay values
-cargo run
+```bash
+cp .env.example .env    # fill MONGODB_URI, JWT_SECRET, SCRAPER_INTERNAL_API_KEY
+./run.sh --build        # listens on 0.0.0.0:3000
 ```
 
-## Development
+Leave `SMTP_HOST` empty to run in console mode: verification and reset codes are written to
+the server log (`mail> ...`) instead of being sent, which makes signup testable with no
+mailbox credentials.
 
-```sh
-cargo fmt
-cargo clippy --all-targets --all-features
+## Routes
+
+Every response is `{"status": "success", "data": ..., "meta": ...}`; every error is
+`{"status": "error", "code": ..., "message": ...}`.
+
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/`, `/health` | public |
+| POST | `/auth/register`, `/auth/login` | public |
+| POST | `/auth/forgot-password`, `/auth/reset-password` | public |
+| GET, PATCH | `/auth/me` | Bearer |
+| POST | `/auth/verify-email`, `/auth/resend-otp` | Bearer |
+| GET | `/jobs` (`q`, `location`, `category`, `organization`, `page`, `limit`) | public, optional Bearer |
+| GET | `/jobs/{id}` | public |
+| GET | `/jobs/match` (`limit`, `record`) | Bearer |
+| GET | `/jobs/saved` | Bearer |
+| POST, DELETE | `/jobs/{id}/save` | Bearer |
+| GET, PUT | `/alerts` | Bearer |
+| POST | `/jobs/{id}/not-a-fit` (`scope`: employer \| category) | Bearer |
+| GET | `/notifications`, `/notifications/unread-count` | Bearer |
+| PATCH | `/notifications/read-all`, `/notifications/{id}/read` | Bearer |
+| GET | `/internal/sources` | `x-api-key` |
+| POST | `/internal/jobs` (JSON array of `JobInput`) | `x-api-key` |
+| POST | `/internal/matches/refresh` | `x-api-key` |
+| GET | `/internal/deliveries` | `x-api-key` |
+| POST | `/internal/deliveries/sent`, `/internal/deliveries/failed` | `x-api-key` |
+
+## Data rules that must not regress
+
+- **Ingest upserts on `(external_id, source)` and writes only the fields the payload
+  actually carries.** Identity fields (`external_id`, `source`, `title`, `url`,
+  `updated_at`) are always written. A full `$set` once blanked `description` and `deadline`
+  on a partial scrape run.
+- **Unknown category slugs are stored as null with a warning, and the job is still
+  persisted.** The taxonomy in `src/categories.rs` is a wire + database + scraper contract.
+- **One visibility rule** (`live_job_filter`) is shared by `GET /jobs` and `GET /jobs/match`:
+  deadline today or later (Africa/Nairobi), or no deadline and posted within 14 days
+  (falling back to `created_at`). It is visibility only — a deadline is never synthesised.
+  `GET /jobs/saved` is deliberately not live-filtered.
+- **Matching** scores +2 for a profile location, +1 per keyword in the title, +0.5 in the
+  description; `record=false` writes nothing, `record=true` queues a notification per match.
+  A user with no match profile gets 200 with `meta.reason = "no_match_profile"`.
+- **Passwords are salted SHA-256**, not argon2 — the stored hashes are in that format and
+  changing it would lock every existing account out.
+- **Verification codes** are 6 digits, only the SHA-256 hash is stored, 10-minute expiry
+  (30 for reset), 5 attempts, 60-second resend cooldown. `verify-email` and `resend-otp`
+  authenticate by Bearer token, never by an email in the body.
+
+## Dev gates
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets
 cargo build
+cargo test
 ```

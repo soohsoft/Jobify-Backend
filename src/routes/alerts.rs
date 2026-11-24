@@ -43,13 +43,11 @@ pub fn protected_router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 // Delivery queue
 //
-// Channel-agnostic on purpose. It used to return a Telegram chat id, which tied the queue
-// to one transport and — worse — forced delivery to be per-user so the bot could hold that
-// user's token. It now returns a user id; whatever channel sends the notification resolves
-// that user's own address (web push subscription, email, whatever comes next).
+// Channel-agnostic on purpose: it returns a user id, and whatever transport sends the
+// notification resolves that user's own address. Delivery must never depend on a session
+// being held in some other process's memory, or a restart stalls every alert.
 // ---------------------------------------------------------------------------
 
-/// One page of the delivery queue.
 #[derive(Deserialize)]
 pub struct DeliveriesQuery {
     #[serde(default)]
@@ -73,11 +71,8 @@ pub struct DeliveryFailure {
     pub reason: String,
 }
 
-/// What should be sent next, across **every** subscriber.
-///
-/// Called with the internal key, so the sender needs no per-user credentials — which is
-/// what makes a restart survivable: nothing about delivery depends on a session being in
-/// some other process's memory.
+/// What should be sent next, across **every** subscriber. Called with the internal key, so
+/// the sender needs no per-user credentials.
 async fn deliveries(
     State(state): State<AppState>,
     Query(query): Query<DeliveriesQuery>,
@@ -99,9 +94,6 @@ async fn deliveries(
     let mut candidates: Vec<NotificationDoc> = Vec::new();
     while let Some(notification) = cursor.try_next().await? {
         candidates.push(notification);
-        if candidates.len() as i64 >= limit * 3 {
-            break;
-        }
     }
     if candidates.is_empty() {
         return Ok((
@@ -197,8 +189,9 @@ async fn deliveries_sent(
 
 /// Mark a page failed, with per-item reasons.
 ///
-/// A terminal reason means the address is no longer valid, so alerts are paused for that
-/// user rather than retried forever; a transient reason leaves the row for the next pass.
+/// A terminal reason means the address will never work again, so alerts are paused for
+/// that user rather than retried forever; a transient reason leaves the row for the next
+/// pass. An endless retry loop looks identical to a healthy one from the outside.
 async fn deliveries_failed(
     State(state): State<AppState>,
     Json(body): Json<DeliveryFailures>,
@@ -243,10 +236,6 @@ async fn deliveries_failed(
 }
 
 /// Whether a failure means "this address will never work again".
-///
-/// The old Telegram reasons are kept alongside the web-push ones because they describe the
-/// same situations: a channel that has been withdrawn by the user, or an endpoint that no
-/// longer exists.
 fn is_terminal_failure(reason: &str) -> bool {
     matches!(
         reason,
@@ -274,12 +263,7 @@ async fn get_alerts(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
 ) -> ApiResult {
-    let user = state
-        .users()
-        .find_one(doc! { "_id": &user.id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
+    let user = load_user(&state, &user.id).await?;
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": user.alerts.unwrap_or_default() })),
@@ -322,12 +306,7 @@ async fn set_alerts(
         )
         .await?;
 
-    let user = state
-        .users()
-        .find_one(doc! { "_id": &auth.id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
+    let user = load_user(&state, &auth.id).await?;
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": user.alerts.unwrap_or_default() })),
@@ -352,6 +331,11 @@ async fn not_a_fit(
     let scope = body
         .and_then(|Json(body)| body.scope)
         .unwrap_or_else(|| "employer".to_string());
+    if scope != "employer" && scope != "category" {
+        return Err(AppError::BadRequest(
+            "scope must be \"employer\" or \"category\"".to_string(),
+        ));
+    }
 
     let job = state
         .jobs()
@@ -392,9 +376,8 @@ async fn not_a_fit(
 /// Queues matches for every subscriber who is due. WHO and WHAT to notify is decided here,
 /// in one place, so the daily cap and the dedupe cannot be circumvented by a second caller.
 ///
-/// Channel-agnostic: it no longer requires the user to have a Telegram link, which also
-/// means it can run before any delivery transport exists at all. Alerts accumulate as
-/// pending rows and go out when something drains them.
+/// Channel-agnostic: no transport has to exist. Alerts accumulate as pending rows and go
+/// out whenever something drains them.
 async fn refresh_matches(State(state): State<AppState>) -> ApiResult {
     let today = nairobi_today();
     let mut cursor = state.users().find(doc! { "alerts.enabled": true }).await?;
@@ -444,4 +427,12 @@ async fn refresh_matches(State(state): State<AppState>) -> ApiResult {
             }
         })),
     ))
+}
+
+async fn load_user(state: &AppState, user_id: &str) -> Result<UserDoc, AppError> {
+    state
+        .users()
+        .find_one(doc! { "_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))
 }

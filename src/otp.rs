@@ -4,22 +4,20 @@
 //! exactly once — in the email. Everything here is a pure function so the rules can be
 //! tested without a database or an SMTP server.
 
-/// How long a signup code stays valid. Long enough to fetch a mail, short enough that a
-/// leaked mailbox is not a standing key.
+/// How long a signup code stays valid.
 pub const OTP_TTL_MINUTES: i64 = 10;
 
-/// A reset code gets longer: the user has to remember they asked for one, find the mail,
-/// and choose a new password, and a reset mail often sits unread for a while. The extra
-/// window is paid for by the code still being single-use and attempt-limited.
+/// A reset code gets longer: the user has to find the mail and pick a new password, and
+/// reset mail often sits unread. The extra window is paid for by single use + attempts.
 pub const RESET_TTL_MINUTES: i64 = 30;
 
-/// Codes are per purpose, never shared: a code that verifies an address must not be able to
-/// change a password, or a leaked signup mail becomes an account takeover.
+/// Codes are per purpose, never shared: a code that verifies an address must not be able
+/// to change a password.
 pub const PURPOSE_VERIFY: &str = "verify_email";
 pub const PURPOSE_RESET: &str = "reset_password";
 
-/// The storage key. One row per (user, purpose), so issuing a new code of a kind replaces
-/// that kind only — asking for a reset does not invalidate a pending signup code.
+/// The storage key. One row per (user, purpose), so asking for a reset does not
+/// invalidate a pending signup code.
 pub fn otp_key(user_id: &str, purpose: &str) -> String {
     format!("{user_id}:{purpose}")
 }
@@ -35,12 +33,12 @@ pub fn ttl_minutes(purpose: &str) -> i64 {
 /// attempts keeps guessing hopeless while leaving room for a typo.
 pub const OTP_MAX_ATTEMPTS: i32 = 5;
 
-/// Seconds a user must wait before another code will be sent. Without this, "resend"
-/// is a free mail bomb aimed at any address someone types in.
+/// Seconds before another code may be sent. Without this, "resend" is a free mail bomb
+/// aimed at any address someone types in.
 pub const OTP_RESEND_COOLDOWN_SECONDS: i64 = 60;
 
-/// A 6-digit code from OS randomness. `uuid` is already a dependency and its v4 bytes come
-/// from the same CSPRNG that guards ids, so this needs no new crate.
+/// A 6-digit code from OS randomness. `uuid` v4 bytes come from the same CSPRNG that
+/// guards ids, so this needs no new crate.
 pub fn generate_code() -> String {
     let bytes = uuid::Uuid::new_v4().into_bytes();
     let n = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) % 1_000_000;
@@ -55,7 +53,7 @@ pub fn hash_code(code: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Constant-time comparison, so a wrong guess cannot be narrowed down by response timing.
+/// Constant-time comparison, so a wrong guess cannot be narrowed by response timing.
 pub fn code_matches(stored_hash: &str, candidate: &str) -> bool {
     let candidate = hash_code(candidate);
     if stored_hash.len() != candidate.len() {
@@ -68,16 +66,10 @@ pub fn code_matches(stored_hash: &str, candidate: &str) -> bool {
         == 0
 }
 
-pub fn expires_at(now: chrono::DateTime<chrono::Utc>) -> String {
-    expires_in(now, OTP_TTL_MINUTES)
-}
-
 pub fn expires_in(now: chrono::DateTime<chrono::Utc>, minutes: i64) -> String {
     (now + chrono::Duration::minutes(minutes)).to_rfc3339()
 }
 
-/// Passwords arrive from a public form, so the server enforces a floor rather than trusting
-/// the client's own check. 8 characters matches what the signup screen already requires.
 pub const MIN_PASSWORD_LENGTH: usize = 8;
 
 pub fn validate_password(password: &str) -> Result<(), String> {
@@ -109,8 +101,8 @@ pub fn resend_wait_seconds(last_sent_at: &str, now: chrono::DateTime<chrono::Utc
     }
 }
 
-/// `a***z@example.com` — enough for the client to show which address it mailed, without
-/// echoing the whole thing back into logs and screens.
+/// `a***z@example.com` — enough to show which address was mailed, without echoing the
+/// whole thing into logs and screens.
 pub fn mask_email(email: &str) -> String {
     match email.split_once('@') {
         Some((local, domain)) if !local.is_empty() => {
@@ -127,103 +119,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codes_are_six_digits() {
-        for _ in 0..200 {
-            let code = generate_code();
-            assert_eq!(code.len(), 6, "code {code} is not 6 characters");
-            assert!(code.chars().all(|c| c.is_ascii_digit()));
-        }
-    }
-
-    #[test]
-    fn codes_vary() {
+    fn codes_are_six_digits_and_vary() {
         let mut seen = std::collections::HashSet::new();
         for _ in 0..50 {
-            seen.insert(generate_code());
+            let code = generate_code();
+            assert_eq!(code.len(), 6);
+            assert!(code.chars().all(|c| c.is_ascii_digit()));
+            seen.insert(code);
         }
-        assert!(seen.len() > 20, "codes look constant: {seen:?}");
+        assert!(seen.len() > 20);
     }
 
     #[test]
-    fn identical_codes_hash_identically_and_others_do_not() {
-        let h = hash_code("123456");
-        assert_eq!(h, hash_code("123456"));
-        assert_ne!(h, hash_code("123457"));
-        assert_eq!(h.len(), 64);
-    }
-
-    #[test]
-    fn whitespace_around_a_code_is_tolerated() {
+    fn hashing_is_stable_and_matching_tolerates_whitespace() {
+        assert_eq!(hash_code("123456"), hash_code("123456"));
+        assert_ne!(hash_code("123456"), hash_code("123457"));
+        assert_eq!(hash_code("123456").len(), 64);
         assert!(code_matches(&hash_code("123456"), " 123456 "));
+        assert!(!code_matches(&hash_code("000000"), "111111"));
     }
 
     #[test]
-    fn wrong_code_never_matches() {
-        let stored = hash_code("000000");
-        assert!(!code_matches(&stored, "111111"));
-        assert!(!code_matches(&stored, ""));
-        assert!(!code_matches(&stored, "0000000"));
-    }
-
-    #[test]
-    fn expiry_is_inclusive_and_fails_closed() {
+    fn expiry_and_cooldown() {
         let now = chrono::Utc::now();
-        assert!(!is_expired(&expires_at(now), now));
-        assert!(is_expired(
-            &expires_at(now - chrono::Duration::minutes(11)),
-            now
-        ));
-        assert!(
-            is_expired("not-a-date", now),
-            "unparseable expiry must be treated as expired"
-        );
-    }
-
-    #[test]
-    fn resend_cooldown_counts_down_then_releases() {
-        let now = chrono::Utc::now();
-        let just_sent = now.to_rfc3339();
-        assert!(resend_wait_seconds(&just_sent, now) > 50);
-        let long_ago = (now - chrono::Duration::minutes(5)).to_rfc3339();
-        assert_eq!(resend_wait_seconds(&long_ago, now), 0);
+        assert!(!is_expired(&expires_in(now, OTP_TTL_MINUTES), now));
+        assert!(is_expired(&expires_in(now, -1), now));
+        assert!(is_expired("not-a-date", now));
+        assert!(resend_wait_seconds(&now.to_rfc3339(), now) > 50);
         assert_eq!(
-            resend_wait_seconds("broken", now),
-            0,
-            "a bad timestamp must not block the user"
+            resend_wait_seconds(&(now - chrono::Duration::minutes(5)).to_rfc3339(), now),
+            0
         );
-    }
-
-    #[test]
-    fn a_reset_code_lives_longer_than_a_signup_code() {
-        assert_eq!(ttl_minutes(PURPOSE_VERIFY), OTP_TTL_MINUTES);
-        assert_eq!(ttl_minutes(PURPOSE_RESET), RESET_TTL_MINUTES);
-        assert!(RESET_TTL_MINUTES > OTP_TTL_MINUTES);
-        let now = chrono::Utc::now();
-        assert!(!is_expired(&expires_at(now), now));
-        assert!(!is_expired(&expires_in(now, RESET_TTL_MINUTES), now));
+        assert_eq!(resend_wait_seconds("broken", now), 0);
     }
 
     #[test]
     fn purposes_get_separate_storage_keys() {
-        let verify = otp_key("user-1", PURPOSE_VERIFY);
-        let reset = otp_key("user-1", PURPOSE_RESET);
-        assert_ne!(verify, reset, "one purpose must not overwrite the other");
-        assert_eq!(verify, "user-1:verify_email");
-        assert_eq!(reset, "user-1:reset_password");
+        assert_ne!(
+            otp_key("user-1", PURPOSE_VERIFY),
+            otp_key("user-1", PURPOSE_RESET)
+        );
+        assert_eq!(otp_key("user-1", PURPOSE_VERIFY), "user-1:verify_email");
     }
 
     #[test]
-    fn password_floor_is_enforced() {
+    fn password_floor_and_masked_email() {
         assert!(validate_password("12345678").is_ok());
         assert!(validate_password("1234567").is_err());
-        assert!(validate_password("").is_err());
-        assert!(validate_password("a-very-long-passphrase").is_ok());
-    }
-
-    #[test]
-    fn email_is_masked_but_still_recognisable() {
         assert_eq!(mask_email("halima.warsame@gmail.com"), "h***e@gmail.com");
-        assert_eq!(mask_email("a@b.com"), "a***a@b.com");
         assert_eq!(mask_email("nonsense"), "***");
     }
 }

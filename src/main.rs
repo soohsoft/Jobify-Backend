@@ -1,20 +1,15 @@
 mod auth;
-// Ingest validation uses `Category::from_slug`; the group/label accessors are
-// for the job-metadata endpoint and job matching still to come.
-#[allow(dead_code)]
+// The taxonomy is the wire + database contract for `category`; the group/label accessors
+// exist for clients that render the list.
 mod categories;
 mod config;
 mod db;
 mod error;
-mod llm;
 mod mail;
-mod memory;
 mod middleware;
 mod models;
 mod otp;
-mod prompts;
 mod routes;
-pub(crate) mod services;
 mod state;
 mod util;
 
@@ -30,13 +25,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::config::Config::from_env();
     let db = crate::db::connect(&config).await?;
     let state = crate::state::AppState::new(db, config.clone());
+    let mail_live = state.mailer.is_live();
 
     let routes = crate::routes::app(state);
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("jobify-backend listening on {addr}");
-    axum::serve(listener, routes).await?;
+    tracing::info!(addr = %addr, mail_live, "jobify-backend listening");
+    axum::serve(listener, routes)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutting down");
 }

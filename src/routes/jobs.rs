@@ -16,9 +16,10 @@ use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::models::{AlertPrefs, JobDoc, JobInput, MatchProfile, NotificationDoc};
 use crate::state::AppState;
-use crate::util::{nairobi_days_ago, nairobi_today, now_iso, uuid_id};
+use crate::util::{escape_regex, nairobi_days_ago, nairobi_today, now_iso, uuid_id};
 
-use super::{ApiResult, common::paginate};
+use super::ApiResult;
+use super::common::{paginate, total_pages};
 
 pub fn public_router() -> Router<AppState> {
     Router::new()
@@ -43,19 +44,18 @@ pub fn protected_router() -> Router<AppState> {
 /// falling back to `created_at` when the board never showed a posting date.
 pub const UNDATED_JOB_LIFETIME_DAYS: i64 = 14;
 
-/// The single definition of "live" for the feed and the matcher, so the two can never
+/// The single definition of "live" for the feed AND the matcher, so the two can never
 /// disagree about what a user is allowed to see.
 ///
 /// A job is live when:
 ///   - it has a closing date that has not passed, or
-///   - it has no closing date and was posted within 14 days — or, when no posting date
-///     is known, was first recorded within 14 days.
+///   - it has no closing date and was posted within 14 days — or, when no posting date is
+///     known, was first recorded within 14 days.
 ///
-/// This is a VISIBILITY rule and nothing more. It deliberately does not write or
-/// derive a closing date: an undated job keeps `deadline: null` in every response, so
-/// no client can render a deadline the board never published. Do not turn
-/// `UNDATED_JOB_LIFETIME_DAYS` into a synthetic deadline — that is exactly the sort of
-/// thing that misleads a user into thinking an application window exists.
+/// This is a VISIBILITY rule and nothing more. It deliberately does not write or derive a
+/// closing date: an undated job keeps `deadline: null` in every response, so no client can
+/// render a deadline the board never published. Do not turn `UNDATED_JOB_LIFETIME_DAYS`
+/// into a synthetic deadline.
 pub fn live_job_filter() -> Document {
     let today = nairobi_today();
     let cutoff = nairobi_days_ago(UNDATED_JOB_LIFETIME_DAYS);
@@ -71,6 +71,10 @@ pub fn live_job_filter() -> Document {
 
 #[derive(Deserialize)]
 pub struct JobsQuery {
+    /// `q` is the documented search parameter; `search` is accepted as the same thing so
+    /// an older client keeps working.
+    #[serde(default)]
+    q: Option<String>,
     #[serde(default)]
     search: Option<String>,
     #[serde(default)]
@@ -88,6 +92,7 @@ pub struct JobsQuery {
 fn default_page() -> u64 {
     1
 }
+
 fn default_limit() -> u64 {
     20
 }
@@ -101,9 +106,9 @@ async fn list(
 
     if location.is_none()
         && let Some(Extension(user)) = extension
-        && let Some(doc) = state.users().find_one(doc! { "_id": &user.id }).await?
+        && let Some(user_doc) = state.users().find_one(doc! { "_id": &user.id }).await?
     {
-        location = doc.location.filter(|s| !s.trim().is_empty());
+        location = user_doc.location.filter(|s| !s.trim().is_empty());
     }
 
     let mut filter = doc! {};
@@ -125,7 +130,7 @@ async fn list(
             doc! { "$regex": escape_regex(&category), "$options": "i" },
         );
     }
-    if let Some(search) = query.search.filter(|s| !s.trim().is_empty()) {
+    if let Some(search) = query.q.or(query.search).filter(|s| !s.trim().is_empty()) {
         let pattern = doc! { "$regex": escape_regex(&search), "$options": "i" };
         filter.insert(
             "$or",
@@ -137,12 +142,11 @@ async fn list(
         );
     }
 
-    // What counts as live (see `live_job_filter`).
-    let deadline_filter = live_job_filter();
+    let live = live_job_filter();
     let filter = if filter.is_empty() {
-        deadline_filter
+        live
     } else {
-        doc! { "$and": [filter, deadline_filter] }
+        doc! { "$and": [filter, live] }
     };
 
     let page = query.page.max(1);
@@ -152,20 +156,23 @@ async fn list(
         filter,
         page,
         limit,
-        // Secondary sort on _id keeps pagination stable when many jobs share
-        // the same created_at second (batch ingest), instead of leaking or
-        // repeating rows across pages.
+        // Secondary sort on _id keeps pagination stable when many jobs share the same
+        // created_at second (batch ingest), instead of repeating or skipping rows.
         doc! { "created_at": -1, "_id": -1 },
     )
     .await?;
 
-    let total_pages = (total as f64 / limit as f64).ceil() as u64;
     Ok((
         StatusCode::OK,
         Json(json!({
             "status": "success",
             "data": data,
-            "meta": { "page": page, "limit": limit, "total": total, "totalPages": total_pages }
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "totalPages": total_pages(total, limit)
+            }
         })),
     ))
 }
@@ -197,11 +204,10 @@ fn default_saved_limit() -> u64 {
 
 /// The user's saved jobs, newest save first.
 ///
-/// Deliberately NOT filtered by the live-job rule. That rule exists so nobody is
-/// shown a job that closed weeks ago while browsing; a job the user chose to keep
-/// is theirs, and dropping it from their own list is silent data loss — the one
-/// failure mode worse than showing an old listing. Each job carries its own
-/// `deadline` untouched (never derived), so a client can mark one that has closed.
+/// Deliberately NOT filtered by the live-job rule. That rule exists so nobody is shown a
+/// job that closed weeks ago while browsing; a job the user chose to keep is theirs, and
+/// dropping it from their own list is silent data loss. Each job carries its own `deadline`
+/// untouched, so a client can mark one that has closed.
 async fn list_saved(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
@@ -219,14 +225,16 @@ async fn list_saved(
     .await?;
 
     let ids: Vec<String> = rows.iter().map(|row| row.job_id.clone()).collect();
-    let mut cursor = state.jobs().find(doc! { "_id": { "$in": &ids } }).await?;
     let mut by_id: HashMap<String, JobDoc> = HashMap::new();
-    while let Some(job) = cursor.try_next().await? {
-        by_id.insert(job.id.clone(), job);
+    if !ids.is_empty() {
+        let mut cursor = state.jobs().find(doc! { "_id": { "$in": &ids } }).await?;
+        while let Some(job) = cursor.try_next().await? {
+            by_id.insert(job.id.clone(), job);
+        }
     }
 
-    // Walk the save order, not the job order: `$in` returns jobs in index order,
-    // which would quietly undo the newest-first sort the page just made.
+    // Walk the save order, not the job order: `$in` returns jobs in index order, which
+    // would quietly undo the newest-first sort the page just made.
     let data: Vec<Value> = rows
         .iter()
         .filter_map(|row| {
@@ -236,26 +244,30 @@ async fn list_saved(
         })
         .collect();
 
-    let total_pages = (total as f64 / limit as f64).ceil() as u64;
     Ok((
         StatusCode::OK,
         Json(json!({
             "status": "success",
             "data": data,
-            "meta": { "page": page, "limit": limit, "total": total, "totalPages": total_pages }
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "totalPages": total_pages(total, limit)
+            }
         })),
     ))
 }
 
-/// Save a job. Idempotent: saving twice is one save, and the response says which
-/// of the two happened so a client can report it honestly.
+/// Save a job. Idempotent: saving twice is one save, and the response says which of the
+/// two happened so a client can report it honestly.
 async fn save_job(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    // A save of something that does not exist is a client bug, not an empty list
-    // to be discovered later from a saved row pointing at nothing.
+    // A save of something that does not exist is a client bug, not an empty list to be
+    // discovered later from a saved row pointing at nothing.
     if state.jobs().find_one(doc! { "_id": &id }).await?.is_none() {
         return Err(AppError::NotFound("Job not found".to_string()));
     }
@@ -283,8 +295,8 @@ async fn save_job(
     ))
 }
 
-/// Remove a saved job. Also idempotent: removing something already gone succeeds,
-/// because the caller's intent ("this should not be saved") is satisfied either way.
+/// Remove a saved job. Also idempotent: removing something already gone succeeds, because
+/// the caller's intent ("this should not be saved") is satisfied either way.
 async fn unsave_job(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
@@ -347,8 +359,8 @@ async fn ingest_jobs(
             continue;
         }
 
-        // A category the taxonomy doesn't know is dropped, not guessed at. The
-        // job itself is still good, so this is a warning rather than a failure.
+        // A category the taxonomy doesn't know is dropped, not guessed at. The job itself
+        // is still good, so this is a warning rather than a failure.
         if let Some(raw) = input
             .category
             .as_deref()
@@ -365,19 +377,15 @@ async fn ingest_jobs(
         }
 
         let now = now_iso();
-        let id = uuid_id();
-        let set_on_insert = doc! {
-            "_id": &id,
-            "created_at": &now,
-        };
+        let set_on_insert = doc! { "_id": uuid_id(), "created_at": &now };
 
-        // Only overwrite fields the payload actually carries. The scraper is not
-        // guaranteed to send everything every cycle — enrichment can be disabled,
-        // a detail page can fail, a board can stop exposing a field — and a full
-        // `$set` would blank whatever an earlier, richer run had stored. Keys the
-        // payload always provides (identity, title, url) stay unconditional; the
-        // tradeoff is that an empty value can no longer clear a stored one.
-        let mut set = mongodb::bson::Document::new();
+        // Only overwrite fields the payload actually carries. The scraper is not guaranteed
+        // to send everything every cycle — enrichment can be disabled, a detail page can
+        // fail, a board can stop exposing a field — and a full `$set` would blank whatever
+        // an earlier, richer run had stored. Keys the payload always provides (identity,
+        // title, url) stay unconditional; the tradeoff is that an empty value can no longer
+        // clear a stored one.
+        let mut set = Document::new();
         set.insert("external_id", &input.external_id);
         set.insert("source", &input.source);
         set.insert("title", &input.title);
@@ -416,8 +424,8 @@ async fn ingest_jobs(
         {
             set.insert("organization_image_url", value);
         }
-        // An absent, blank, or unrecognized slug is skipped rather than written,
-        // so a junk value cannot blank a category a previous run got right.
+        // An absent, blank, or unrecognized slug is skipped rather than written, so a junk
+        // value cannot blank a category a previous run got right.
         if let Some(canonical) = canonical_category(&input.category) {
             set.insert("category", canonical);
         }
@@ -438,10 +446,7 @@ async fn ingest_jobs(
             set.insert("qualifications", &input.qualifications);
         }
 
-        let update = doc! {
-            "$set": set,
-            "$setOnInsert": set_on_insert,
-        };
+        let update = doc! { "$set": set, "$setOnInsert": set_on_insert };
 
         match state
             .jobs()
@@ -453,7 +458,15 @@ async fn ingest_jobs(
             .await
         {
             Ok(_) => persisted += 1,
-            Err(_) => failed += 1,
+            Err(err) => {
+                tracing::warn!(
+                    source = %input.source,
+                    external_id = %input.external_id,
+                    error = %err,
+                    "ingest: job could not be persisted"
+                );
+                failed += 1;
+            }
         }
     }
 
@@ -466,9 +479,9 @@ async fn ingest_jobs(
     ))
 }
 
-/// Only canonical taxonomy slugs are stored (`src/categories.rs`). Anything
-/// else — a board's free text, a mis-cased or hallucinated slug from the
-/// scraper's LLM — becomes null instead of polluting `GET /jobs?category=`.
+/// Only canonical taxonomy slugs are stored (`src/categories.rs`). Anything else — a
+/// board's free text, a mis-cased or hallucinated slug — becomes null instead of polluting
+/// `GET /jobs?category=`.
 fn canonical_category(raw: &Option<String>) -> Option<&'static str> {
     let slug = raw.as_deref()?.trim();
     crate::categories::Category::from_slug(slug).map(|category| category.slug())
@@ -478,9 +491,8 @@ fn canonical_category(raw: &Option<String>) -> Option<&'static str> {
 pub struct MatchQuery {
     #[serde(default = "default_match_limit")]
     limit: u64,
-    /// When true, also queue notifications for what is returned (the automated
-    /// path). The manual path leaves it false, so asking twice for "my jobs"
-    /// never consumes alert state.
+    /// When true, also queue notifications for what is returned (the automated path). The
+    /// manual path leaves it false, so asking twice for "my jobs" never consumes alert state.
     #[serde(default)]
     record: bool,
 }
@@ -489,9 +501,9 @@ fn default_match_limit() -> u64 {
     5
 }
 
-// Weighted toward what actually predicts fit. The category is the gate and is
-// already applied by the query filter, so it is scored as a constant; location
-// is the strongest remaining signal and keywords break ties.
+/// Weighted toward what actually predicts fit. The category is the gate and is already
+/// applied by the query filter, so it is scored as a constant; location is the strongest
+/// remaining signal and keywords break ties.
 fn score_job(job: &JobDoc, profile: &MatchProfile) -> f64 {
     let mut score = 3.0;
 
@@ -536,8 +548,8 @@ async fn match_jobs(
         .and_then(|doc| doc.alerts.clone())
         .unwrap_or_default();
 
-    // No profile (or no categories yet) is a normal state on the way in, not an
-    // error: the caller branches on `reason` instead of parsing a failure.
+    // No profile (or no categories yet) is a normal state on the way in, not an error: the
+    // caller branches on `reason` instead of parsing a failure.
     let Some(profile) = profile.filter(|p| !p.categories.is_empty()) else {
         return Ok((
             StatusCode::OK,
@@ -549,8 +561,8 @@ async fn match_jobs(
         ));
     };
 
-    // Already-queued jobs are excluded only on the automated path. The manual list
-    // is a live view and keeps showing what the user has already seen.
+    // Already-queued jobs are excluded only on the automated path. The manual list is a
+    // live view and keeps showing what the user has already seen.
     let exclude = if query.record {
         queued_job_ids(&state, &user.id).await?
     } else {
@@ -603,9 +615,9 @@ async fn queued_job_ids(state: &AppState, user_id: &str) -> Result<Vec<String>, 
 /// Candidates for a profile, scored and sorted.
 ///
 /// The single place that decides what is eligible: the live-job rule, the profile's
-/// categories, the user's own rejections, and what has already been queued. The feed
-/// and the automated alert path both come through here, so they cannot disagree.
-pub(crate) async fn ranked_candidates(
+/// categories, the user's own rejections, and what has already been queued. The feed and
+/// the automated alert path both come through here, so they cannot disagree.
+async fn ranked_candidates(
     state: &AppState,
     profile: &MatchProfile,
     exclusions: &AlertPrefs,
@@ -615,8 +627,8 @@ pub(crate) async fn ranked_candidates(
     let mut filter = live_job_filter();
 
     let mut categories = doc! { "$in": &profile.categories };
-    // A rejected category is applied to the query rather than filtered after
-    // scoring, so it cannot occupy one of the returned slots.
+    // A rejected category is applied to the query rather than filtered after scoring, so
+    // it cannot occupy one of the returned slots.
     if !exclusions.excluded_categories.is_empty() {
         categories.insert("$nin", &exclusions.excluded_categories);
     }
@@ -647,7 +659,7 @@ pub(crate) async fn ranked_candidates(
         scored.push((score_job(&job, profile), job));
     }
 
-    // Recency, then id, as the tie-breakers so paging is stable.
+    // Recency, then id, as tie-breakers so paging is stable.
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -692,8 +704,8 @@ async fn queue_notifications(
     Ok(queued)
 }
 
-/// The automated path for one user, with no HTTP caller — the alert refresh runs this
-/// per subscriber. Returns how many notifications were newly queued.
+/// The automated path for one user, with no HTTP caller — the alert refresh runs this per
+/// subscriber. Returns how many notifications were newly queued.
 pub async fn queue_matches_for_user(
     state: &AppState,
     user_id: &str,
@@ -716,20 +728,6 @@ pub async fn queue_matches_for_user(
     queue_notifications(state, user_id, &scored).await
 }
 
-fn escape_regex(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() * 2);
-    for c in value.chars() {
-        if ".^$*+?()[]{}|\\".contains(c) {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
-}
-
-#[allow(dead_code)]
-fn _unused_json(_: Value) {}
-
 #[cfg(test)]
 mod tests {
     use super::canonical_category;
@@ -739,56 +737,31 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_known_slug() {
+    fn accepts_a_known_slug_after_trimming() {
         assert_eq!(canonical_category(&raw("ict")), Some("ict"));
-    }
-
-    #[test]
-    fn trims_surrounding_whitespace() {
         assert_eq!(
             canonical_category(&raw("  environment_and_climate  ")),
             Some("environment_and_climate")
         );
-        // The humanitarian WASH category is its own thing now.
         assert_eq!(canonical_category(&raw("wash")), Some("wash"));
-        // A slug from the pre-broad taxonomy must NOT resolve, or a stale value would be
-        // absorbed into whichever category happens to be nearby.
-        assert_eq!(
-            canonical_category(&raw("public_health_and_healthcare_management")),
-            None
-        );
     }
 
     #[test]
-    fn rejects_unknown_and_free_text() {
+    fn rejects_unknown_free_text_and_blank() {
         assert_eq!(canonical_category(&raw("totally_made_up_slug")), None);
         assert_eq!(canonical_category(&raw("Computer Technology")), None);
-        assert_eq!(canonical_category(&raw("IT & Networking")), None);
-    }
-
-    #[test]
-    fn rejects_absent_and_blank() {
+        assert_eq!(
+            canonical_category(&raw("Water, Sanitation & Hygiene")),
+            None
+        );
         assert_eq!(canonical_category(&None), None);
         assert_eq!(canonical_category(&raw("")), None);
         assert_eq!(canonical_category(&raw("   ")), None);
     }
 
-    #[test]
-    fn slugs_are_strictly_lowercase() {
-        // A label is not a slug, even when it reads like one — only the snake_case value passes.
-        assert_eq!(
-            canonical_category(&raw("Water, Sanitation & Hygiene")),
-            None
-        );
-        assert_eq!(
-            canonical_category(&raw("Humanitarian Aid and Emergency Relief")),
-            None
-        );
-    }
-
-    // The visibility rule is the one thing standing between a user and a job that
-    // closed weeks ago, so it is tested against a real collection rather than by
-    // re-stating the filter in Rust.
+    // The visibility rule is the one thing standing between a user and a job that closed
+    // weeks ago, so it is tested against a real collection rather than by re-stating the
+    // filter in Rust. Uses its own throwaway database; the live one is never touched.
     #[tokio::test]
     async fn live_filter_keeps_open_jobs_and_expires_undated_ones_after_fourteen_days() {
         use super::{UNDATED_JOB_LIFETIME_DAYS, live_job_filter};
@@ -796,10 +769,12 @@ mod tests {
         use futures_util::TryStreamExt;
         use mongodb::bson::doc;
 
-        let config = crate::config::Config::from_env();
-        let client = mongodb::Client::with_uri_str(&config.mongodb_uri)
-            .await
-            .expect("failed to connect to test MongoDB");
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return;
+        };
         let db = client.database("jobify_test_live_filter");
         let _ = db.drop().await;
         let jobs = db.collection::<mongodb::bson::Document>("jobs");
@@ -832,15 +807,15 @@ mod tests {
             ),
         ];
         for (title, extra) in &cases {
-            let mut doc = doc! { "_id": *title, "title": *title };
-            doc.extend(extra.clone());
-            jobs.insert_one(&doc).await.unwrap();
+            let mut document = doc! { "_id": *title, "title": *title };
+            document.extend(extra.clone());
+            jobs.insert_one(&document).await.unwrap();
         }
 
         let mut cursor = jobs.find(live_job_filter()).await.unwrap();
         let mut live: Vec<String> = Vec::new();
-        while let Some(doc) = cursor.try_next().await.unwrap() {
-            live.push(doc.get_str("title").unwrap().to_string());
+        while let Some(document) = cursor.try_next().await.unwrap() {
+            live.push(document.get_str("title").unwrap().to_string());
         }
         live.sort();
 
@@ -853,5 +828,7 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(live, expected);
+
+        let _ = db.drop().await;
     }
 }

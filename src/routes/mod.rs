@@ -7,14 +7,10 @@ use crate::state::AppState;
 
 mod alerts;
 mod auth;
-mod chats;
 mod common;
-mod credits;
 mod health;
 mod jobs;
 mod notifications;
-mod payments;
-mod resumes;
 
 pub type ApiResult =
     Result<(axum::http::StatusCode, axum::Json<serde_json::Value>), crate::error::AppError>;
@@ -25,25 +21,21 @@ pub fn app(state: AppState) -> Router {
     let public = Router::new()
         .merge(health::router())
         .merge(auth::public_router())
+        // Optional auth on the feed so a signed-in caller can have their profile location
+        // applied, while the same routes stay public for everyone else.
         .merge(
             jobs::public_router().route_layer(axum_middleware::from_fn_with_state(
                 state.clone(),
                 middleware::optional_auth,
             )),
-        )
-        .merge(resumes::public_router())
-        .merge(payments::public_router());
+        );
 
     let protected = Router::new()
         .merge(auth::verification_router())
         .merge(auth::protected_router())
-        .merge(chats::router())
-        .merge(resumes::protected_router())
-        .merge(credits::router())
-        .merge(payments::protected_router())
-        .merge(notifications::router())
         .merge(jobs::protected_router())
         .merge(alerts::protected_router())
+        .merge(notifications::router())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_auth,

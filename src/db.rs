@@ -1,28 +1,21 @@
-use mongodb::{Client, Database, IndexModel, bson::doc, options::IndexOptions};
+use mongodb::bson::doc;
+use mongodb::options::IndexOptions;
+use mongodb::{Client, Database, IndexModel};
 
 use crate::config::Config;
-use crate::models::default_job_sources;
 
 pub async fn connect(config: &Config) -> mongodb::error::Result<Database> {
     let client = Client::with_uri_str(&config.mongodb_uri).await?;
     let db = client.database(&config.database_name);
-    seed_default_sources(&db).await?;
     ensure_indexes(&db).await?;
     Ok(db)
 }
 
-async fn seed_default_sources(db: &Database) -> mongodb::error::Result<()> {
-    let sources = db.collection::<crate::models::SourceConfig>("sources");
-    let count = sources.count_documents(doc! {}).await?;
-    if count == 0 {
-        sources.insert_many(default_job_sources()).await?;
-    }
-    Ok(())
-}
-
+/// Indexes only. No seeding: `sources` already holds the four configured boards and the
+/// live collection must not be touched at startup.
 async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     // Prevent duplicate registrations racing the find-then-insert in auth.
-    db.collection::<crate::models::UserDoc>("users")
+    db.collection::<mongodb::bson::Document>("users")
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "email": 1 })
@@ -31,26 +24,9 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
-    // One account per external identity. Partial, because password accounts
-    // carry no external_id and would otherwise all be the same null key.
-    db.collection::<crate::models::UserDoc>("users")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "provider": 1, "external_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "external_id": { "$exists": true } })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
-
-    // One row per (user, job). The unique index is what makes saving idempotent
-    // by construction: the second save upserts onto the same row instead of
-    // stacking a duplicate, so no client has to check first.
-    db.collection::<crate::models::SavedJobDoc>("saved_jobs")
+    // One saved row per (user, job). The unique index is what makes saving idempotent by
+    // construction: a second save upserts onto the same row instead of stacking a copy.
+    db.collection::<mongodb::bson::Document>("saved_jobs")
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "user_id": 1, "job_id": 1 })
@@ -60,7 +36,7 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         .await?;
 
     // The saved list is always read newest-first for one user.
-    db.collection::<crate::models::SavedJobDoc>("saved_jobs")
+    db.collection::<mongodb::bson::Document>("saved_jobs")
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "user_id": 1, "created_at": -1 })
@@ -69,7 +45,7 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         .await?;
 
     // Matches the ingest upsert filter, so job upserts stay idempotent per source.
-    db.collection::<crate::models::JobDoc>("jobs")
+    db.collection::<mongodb::bson::Document>("jobs")
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "external_id": 1, "source": 1 })
@@ -78,9 +54,18 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
-    // One notification per (user, job). Partial, so the payment notifications
-    // that carry no job_id are not all treated as the same null key.
-    db.collection::<crate::models::NotificationDoc>("notifications")
+    // The feed and the matcher both order by recency and filter by category.
+    db.collection::<mongodb::bson::Document>("jobs")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "category": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    // One notification per (user, job). Partial, so notifications carrying no job_id are
+    // not all treated as the same null key.
+    db.collection::<mongodb::bson::Document>("notifications")
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "user_id": 1, "job_id": 1 })
@@ -90,15 +75,6 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                         .partial_filter_expression(doc! { "job_id": { "$exists": true } })
                         .build(),
                 )
-                .build(),
-        )
-        .await?;
-
-    // The matcher filters candidates by category and orders by recency.
-    db.collection::<crate::models::JobDoc>("jobs")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "category": 1, "created_at": -1 })
                 .build(),
         )
         .await?;

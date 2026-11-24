@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  DEFAULT_MATCH_THRESHOLD,
   MAX_DIGEST_ROWS,
+  NO_MATCHES_SENTENCE,
   assistantFailureCopy,
-  belowThresholdCopy,
   capRows,
   deliveryRow,
   digestMessage,
@@ -15,6 +14,7 @@ import {
   helpText,
   jobLink,
   matchLabel,
+  noMatchesCopy,
   rowLine,
   sourceLink,
 } from '../src/format.js';
@@ -74,14 +74,18 @@ test('rows beyond the reply cap are counted, not silently dropped', () => {
   assert.ok(content.includes('_…and 3 more in the portal._'));
 });
 
-test('an empty result is answered with the backend sentence alone', () => {
+test('an empty result is answered with the product sentence, never the internal phrasing', () => {
   const answer: AssistantAnswer = {
     intent: 'search',
     reply: 'Nothing live matches that right now.',
     jobs: [],
     credits: { balance: 0, monthly_allowance: 30, used_this_period: 2, period_end: '', remaining_this_period: 28 },
   };
-  assert.equal(formatAssistantReply(answer, { appBaseUrl: APP }), 'Nothing live matches that right now.');
+  assert.equal(formatAssistantReply(answer, { appBaseUrl: APP }), NO_MATCHES_SENTENCE);
+
+  // Any other zero-row answer (a question about credits, say) is passed through untouched.
+  const other: AssistantAnswer = { ...answer, intent: 'help', reply: 'Run /credits to see what is left this period.' };
+  assert.equal(formatAssistantReply(other, { appBaseUrl: APP }), other.reply);
 });
 
 test('a row without a location or deadline says so instead of guessing', () => {
@@ -302,7 +306,7 @@ test('a delivery prefers the embedded job document and falls back to the notific
 });
 
 // ---------------------------------------------------------------------------
-// The match percentage and the below-threshold empty state
+// The per-row match percentage, and the empty state that keeps scoring internal
 // ---------------------------------------------------------------------------
 
 test('the percentage is rendered beside the title, from the backend number', () => {
@@ -343,14 +347,24 @@ test('the digest shows each job\'s percentage, carried on the queued notificatio
   assert.ok(!legacy.includes('% match'));
 });
 
-test('the below-threshold sentence names the cut-off and promises a message', () => {
-  assert.equal(
-    belowThresholdCopy(70),
-    'Nothing scores above 70% for you right now — I will message you when something does.',
-  );
-  // An absent threshold falls back to the documented default rather than saying "undefined".
-  assert.equal(belowThresholdCopy(undefined), belowThresholdCopy(DEFAULT_MATCH_THRESHOLD));
-  assert.ok(belowThresholdCopy(80).includes('80%'));
+test('the empty state is plain product language and never exposes the scoring', () => {
+  const sentence = "No jobs match your qualifications right now. We'll notify you when one is posted.";
+  assert.equal(noMatchesCopy(), sentence);
+  assert.equal(NO_MATCHES_SENTENCE, sentence);
+
+  // The matcher's bar is internal: no number, no percentage, no scoring vocabulary.
+  for (const banned of ['threshold', 'scores above', 'cut-off', '70%', 'score']) {
+    assert.ok(!sentence.toLowerCase().includes(banned), `the empty state mentions "${banned}"`);
+  }
+});
+
+test('the digest with nothing to send says the same sentence, never "0 new matches"', () => {
+  assert.equal(digestMessage([], { appBaseUrl: APP }), NO_MATCHES_SENTENCE);
+  // And a real digest still carries each row's percentage beside the title.
+  const row = rowInput({ matchScore: 87 });
+  const message = digestMessage([row], { appBaseUrl: APP });
+  assert.ok(message.includes('87% match'), message);
+  assert.ok(message.startsWith('**1 new match for you on Jobify**'), message);
 });
 
 test('help is at most ten lines', () => {

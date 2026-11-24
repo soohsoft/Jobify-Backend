@@ -29,9 +29,6 @@ export interface RowInput {
   matchScore?: number | null;
 }
 
-/** The cut-off every current backend applies; used only when `meta.threshold` is absent. */
-export const DEFAULT_MATCH_THRESHOLD = 70;
-
 /**
  * The backend's score as Discord text: `87% match`.
  *
@@ -45,17 +42,21 @@ export function matchLabel(score: number | null | undefined): string | null {
 }
 
 /**
- * The one sentence for "you have a profile, but nothing cleared the cut-off".
+ * The one empty state: "you have a profile, but nothing matches right now".
  *
- * This is the below_threshold empty state: the bot must not list weak rows and must not
- * pretend the member has no profile. Naming the number makes the promise checkable.
+ * The matcher's score and its cut-off are internal — a member is told what happens next, not
+ * how the ranking was computed. This single sentence is shared by `/jobs`, `/tenders`, the
+ * completion message, the assistant when it finds no rows and the digest, so the wording can
+ * never drift between surfaces.
  */
-export function belowThresholdCopy(threshold: number | null | undefined): string {
-  const cut =
-    typeof threshold === 'number' && Number.isFinite(threshold)
-      ? Math.round(threshold)
-      : DEFAULT_MATCH_THRESHOLD;
-  return `Nothing scores above ${cut}% for you right now — I will message you when something does.`;
+export const NO_MATCHES_SENTENCE =
+  "No jobs match your qualifications right now. We'll notify you when one is posted.";
+
+/** The backend's own "found nothing" line, mapped to the product sentence above. */
+const BACKEND_NOTHING_MATCHES = 'Nothing live matches that right now.';
+
+export function noMatchesCopy(): string {
+  return NO_MATCHES_SENTENCE;
 }
 
 export function truncate(text: string, max: number): string {
@@ -141,7 +142,11 @@ export function formatAssistantReply(
 ): string {
   const reply = answer.reply.trim();
   const maxRows = options.maxRows ?? MAX_REPLY_ROWS;
-  if (answer.jobs.length === 0) return reply;
+  // The assistant is told to say the backend's "nothing live" line when it found no rows.
+  // Users see the product sentence instead: whether a score existed is not their business.
+  if (answer.jobs.length === 0) {
+    return reply === BACKEND_NOTHING_MATCHES ? NO_MATCHES_SENTENCE : reply;
+  }
   const rows = formatRows(answer.jobs.map(jobRowToInput), {
     appBaseUrl: options.appBaseUrl,
     max: maxRows,
@@ -165,6 +170,8 @@ export function digestMessage(
 ): string {
   const max = options.max ?? MAX_DIGEST_ROWS;
   const { delivered, remaining } = capRows(rows, max);
+  // A digest with nothing to send says the product sentence, never "0 new matches".
+  if (delivered.length === 0) return NO_MATCHES_SENTENCE;
   const title = delivered.length === 1 ? '**1 new match for you on Jobify**' : `**${delivered.length} new matches for you on Jobify**`;
   const lines = [title, '', formatRows(delivered, { appBaseUrl: options.appBaseUrl, max })];
   const waiting = remaining + (options.extraWaiting ?? 0);

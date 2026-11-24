@@ -26,7 +26,7 @@ import {
 } from 'discord.js';
 
 import type { DiscordUser, EducationEntry, MatchRow } from './types.js';
-import { belowThresholdCopy, formatRows, MAX_DIGEST_ROWS } from './format.js';
+import { formatRows, MAX_DIGEST_ROWS, noMatchesCopy } from './format.js';
 
 /** Four steps: name, education, job history, done. */
 export const STEP_COUNT = 4;
@@ -387,10 +387,8 @@ export interface CompletionInput {
   /** Rows from `GET /internal/jobs/for-user/{discord_id}` — what the backend decided. */
   matches: MatchRow[];
   /** `meta.reason` of the same read: `below_threshold` means the list is empty because
-   *  nothing reached the cut-off, which is a different sentence from "nothing live". */
+   *  nothing matched closely enough, which is a different sentence from "nothing live". */
   matchReason?: string | null;
-  /** `meta.threshold`, so the sentence names the number the backend actually applied. */
-  matchThreshold?: number | null;
   digestTz: string;
   digestHour: number;
   appBaseUrl: string;
@@ -472,9 +470,9 @@ export function completionPrompt(input: CompletionInput): {
       ),
     );
   } else if (input.matchReason === 'below_threshold') {
-    // A profile exists and the matcher scored rows; none reached the bar. The cut-off is a
-    // promise, so the member is told the number rather than shown weak rows.
-    lines.push(belowThresholdCopy(input.matchThreshold));
+    // A profile exists and the matcher scored rows; none matched closely enough. The member is
+    // told the plain outcome — never the internal score or its cut-off — and shown no weak rows.
+    lines.push(noMatchesCopy());
   } else {
     lines.push(
       'Nothing live matches your answers this minute — I check again every day and will DM you the moment something does.',

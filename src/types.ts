@@ -77,18 +77,20 @@ export interface MatchRow {
 export interface MatchMeta {
   /**
    * `no_match_profile` is a normal state on the way into onboarding; `below_threshold` means
-   * there IS a profile but nothing scored at or above the cut-off — an honest empty list, and
-   * the only state the bot answers with the "nothing scores above N%" sentence rather than
-   * a list.
+   * there IS a profile but nothing matched closely enough — an honest empty list, answered
+   * with the plain product sentence rather than a list of weak rows.
    */
   reason: string;
   total: number;
   categories: string[];
   subcategories: string[];
   categorySource?: string;
-  /** The cut-off the backend applied. Absent on a backend that predates it (read as 70). */
+  /**
+   * The backend's internal cut-off. Reported by the contract but never shown to a member:
+   * the 0–100 fit on a row is displayed beside the title, the bar itself is not.
+   */
   threshold?: number;
-  /** Rows the matcher scored before the cut-off, so "0 of 4" can be said honestly. */
+  /** Rows the matcher scored, so a fuller empty state could say "none of N" — never shown. */
   considered?: number;
 }
 

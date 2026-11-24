@@ -25,6 +25,7 @@ import {
   namePrompt,
   positionPrompt,
 } from '../src/onboarding.js';
+import { NO_MATCHES_SENTENCE } from '../src/format.js';
 import type { DiscordUser, MatchRow } from '../src/types.js';
 
 /** The API component union includes SKU buttons, which have no custom_id. */
@@ -273,40 +274,38 @@ test('the completion message is honest when nothing matches or alerts are off', 
   assert.ok(!prompt.content.includes('I will watch for'), 'no role line when the backend decided nothing');
 });
 
-test('the completion message says the cut-off, not "nothing live", when every row is below it', () => {
-  // The backend scored the corpus and nothing reached 70: the profile is fine and rows exist,
-  // so "nothing live matches" would be false and a list of weak rows is exactly what the
-  // cut-off forbids.
+test('the completion message uses the plain empty state when every row is below the bar', () => {
+  // The backend scored the corpus and nothing matched closely enough: the profile is fine and
+  // rows exist, so "nothing live matches" would be false and a list of weak rows is exactly
+  // what the matcher forbids. The member gets the product sentence, never the score.
   const prompt = completionPrompt({
     user: user(),
     matches: [],
     matchReason: 'below_threshold',
-    matchThreshold: 70,
     digestTz: 'Africa/Nairobi',
     digestHour: 8,
     appBaseUrl: 'https://app.jobify.test',
   });
 
-  assert.ok(
-    prompt.content.includes('Nothing scores above 70% for you right now — I will message you when something does.'),
-    prompt.content,
-  );
+  assert.ok(prompt.content.includes(NO_MATCHES_SENTENCE), prompt.content);
+  for (const banned of ['threshold', 'scores above', 'cut-off', '70%']) {
+    assert.ok(!prompt.content.toLowerCase().includes(banned), `the completion message mentions "${banned}"`);
+  }
   assert.ok(!prompt.content.includes('Nothing live matches your answers this minute'));
   assert.ok(!prompt.content.includes('/jobs/job-'), 'no weak row is listed');
 });
 
-test('a completion read with no profile still says "nothing live", not the cut-off sentence', () => {
+test('a completion read with no profile still says "nothing live", not the empty state', () => {
   const prompt = completionPrompt({
     user: user(),
     matches: [],
     matchReason: 'no_match_profile',
-    matchThreshold: 70,
     digestTz: 'Africa/Nairobi',
     digestHour: 8,
     appBaseUrl: 'https://app.jobify.test',
   });
   assert.ok(prompt.content.includes('Nothing live matches your answers this minute'));
-  assert.ok(!prompt.content.includes('Nothing scores above'));
+  assert.ok(!prompt.content.includes(NO_MATCHES_SENTENCE));
 });
 
 test('the watching line names the derived role titles, and degrades rather than lying', () => {

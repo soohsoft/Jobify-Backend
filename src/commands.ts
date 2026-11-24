@@ -19,11 +19,11 @@ import {
 
 import type { BotContext } from './context.js';
 import {
-  belowThresholdCopy,
   formatAssistantReply,
   formatRows,
   helpText,
   MAX_BROWSE_ROWS,
+  noMatchesCopy,
   type RowInput,
 } from './format.js';
 import { BackendError } from './http.js';
@@ -120,11 +120,11 @@ async function browse(
 
   const noun = kind === 'tender' ? 'tenders' : 'jobs';
   if (rows.length === 0) {
-    // Below the cut-off is an ANSWER, not an empty corpus: the backend scored rows and none
-    // reached the bar. Saying "nothing live" here would be a lie and would invite a list of
-    // weak rows, which is exactly what the cut-off exists to prevent.
+    // Below the bar is an ANSWER, not an empty corpus: the backend scored rows and none
+    // matched closely enough. The member gets the product sentence — the scoring behind it
+    // stays internal — and weak rows are never listed to pad the reply.
     if (meta.reason === 'below_threshold') {
-      await interaction.editReply({ content: belowThresholdCopy(meta.threshold) });
+      await interaction.editReply({ content: noMatchesCopy() });
       return;
     }
     await interaction.editReply({

@@ -265,14 +265,12 @@ async function completeInterview(
 
     let matches: Awaited<ReturnType<BotContext['backend']['jobsForUser']>>['rows'] = [];
     let matchReason: string | null = null;
-    let matchThreshold: number | null = null;
     try {
       // The backend's own for-user read: it decided the categories and role titles, so the
       // first digest is exactly the list `/jobs` will show.
       const list = await ctx.backend.jobsForUser(discordId, { limit: MAX_DIGEST_ROWS });
       matches = list.rows;
       matchReason = list.meta.reason;
-      matchThreshold = list.meta.threshold ?? null;
     } catch (err) {
       // Setup itself succeeded; a failed match read must not turn a finished interview into
       // an error message. `/jobs` still works, and the digest will fill in later.
@@ -288,7 +286,6 @@ async function completeInterview(
         user: envelope.user,
         matches,
         matchReason,
-        matchThreshold,
         digestTz: ctx.digestTz,
         digestHour: ctx.digestHour,
         appBaseUrl: ctx.appBaseUrl,

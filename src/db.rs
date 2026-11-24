@@ -145,5 +145,21 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
+    // The smart-query ledger is read and decremented by `user_id` on every assistant call.
+    // Deliberately NOT unique: the nine legacy rows predate any index here, and a duplicate
+    // would then block startup. `credits::load_or_create` upserts on the same key.
+    db.collection::<mongodb::bson::Document>("credits")
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
+    // One row per answered smart query; always read per user, newest first.
+    db.collection::<mongodb::bson::Document>("assistant_usage")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "at": -1 })
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

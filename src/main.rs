@@ -1,11 +1,14 @@
+mod assistant;
 mod auth;
 // The taxonomy is the wire + database contract for `category`; the group/label accessors
 // exist for clients that render the list.
 mod categories;
 mod config;
+mod credits;
 mod db;
 mod error;
 mod links;
+mod llm;
 mod mail;
 mod middleware;
 mod models;
@@ -27,6 +30,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = crate::db::connect(&config).await?;
     let state = crate::state::AppState::new(db, config.clone());
     let mail_live = state.mailer.is_live();
+    // An unconfigured provider is a valid deployment state: every assistant call answers
+    // 502 and charges nothing. Say so at startup instead of discovering it per request.
+    tracing::info!(
+        llm_configured = config.llm_configured(),
+        llm_model = %config.llm_model,
+        "assistant provider"
+    );
 
     let routes = crate::routes::app(state);
 

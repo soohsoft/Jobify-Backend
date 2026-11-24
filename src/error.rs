@@ -13,8 +13,19 @@ pub enum AppError {
     Conflict(String),
     #[allow(dead_code)]
     Forbidden(String),
+    /// Response 402 — only ever means "the smart-query allowance and the paid balance are
+    /// both empty", never a subscription paywall.
+    ///
+    /// The code is `out_of_credits` so the bot can answer with the Buy Credits action
+    /// rather than parsing prose.
+    OutOfCredits(String),
     /// 429. A rate limit is its own answer: the caller did nothing wrong, they have to wait.
     TooManyRequests(String),
+    /// Response 502 — the LLM provider failed or timed out.
+    ///
+    /// Nothing was delivered and nothing was charged; the message is deliberately generic
+    /// because the upstream body may contain provider internals.
+    LlmUnavailable(String),
     Internal(String),
 }
 
@@ -26,7 +37,9 @@ impl AppError {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+            AppError::OutOfCredits(_) => StatusCode::PAYMENT_REQUIRED,
             AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            AppError::LlmUnavailable(_) => StatusCode::BAD_GATEWAY,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -38,7 +51,9 @@ impl AppError {
             | AppError::NotFound(m)
             | AppError::Conflict(m)
             | AppError::Forbidden(m)
+            | AppError::OutOfCredits(m)
             | AppError::TooManyRequests(m)
+            | AppError::LlmUnavailable(m)
             | AppError::Internal(m) => m,
         }
     }
@@ -50,7 +65,9 @@ impl AppError {
             AppError::NotFound(_) => "not_found",
             AppError::Conflict(_) => "conflict",
             AppError::Forbidden(_) => "forbidden",
+            AppError::OutOfCredits(_) => "out_of_credits",
             AppError::TooManyRequests(_) => "rate_limited",
+            AppError::LlmUnavailable(_) => "llm_unavailable",
             AppError::Internal(_) => "internal_error",
         }
     }

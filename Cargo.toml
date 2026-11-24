@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 axum = { version = "0.8", features = ["json", "macros", "query"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 mongodb = "3"
@@ -25,6 +25,9 @@ thiserror = "2"
 # Outbound email for signup / reset codes. rustls + webpki-roots keeps the binary off
 # OpenSSL; `builder`/`smtp-transport`/`tokio1` are the minimum for an async SMTP send.
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "ring", "smtp-transport", "tokio1", "tokio1-rustls", "webpki-roots"] }
+# Hand-rolled JSON call to the LLM provider — deliberately no OpenAI/async-openai SDK.
+# rustls + webpki-roots keeps the binary off OpenSSL; `json` is the only feature needed.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 strip = true

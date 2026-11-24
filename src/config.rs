@@ -14,6 +14,14 @@ pub struct Config {
     /// Where the web portal lives, with no trailing slash. `POST /internal/discord/link-token`
     /// builds `<APP_BASE_URL>/enter?t=<raw>` from it; the bot does not need to know the host.
     pub app_base_url: String,
+    /// OpenAI-compatible chat-completions base, e.g. `https://api.deepseek.com`. The
+    /// `LLM_*` names win; the historical `DEEPSEEK_*` ones are still read so an existing
+    /// `.env` keeps working.
+    pub llm_base_url: String,
+    pub llm_api_key: String,
+    pub llm_model: String,
+    /// Free smart queries per 30-day period, before the paid balance is touched.
+    pub monthly_smart_queries: i64,
 }
 
 impl Config {
@@ -36,10 +44,39 @@ impl Config {
             app_base_url: env_var("APP_BASE_URL", "http://localhost:5173")
                 .trim_end_matches('/')
                 .to_string(),
+            llm_base_url: env_var_first(&["LLM_BASE_URL", "DEEPSEEK_BASE_URL"], "")
+                .trim_end_matches('/')
+                .to_string(),
+            llm_api_key: env_var_first(&["LLM_API_KEY", "DEEPSEEK_API_KEY"], ""),
+            llm_model: env_var_first(&["LLM_MODEL", "DEEPSEEK_MODEL"], "deepseek-chat"),
+            monthly_smart_queries: env_var("SUBSCRIPTION_MONTHLY_SMART_QUERIES", "30")
+                .parse()
+                .unwrap_or(30)
+                .clamp(0, 1000),
         }
+    }
+
+    /// An empty key or base URL means every assistant call answers 502 rather than
+    /// silently trying to reach an unnamed host.
+    pub fn llm_configured(&self) -> bool {
+        !self.llm_api_key.trim().is_empty() && !self.llm_base_url.trim().is_empty()
     }
 }
 
 fn env_var(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// First variable that is set AND non-empty. An empty `LLM_API_KEY` line (the shape
+/// `.env.example` ships) must fall through to the historical name rather than count as
+/// a configured key.
+fn env_var_first(keys: &[&str], default: &str) -> String {
+    for key in keys {
+        if let Ok(value) = env::var(key)
+            && !value.trim().is_empty()
+        {
+            return value;
+        }
+    }
+    default.to_string()
 }

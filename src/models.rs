@@ -411,6 +411,90 @@ pub struct PaymentDoc {
 }
 
 // ---------------------------------------------------------------------------
+// Credits and the assistant
+// ---------------------------------------------------------------------------
+
+/// The smart-query ledger for one account.
+///
+/// Units are QUERIES, not tokens: a smart question costs one, and nobody has to reason
+/// about token pricing to understand their balance.
+///
+/// `_id` is deliberately NOT modelled. The nine legacy rows in the live collection have a
+/// string uuid as `_id`, but any row created by a raw `updateOne(..., upsert)` carries an
+/// ObjectId — and `CreditDoc.id: String` cannot deserialize a map. Every read and write
+/// here is keyed on `user_id`, which is the same on both shapes, and `$setOnInsert` still
+/// gives a new row a string id. The legacy `tokens` field is left untouched by every write.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CreditDoc {
+    #[serde(default)]
+    pub user_id: String,
+    /// Purchased queries that survive a period rollover.
+    #[serde(default)]
+    pub queries: i64,
+    /// Queries spent from this period's free allowance. Reset to zero when the 30-day
+    /// period ends; the paid balance is not touched by a rollover.
+    #[serde(default)]
+    pub allowance_used: i64,
+    #[serde(default)]
+    pub period_start: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_end: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// One row per answered smart query. A separate collection rather than the legacy
+/// `token_usage` shape: that one is a per-user-per-day token aggregate with `charged_usd`,
+/// and inventing a second meaning for its fields would make both unreadable. This row
+/// answers "what did this question cost, and in which bucket" and nothing else.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AssistantUsageDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    pub at: String,
+    /// `search`, `help` or `status`. `unsupported` is never charged, so it is not recorded
+    /// as usage.
+    pub intent: String,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub charged_queries: i64,
+    #[serde(default)]
+    pub outcome: String,
+}
+
+/// `POST /assistant/query`. The only input is what the member said; identity comes from
+/// the token, never from the body.
+#[derive(Deserialize)]
+pub struct AssistantQueryRequest {
+    pub message: String,
+}
+
+/// `POST /internal/assistant/query` — the bot's variant, since a Discord member has no
+/// bearer token.
+#[derive(Deserialize)]
+pub struct DiscordAssistantQueryRequest {
+    pub discord_id: String,
+    pub message: String,
+}
+
+/// `POST /credits/topup` (internal key only until WaafiPay is wired). Exactly one of
+/// `discord_id` / `user_id` identifies the account.
+#[derive(Deserialize)]
+pub struct CreditTopupRequest {
+    #[serde(default)]
+    pub discord_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    pub queries: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
 

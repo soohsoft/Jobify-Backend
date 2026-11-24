@@ -1,6 +1,7 @@
 use mongodb::Database;
 
 use crate::config::Config;
+use crate::llm::LlmClient;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -12,10 +13,23 @@ pub struct AppState {
     /// Coarse per-IP attempt limit for the public magic-link exchange. In memory on
     /// purpose: it guards one endpoint against guessing, and a token is single-use anyway.
     pub magic_limiter: std::sync::Arc<crate::links::RateLimiter>,
+    /// The provider call behind the assistant. A trait object so tests inject a stub and
+    /// never touch the network.
+    pub llm: std::sync::Arc<dyn LlmClient>,
+    /// 20 smart queries per user per 10 minutes. In memory for the same reason as the
+    /// magic-link limit: it is a spend guard, not an account policy, and a restart only
+    /// resets a window that already refills in ten minutes.
+    pub assistant_limiter: std::sync::Arc<crate::links::RateLimiter>,
 }
 
 impl AppState {
     pub fn new(db: Database, config: Config) -> Self {
+        let llm = std::sync::Arc::new(crate::llm::HttpLlmClient::from_config(&config));
+        Self::with_llm(db, config, llm)
+    }
+
+    /// The same state with an injected LLM client. Only tests use this.
+    pub fn with_llm(db: Database, config: Config, llm: std::sync::Arc<dyn LlmClient>) -> Self {
         let mailer = crate::mail::Mailer::new(crate::mail::MailConfig::from_env());
         // 15 attempts per 5 minutes per address. A person retrying a link never gets near
         // this; a script walking the space is stopped on its first minute.
@@ -23,11 +37,17 @@ impl AppState {
             std::time::Duration::from_secs(300),
             15,
         ));
+        let assistant_limiter = std::sync::Arc::new(crate::links::RateLimiter::new(
+            crate::assistant::RATE_WINDOW,
+            crate::assistant::RATE_MAX,
+        ));
         Self {
             db,
             config,
             mailer,
             magic_limiter,
+            llm,
+            assistant_limiter,
         }
     }
 
@@ -73,5 +93,16 @@ impl AppState {
     /// Legacy-shaped payment rows; the pre-bot collection already holds nine of them.
     pub fn payments(&self) -> mongodb::Collection<crate::models::PaymentDoc> {
         self.db.collection("payments")
+    }
+
+    /// The query ledger. Read and written by `user_id` only — the collection holds both
+    /// string and ObjectId `_id`s and this model never deserializes `_id`.
+    pub fn credits(&self) -> mongodb::Collection<crate::models::CreditDoc> {
+        self.db.collection("credits")
+    }
+
+    /// One row per answered smart query.
+    pub fn assistant_usage(&self) -> mongodb::Collection<crate::models::AssistantUsageDoc> {
+        self.db.collection("assistant_usage")
     }
 }

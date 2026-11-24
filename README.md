@@ -50,6 +50,10 @@ Every response is `{"status": "success", "data": ..., "meta": ...}`; every error
 | POST | `/jobs/{id}/not-a-fit` (`scope`: employer \| category) | Bearer |
 | GET | `/notifications`, `/notifications/unread-count` | Bearer |
 | PATCH | `/notifications/read-all`, `/notifications/{id}/read` | Bearer |
+| GET | `/credits` | Bearer |
+| POST | `/assistant/query` (`{message}`) | Bearer |
+| POST | `/credits/topup` (`{discord_id \| user_id, queries}`) | `x-api-key` |
+| POST | `/internal/assistant/query` (`{discord_id, message}`) | `x-api-key` |
 | GET | `/internal/sources` | `x-api-key` |
 | POST | `/internal/jobs` (JSON array of `JobInput`, optional `kind`) | `x-api-key` |
 | POST | `/internal/matches/refresh` | `x-api-key` |
@@ -63,6 +67,43 @@ Every response is `{"status": "success", "data": ..., "meta": ...}`; every error
 `POST /subscription/start` answers 200 with `meta.gateway_wired: false` and a pending
 `provider: "manual"` payment row: the $1/month charge is recorded but nothing is activated,
 because the gateway is a later phase.
+
+## Smart queries and credits
+
+The assistant is purpose-bound, not a chatbot. `POST /assistant/query` (and the bot's
+`POST /internal/assistant/query`) answers exactly three kinds of message:
+
+- **search** — "warehouse jobs in Hargeisa", "tenders for construction". The rows come from
+  `jobs` through the same `live_job_filter()` the feed uses; the model only phrases up to
+  three lines about rows Rust passes it, and is told never to invent a job, employer,
+  deadline or URL. An empty result set is answered with `Nothing live matches that right
+  now.` and no model call at all.
+- **help** — how to register, what the bot does, how alerts work, how to change preferences,
+  what credits are and how to buy them. Answered from a constant.
+- **status** — the caller's own credits, subscription and today's alerts, read from their own
+  rows.
+
+Anything else is `intent: "unsupported"` with one fixed redirect sentence and **no charge**.
+
+Units are queries, not tokens. Every supported answer costs 1: the free allowance
+(`SUBSCRIPTION_MONTHLY_SMART_QUERIES`, default 30 per 30-day period) is spent first, then the
+purchased `balance`. At zero both, the answer is **402** with `code: "out_of_credits"` and
+`"You have used your free queries this month. Buy more credits to keep going."` — the bot
+turns that code into the Buy Credits action. Twenty queries per user per 10 minutes, then
+**429**. A provider failure or timeout is **502** `llm_unavailable` and refunds the charge:
+a user is never billed for an answer they did not get.
+
+`GET /credits` → `{balance, monthly_allowance, used_this_period, period_end,
+remaining_this_period}`. `POST /credits/topup` is the **manual** path (`x-api-key` only,
+no card processing, no prices) until WaafiPay is wired: `{discord_id | user_id, queries}`
+adds purchased queries and says `meta.payment_provider: "manual"`. Usage rows land in
+`assistant_usage` (`user_id`, `at`, `intent`, token counts, `charged_queries`); the legacy
+`token_usage` collection is untouched.
+
+The provider is one hand-rolled `reqwest` JSON call (`LLM_BASE_URL`, `LLM_API_KEY`,
+`LLM_MODEL`; the historical `DEEPSEEK_*` names are still read) behind the `LlmClient` trait,
+so the whole test suite runs offline with a stub. An empty key is a valid deployment state:
+every assistant call answers 502 and charges nothing.
 
 ## Data rules that must not regress
 

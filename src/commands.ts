@@ -86,6 +86,7 @@ function feedRow(job: FeedJob): RowInput {
     deadline: job.deadline ?? null,
     kind: job.kind ?? null,
     jobId: job._id,
+    url: job.url ?? null,
   };
 }
 

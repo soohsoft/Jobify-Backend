@@ -4,6 +4,8 @@
  *
  * - a row is only ever rendered from data the backend returned — there is no fallback that
  *   invents a title, an employer or a deadline;
+ * - a row links to the job's own source page; the portal is a fallback only, and a local
+ *   portal base (or any localhost URL) produces no link at all rather than a dead one;
  * - at most 5 matches per digest DM (Discord punishes walls of text, and a 30-row alert is
  *   read by nobody);
  * - a failure is mapped to the sentence that actually helps, never to a raw error body.
@@ -21,6 +23,8 @@ export interface RowInput {
   deadline?: string | null;
   kind?: string | null;
   jobId?: string | null;
+  /** The job's real page on the source portal. Preferred over any portal link. */
+  url?: string | null;
 }
 
 export function truncate(text: string, max: number): string {
@@ -28,9 +32,45 @@ export function truncate(text: string, max: number): string {
   return chars.length <= max ? text : `${chars.slice(0, max - 1).join('')}…`;
 }
 
+/**
+ * A URL is only a link if it is absolute http(s) AND not this machine. A `localhost` link in
+ * a Discord DM is dead for every reader: it resolves to THEIR machine, so a row that cannot
+ * be linked is rendered as text instead of a promise that goes nowhere.
+ */
+export function isLoopback(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return true;
+  if (host.endsWith('.localhost')) return true;
+  return /^127(\.\d{1,3}){3}$/.test(host);
+}
+
+/** The row's own source page, or `null` when it is missing, malformed or points at this box. */
+export function sourceLink(url: string | null | undefined): string | null {
+  if (typeof url !== 'string') return null;
+  const candidate = url.trim();
+  if (!/^https?:\/\//i.test(candidate)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return null;
+  }
+  if (!parsed.hostname || isLoopback(parsed.hostname)) return null;
+  return candidate;
+}
+
+/** The portal's own job page — only ever a fallback, and never when the portal is local. */
 export function jobLink(appBaseUrl: string, jobId: string | null | undefined): string | null {
   if (!jobId) return null;
-  return `${appBaseUrl.replace(/\/+$/, '')}/jobs/${jobId}`;
+  const base = appBaseUrl.trim().replace(/\/+$/, '');
+  let host: string;
+  try {
+    host = new URL(base).hostname;
+  } catch {
+    return null;
+  }
+  if (!host || isLoopback(host)) return null;
+  return `${base}/jobs/${jobId}`;
 }
 
 /** `Title — Org — Location — closes DATE`, skipping the parts the source did not publish. */
@@ -52,7 +92,9 @@ export function formatRows(
     .slice(0, max)
     .map((row, i) => {
       const head = rowLine(row, (options.startAt ?? 1) + i);
-      const link = jobLink(options.appBaseUrl, row.jobId);
+      // The source page is the only useful destination; the portal is a fallback for rows the
+      // backend could not resolve, and a local portal renders no link at all.
+      const link = sourceLink(row.url) ?? jobLink(options.appBaseUrl, row.jobId);
       return link ? `${head}\n${link}` : head;
     })
     .join('\n');
@@ -108,6 +150,9 @@ export function deliveryRow(delivery: Delivery): RowInput {
       deadline: job.deadline ?? null,
       kind: job.kind ?? null,
       jobId: job._id ?? delivery.jobId ?? null,
+      // The queue has carried the source page both on the row and inside the embedded job,
+      // depending on the backend version that queued it — accept either.
+      url: job.url ?? delivery.url ?? null,
     };
   }
   return {
@@ -116,6 +161,7 @@ export function deliveryRow(delivery: Delivery): RowInput {
     location: null,
     deadline: null,
     jobId: delivery.jobId ?? null,
+    url: delivery.url ?? null,
   };
 }
 
@@ -127,6 +173,7 @@ export function jobRowToInput(row: JobRow): RowInput {
     deadline: row.deadline,
     kind: row.kind,
     jobId: row.job_id,
+    url: row.url ?? null,
   };
 }
 

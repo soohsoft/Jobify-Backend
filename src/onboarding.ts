@@ -460,6 +460,7 @@ export function completionPrompt(input: CompletionInput): {
           deadline: row.job.deadline ?? null,
           kind: row.job.kind ?? null,
           jobId: row.job._id,
+          url: row.job.url ?? null,
         })),
         { appBaseUrl: input.appBaseUrl, max: MAX_DIGEST_ROWS },
       ),

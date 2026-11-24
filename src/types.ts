@@ -114,6 +114,9 @@ export interface JobRow {
   location: string | null;
   kind: string;
   deadline: string | null;
+  /** The job's page on the source portal, when the backend knows it. A row without one is
+   *  rendered as text rather than linked to a portal path that may not exist publicly. */
+  url?: string | null;
 }
 
 export interface AssistantAnswer {
@@ -148,6 +151,8 @@ export interface Delivery {
   title: string;
   body: string;
   jobId?: string | null;
+  /** The source page, when the queue carried it on the row itself. */
+  url?: string | null;
   job?: FeedJob | null;
   createdAt?: string | null;
 }

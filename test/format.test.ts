@@ -13,8 +13,10 @@ import {
   helpText,
   jobLink,
   rowLine,
+  sourceLink,
 } from '../src/format.js';
 import type { AssistantAnswer, Delivery, JobRow } from '../src/types.js';
+import type { RowInput } from '../src/format.js';
 
 const APP = 'https://app.jobify.test';
 
@@ -91,6 +93,109 @@ test('a row with no id renders without a link', () => {
   });
   assert.ok(!rendered.includes(APP));
   assert.equal(jobLink(APP, null), null);
+});
+
+// ---------------------------------------------------------------------------
+// Where a job line points
+// ---------------------------------------------------------------------------
+
+const SOURCE = 'https://somalijobs.com/jobs/mogadishu/14525213046612058/reach-data-analyst';
+const LOCAL = 'http://localhost:5173';
+
+/** A rendered-row input (not the wire shape): this is what the formatter actually consumes. */
+function rowInput(overrides: Partial<RowInput> = {}): RowInput {
+  return {
+    title: 'Data Analyst',
+    organization: 'Horn Relief',
+    location: 'Mogadishu',
+    deadline: '2026-12-03',
+    kind: 'job',
+    jobId: 'job-1',
+    ...overrides,
+  };
+}
+
+test('a job line links to the source page, never to the portal', () => {
+  const rendered = formatRows([rowInput({ url: SOURCE })], { appBaseUrl: APP });
+
+  assert.ok(rendered.includes(SOURCE), 'the source page is the destination');
+  assert.ok(!rendered.includes(`${APP}/jobs/`), 'the portal path is not used when a source exists');
+});
+
+test('an assistant answer links each row to its source page', () => {
+  const answer: AssistantAnswer = {
+    intent: 'search',
+    reply: 'One data role in Mogadishu.',
+    jobs: [row({ url: SOURCE })],
+    credits: { balance: 0, monthly_allowance: 30, used_this_period: 1, period_end: '', remaining_this_period: 29 },
+  };
+
+  const content = formatAssistantReply(answer, { appBaseUrl: LOCAL, maxRows: 3 });
+  assert.ok(content.includes('https://somalijobs.com/jobs/mogadishu/14525213046612058/reach-data-analyst'));
+  assert.ok(!content.includes('localhost'), 'a local portal base must never become a link');
+});
+
+test('a local portal base renders the row as text, not as a dead localhost link', () => {
+  const rendered = formatRows([rowInput()], { appBaseUrl: LOCAL });
+  const digest = digestMessage([rowInput()], { appBaseUrl: LOCAL });
+
+  assert.ok(!rendered.includes('localhost'));
+  assert.ok(!digest.includes('localhost'));
+  // The line is complete; it simply has nowhere to send the reader.
+  assert.equal(rendered, rowLine(rowInput(), 1));
+});
+
+test('localhost on the row itself is dropped as a destination', () => {
+  const rendered = formatRows([rowInput({ url: 'http://127.0.0.1:3000/jobs/job-1' })], { appBaseUrl: APP });
+  assert.ok(!rendered.includes('127.0.0.1'));
+  assert.ok(!rendered.includes('localhost'));
+});
+
+test('a row with no source url at all renders text only', () => {
+  const rendered = formatRows(
+    [{ title: 'Driver', organization: 'NGO', location: null, deadline: null, jobId: null }],
+    { appBaseUrl: APP },
+  );
+  assert.equal(
+    rendered,
+    rowLine({ title: 'Driver', organization: 'NGO', location: null, deadline: null }, 1),
+  );
+  assert.ok(!rendered.includes('http'));
+});
+
+test('a malformed or non-http source url is not turned into a link', () => {
+  assert.equal(sourceLink(null), null);
+  assert.equal(sourceLink('   '), null);
+  assert.equal(sourceLink('somalijobs.com/jobs/1'), null);
+  assert.equal(sourceLink('javascript:alert(1)'), null);
+  assert.equal(sourceLink(SOURCE), SOURCE);
+  assert.equal(jobLink(LOCAL, 'job-1'), null);
+  assert.equal(jobLink(APP, null), null);
+});
+
+test('the portal is only a fallback when the row has no source page', () => {
+  const rendered = formatRows([rowInput()], { appBaseUrl: APP });
+  assert.ok(rendered.includes(`${APP}/jobs/job-1`));
+});
+
+test('a digest row links whether the url rides the row or the embedded job', () => {
+  const nested: Delivery = {
+    notificationId: 'n1',
+    userId: 'u1',
+    title: 'Jobify notification',
+    body: 'body',
+    jobId: 'job-7',
+    job: { _id: 'job-7', title: 'WASH Officer', organization: 'Oxfam', location: 'Baidoa', deadline: '2026-12-09', url: SOURCE },
+  };
+  const atRow: Delivery = { ...nested, notificationId: 'n2', job: null, title: 'WASH Officer', url: SOURCE };
+
+  assert.equal(deliveryRow(nested).url, SOURCE);
+  assert.equal(deliveryRow(atRow).url, SOURCE);
+
+  const rendered = digestMessage([deliveryRow(nested), deliveryRow(atRow)], { appBaseUrl: LOCAL });
+  assert.equal(rendered.match(/somalijobs\.com/g)?.length, 2);
+  assert.ok(!rendered.includes('localhost'));
+  assert.ok(rendered.includes('**2 new matches for you on Jobify**'));
 });
 
 // ---------------------------------------------------------------------------

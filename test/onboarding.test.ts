@@ -213,6 +213,38 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
   );
 });
 
+test('the completion message links each match to its source page, never a local portal', () => {
+  const source = 'https://somalijobs.com/jobs/mogadishu/14525213046612058/reach-data-analyst';
+  const matches: MatchRow[] = [
+    {
+      matchScore: 3,
+      job: {
+        _id: 'job-1',
+        title: 'REACH Data Analyst',
+        organization: 'ACTED',
+        location: 'Mogadishu',
+        deadline: null,
+        category: 'ict',
+        kind: 'job',
+        url: source,
+      },
+    },
+    { matchScore: 2, job: { _id: 'job-2', title: 'Driver', organization: 'NGO', location: null, deadline: null, kind: 'job' } },
+  ];
+
+  const prompt = completionPrompt({
+    user: user(),
+    matches,
+    digestTz: 'Africa/Nairobi',
+    digestHour: 8,
+    // The bot's own default: a local portal must not become a link in anyone's DM.
+    appBaseUrl: 'http://localhost:5173',
+  });
+
+  assert.equal(prompt.content.match(/somalijobs\.com/g)?.length, 1);
+  assert.ok(!prompt.content.includes('localhost'), prompt.content);
+});
+
 test('the completion message is honest when nothing matches or alerts are off', () => {
   const prompt = completionPrompt({
     user: user({

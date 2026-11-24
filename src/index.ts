@@ -44,6 +44,7 @@ async function main(): Promise<void> {
     digestHour: config.digestHour,
     logger,
     sessions: new OnboardingSessions(),
+    ...(config.freeChannelId ? { freeChannelId: config.freeChannelId } : {}),
     categories: createCategoryCache(backend),
     sendDm: createDmSender(client),
   };

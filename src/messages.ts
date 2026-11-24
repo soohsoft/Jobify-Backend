@@ -1,28 +1,70 @@
 /**
- * Free text: a DM to the bot, or a message that @mentions it, goes to the same purpose-bound
- * assistant as `/jobs`, with the sender's snowflake as the identity.
+ * Free text: a DM to the bot, a message in the configured free-text channel, or a message
+ * that @mentions it, goes to the same purpose-bound assistant as `/jobs`, with the sender's
+ * snowflake as the identity.
  *
- * The reply is the assistant's own sentence plus up to three real rows as links. Nothing else
- * is generated here — no summarising, no "here are some tips" — because the assistant is the
- * only thing allowed to speak about Jobify's listings.
+ * First contact is different: a member with no usable profile is walked into the interview
+ * instead of being answered with the assistant's generic "I can help with..." line. That
+ * reply would otherwise be the only thing a brand-new member ever sees, because nothing tells
+ * them `/start` exists. The onboarding prompt is free — no assistant call, no query charged.
+ *
+ * The reply to an onboarded member is the assistant's own sentence plus up to three real rows
+ * as links. Nothing else is generated here — no summarising, no "here are some tips" — because
+ * the assistant is the only thing allowed to speak about Jobify's listings.
  */
 import type { Message } from 'discord.js';
 
 import type { BotContext } from './context.js';
 import { formatAssistantReply } from './format.js';
+import { educationPrompt, promptForStep, type OnboardingSession } from './onboarding.js';
 import { assistantErrorReply, clampContent } from './ui.js';
 
 const MAX_INPUT = 300;
+
+const WELCOME =
+  'Welcome to Jobify. Three quick questions and I will start sending you matches. First: what is the highest level you finished?';
+
+/**
+ * Starts the interview the same way `/start` does, carrying forward any sectors already on
+ * file so the sector step pre-selects them rather than replacing them.
+ */
+async function startInterview(message: Message, ctx: BotContext, sectors: string[]): Promise<void> {
+  ctx.sessions.start(message.author.id, { sectors });
+  const prompt = educationPrompt();
+  await message.reply({
+    content: clampContent(`${WELCOME}\n\n${prompt.content}`),
+    components: prompt.components,
+    allowedMentions: { parse: [] },
+  });
+}
+
+/**
+ * A member who writes again mid-interview is put back on their current step. The session is
+ * reused, never replaced: its in-memory answers and the answers already saved to the backend
+ * both stay exactly as they were.
+ */
+async function resumeInterview(message: Message, ctx: BotContext, session: OnboardingSession): Promise<void> {
+  const categories = session.step === 'sectors' ? await ctx.categories() : [];
+  const prompt = promptForStep(session.step, session, categories);
+  await message.reply({
+    content: clampContent(`You are part-way through setup — here is where we left off.\n\n${prompt.content}`),
+    components: prompt.components,
+    allowedMentions: { parse: [] },
+  });
+}
 
 export async function handleMessage(message: Message, ctx: BotContext, botId: string): Promise<void> {
   if (message.author.bot) return;
   if (!message.content) return;
 
   const mentioned = message.mentions.users.has(botId);
+  // A configured jobs/support channel is conversational without a mention; every other guild
+  // channel keeps today's mention-only rule. DMs are unaffected.
+  const inFreeChannel = Boolean(ctx.freeChannelId) && message.channelId === ctx.freeChannelId;
   // In a guild the MESSAGE CONTENT intent decides whether `content` is populated at all;
   // without it a mention arrives with an empty body. DMs need no intent, which is why the
   // documented path is "message the bot", not "poke it in a server".
-  if (message.guild && !mentioned) return;
+  if (message.guild && !mentioned && !inFreeChannel) return;
 
   const text = mentioned
     ? message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), ' ').trim()
@@ -48,11 +90,33 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
   }
 
   try {
-    await ctx.backend.upsertUser({
+    const upsert = await ctx.backend.upsertUser({
       discord_id: message.author.id,
       username: message.author.username,
       global_name: message.author.globalName ?? null,
     });
+
+    // An open session wins over the onboarding flag: sectors are saved as soon as they are
+    // picked, so the backend can call a half-finished interview "onboarded". The member is
+    // still mid-interview and should be answered with their next question, not the assistant.
+    const session = ctx.sessions.get(message.author.id);
+    if (session) {
+      await resumeInterview(message, ctx, session);
+      ctx.logger.info('free-text resumed onboarding', {
+        discordId: message.author.id,
+        step: session.step,
+      });
+      return;
+    }
+
+    // Older backends may omit the flag; then the authoritative read is one GET.
+    const flag = (upsert as { onboarding_complete?: boolean }).onboarding_complete;
+    const onboarded = flag ?? (await ctx.backend.getUser(message.author.id)).onboarding_complete;
+    if (!onboarded) {
+      await startInterview(message, ctx, upsert.user.sectors ?? []);
+      ctx.logger.info('onboarding started from free text', { discordId: message.author.id });
+      return;
+    }
 
     const answer = await ctx.backend.assistantQuery(message.author.id, text);
     const content = formatAssistantReply(answer, { appBaseUrl: ctx.appBaseUrl, maxRows: 3 });

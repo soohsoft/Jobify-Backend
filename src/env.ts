@@ -17,6 +17,8 @@ export interface Config {
   appBaseUrl: string;
   digestTz: string;
   digestHour: number;
+  /** A guild channel where plain messages are answered without a mention; unset = mention only. */
+  freeChannelId?: string;
 }
 
 /** Reads KEY=VALUE lines. Missing file is not an error; bad lines are skipped. */
@@ -65,5 +67,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // any IANA zone works.
     digestTz: env.DIGEST_TZ?.trim() || 'Africa/Nairobi',
     digestHour: hour,
+    freeChannelId: env.DISCORD_FREE_CHANNEL_ID?.trim() || undefined,
   };
 }

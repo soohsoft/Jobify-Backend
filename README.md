@@ -23,7 +23,15 @@ Node 20.6+ (uses `--import` for tests), discord.js v14, TypeScript strict.
 
 Free text: a DM to the bot (or an @mention in a server) goes to the assistant with the
 sender's Discord id. The reply is the assistant's own sentence plus up to three real rows as
-links.
+links. A brand-new member is not answered by the assistant at all: their first message starts
+the same six-step interview as `/start` (pre-selecting any sectors already on file), and that
+welcome costs no query. Writing again mid-interview re-sends the current step rather than
+restarting it.
+
+Set `DISCORD_FREE_CHANNEL_ID` to a channel id to make one guild channel conversational
+without an @mention — plain messages there take the same path as a DM, onboarding-first
+included. Every other guild channel keeps the mention-only rule, and leaving it unset keeps
+today's behaviour.
 
 ## Invite URL
 
@@ -157,7 +165,7 @@ tenders-only member would accumulate job notifications they are never sent.
 
 ## Tests
 
-`npm test` runs 46 unit tests with a stubbed backend — no network, no gateway:
+`npm test` runs 56 unit tests with a stubbed backend — no network, no gateway:
 
 - request building and envelope unwrapping, the 402 `out_of_credits` path, 5xx retry and
   timeout classification (`test/http.test.ts`);
@@ -167,6 +175,10 @@ tenders-only member would accumulate job notifications they are never sent.
   blocked → `blocked`, unlinked → `no_discord_link` (`test/digest.test.ts`);
 - onboarding components, sector paging 25+3, session lifecycle, summary copy
   (`test/onboarding.test.ts`);
+- free text: first contact starts the interview with zero assistant calls, an onboarded
+  member still gets one answer, mid-interview re-prompts reuse the session, and the optional
+  free-text channel is mention-free while other guild channels stay ignored
+  (`test/messages.test.ts`);
 - the wall clock in `Africa/Nairobi`, the once-a-day guard (`test/scheduler.test.ts`).
 
 ## Project layout

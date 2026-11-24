@@ -163,6 +163,33 @@ export function experiencePrompt(): { content: string; components: ActionRowBuil
   };
 }
 
+/**
+ * The prompt for wherever a session currently is. Shared by the free-text path when a member
+ * writes again mid-interview: re-sending the step they were on is what keeps their place
+ * without starting a second session (and without losing answers already written server-side).
+ */
+export interface StepPrompt {
+  content: string;
+  components: Array<ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>>;
+}
+
+export function promptForStep(step: Step, session: OnboardingSession, categories: Category[]): StepPrompt {
+  switch (step) {
+    case 'education':
+      return educationPrompt();
+    case 'experience':
+      return experiencePrompt();
+    case 'sectors':
+      return sectorsPrompt(session, categories);
+    case 'location':
+      return locationPrompt();
+    case 'skills':
+      return skillsPrompt();
+    case 'wants':
+      return wantsPrompt();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Step 3: sectors (paged multi-select)
 // ---------------------------------------------------------------------------

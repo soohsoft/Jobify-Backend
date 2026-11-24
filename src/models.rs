@@ -573,6 +573,11 @@ pub struct NotificationDoc {
     pub job_id: Option<String>,
     pub title: String,
     pub body: String,
+    /// The 0–100 fit the job scored when it was queued, so the digest can show the same
+    /// percentage the list did. Absent on rows queued before the score existed (and on
+    /// payment notifications), which is why the reader treats it as optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_score: Option<i64>,
     #[serde(default)]
     pub read: bool,
     /// When the sender handed this over. `read` is not the same thing: the queue has to

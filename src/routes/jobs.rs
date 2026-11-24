@@ -1036,6 +1036,7 @@ async fn queue_notifications(
             job_id: Some(job.id.clone()),
             title: job.title.clone(),
             body: job.description.clone(),
+            match_score: Some(*score),
             read: false,
             sent_at: None,
             failed_reason: None,
@@ -1776,6 +1777,15 @@ mod tests {
             queued_job_ids(&state, "user-strong").await.unwrap(),
             vec!["job-strong".to_string()]
         );
+        // The score travels WITH the queued row, so the digest can show the same percentage
+        // the list did instead of re-deriving it or dropping it.
+        let stored = state
+            .notifications()
+            .find_one(doc! { "user_id": "user-strong" })
+            .await
+            .unwrap()
+            .expect("the strong match must be queued");
+        assert_eq!(stored.match_score, Some(80));
 
         // 5. The feed keeps every live row — browsing is not matching — and reports the same
         //    0–100, so a 30% row cannot look like a 75% one.

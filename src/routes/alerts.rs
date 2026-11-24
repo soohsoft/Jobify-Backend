@@ -149,6 +149,7 @@ async fn deliveries(
                 "title": &n.title,
                 "body": &n.body,
                 "jobId": &n.job_id,
+                "matchScore": &n.match_score,
                 "job": n.job_id.as_ref().and_then(|id| jobs.get(id)),
                 "createdAt": &n.created_at,
             })

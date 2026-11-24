@@ -738,11 +738,6 @@ async fn get_matches(
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
 
     let outcome = jobs::match_rows(&state, &link.user_id, limit, None).await?;
-    let reason = if outcome.areas.categories.is_empty() {
-        "no_match_profile"
-    } else {
-        "ok"
-    };
     let data: Vec<serde_json::Value> = outcome
         .rows
         .iter()
@@ -752,6 +747,9 @@ async fn get_matches(
     tracing::debug!(
         user_id = %link.user_id,
         rows = data.len(),
+        considered = outcome.considered,
+        threshold = outcome.threshold,
+        reason = outcome.reason(),
         categories = outcome.areas.categories.len(),
         subcategories = outcome.areas.subcategories.len(),
         "discord matches read"
@@ -762,8 +760,11 @@ async fn get_matches(
             "status": "success",
             "data": data,
             "meta": {
-                "reason": reason,
+                "reason": outcome.reason(),
+                "threshold": outcome.threshold,
                 "total": data.len(),
+                "considered": outcome.considered,
+                "qualified": outcome.qualified,
                 "categories": outcome.areas.categories,
                 "subcategories": outcome.areas.subcategories,
                 "categorySource": outcome.areas.source,

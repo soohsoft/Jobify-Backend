@@ -407,6 +407,10 @@ async fn refresh_matches(State(state): State<AppState>) -> ApiResult {
 
     let mut queued_total = 0u64;
     let mut results: Vec<Value> = Vec::new();
+    // Members who are due but have no listing above the cut-off. Counted so the run logs the
+    // fact ONCE, at info, instead of a line per subscriber: "nothing scored 70+" is a normal
+    // answer, not a failure, and the digest must never be sent with an empty list.
+    let mut below_threshold: Vec<String> = Vec::new();
     for user in &subscribers {
         let prefs = user.alerts.clone().unwrap_or_default();
         // Daily runs at most once per Nairobi day. Instant is bounded by how often the
@@ -424,6 +428,9 @@ async fn refresh_matches(State(state): State<AppState>) -> ApiResult {
 
         let queued = queue_matches_for_user(&state, &user.id, MATCHES_PER_REFRESH).await?;
         queued_total += queued;
+        if queued == 0 {
+            below_threshold.push(user.id.clone());
+        }
         state
             .users()
             .update_one(
@@ -431,7 +438,22 @@ async fn refresh_matches(State(state): State<AppState>) -> ApiResult {
                 doc! { "$set": { "alerts.last_sent_at": now_iso() } },
             )
             .await?;
-        results.push(json!({ "userId": user.id, "queued": queued }));
+        // `reason` tells a caller why a member got nothing: below the cut-off is an answer,
+        // not an error, and naming it stops a sender from "helpfully" filling the gap.
+        results.push(json!({
+            "userId": user.id,
+            "queued": queued,
+            "reason": if queued == 0 { "below_threshold" } else { "ok" },
+        }));
+    }
+
+    if !below_threshold.is_empty() {
+        tracing::info!(
+            threshold = state.config.match_threshold,
+            members = below_threshold.len(),
+            user_ids = %below_threshold.join(","),
+            "match refresh: no listing scored at or above the cut-off — nothing queued for these members"
+        );
     }
 
     Ok((
@@ -441,6 +463,8 @@ async fn refresh_matches(State(state): State<AppState>) -> ApiResult {
             "data": {
                 "subscribers": subscribers.len(),
                 "queuedTotal": queued_total,
+                "belowThreshold": below_threshold.len(),
+                "threshold": state.config.match_threshold,
                 "users": results,
             }
         })),

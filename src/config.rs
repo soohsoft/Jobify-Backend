@@ -22,6 +22,10 @@ pub struct Config {
     pub llm_model: String,
     /// Free smart queries per 30-day period, before the paid balance is touched.
     pub monthly_smart_queries: i64,
+    /// The fit percentage a listing must reach to be SHOWN or NOTIFIED. One number for the
+    /// portal list, the bot's list and the alert queue, so a row cannot be good enough for
+    /// one surface and not another. 0–100; anything outside that range is clamped.
+    pub match_threshold: i64,
 }
 
 impl Config {
@@ -53,6 +57,17 @@ impl Config {
                 .parse()
                 .unwrap_or(30)
                 .clamp(0, 1000),
+            // 70 is the product decision: a category match alone (30) is not an offer, and a
+            // subcategory title hit (75) is. A garbage or out-of-range value falls back to
+            // the default rather than 0 (which would show everything) or 101 (nothing).
+            match_threshold: {
+                let default = crate::routes::jobs::MATCH_THRESHOLD_DEFAULT;
+                env_var("MATCH_THRESHOLD", &default.to_string())
+                    .trim()
+                    .parse::<i64>()
+                    .map(|value| value.clamp(0, 100))
+                    .unwrap_or(default)
+            },
         }
     }
 

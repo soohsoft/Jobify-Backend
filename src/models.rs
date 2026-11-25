@@ -158,18 +158,11 @@ pub struct MatchProfile {
     /// matcher's QUERY FILTER, so a slug nothing stores hides every row.
     #[serde(default)]
     pub categories: Vec<String>,
-    /// Role titles the member can actually apply for, e.g. "Data Analyst", "MIS Officer".
-    /// Decided by the completion-time derivation (`profile_llm`) or, when that is
-    /// unavailable, left empty by the deterministic map. They only re-rank rows the
-    /// categories already admitted. Defaulted, so the documents written before
-    /// subcategories existed read as "none".
-    #[serde(default)]
-    pub subcategories: Vec<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
     #[serde(default)]
     pub locations: Vec<String>,
-    /// Where `categories` and `subcategories` came from: "llm" when the one completion-time
+    /// Where `categories` came from: "llm" when the one completion-time
     /// model call decided them, "rules" when the deterministic field-of-study map did
     /// (no provider, a failed call, or nothing usable back). Empty on documents written
     /// before the backend started deciding, which is why readers must treat "" as unknown
@@ -191,7 +184,6 @@ pub struct MatchProfile {
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct MatchAreas {
     pub categories: Vec<String>,
-    pub subcategories: Vec<String>,
     pub source: String,
 }
 

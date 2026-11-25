@@ -1,13 +1,13 @@
-//! One model call at the end of onboarding: which job areas — and which job titles — can
+//! One model call at the end of onboarding: which job areas — and which search terms — can
 //! this member actually apply for?
 //!
 //! The interview collects a name, a degree history, a last job title and a band of years.
 //! A fixed field-of-study → category map then says "ICT → ict", which is true but useless on
-//! its own: the person needs to know that "Data Analyst" or "MIS Officer" is what to search
-//! for, and the matcher needs those titles to rank the ICT rows it was already allowed to
-//! return. `onboarding` still owns the deterministic map (it is the fallback and the unit of
-//! record for the field labels); this module is the cheap model call that turns the same
-//! facts into a small, validated decision.
+//! its own: the member needs the words an advert for those roles actually uses, and the
+//! matcher needs those terms to rank the ICT rows it was already allowed to return.
+//! `onboarding` still owns the deterministic map (it is the fallback and the unit of record
+//! for the field labels); this module is the cheap model call that turns the same facts into
+//! a small, validated decision.
 //!
 //! Three rules shape the file:
 //! - **The model supplies labels only.** Categories are checked against the canonical
@@ -27,12 +27,8 @@ use crate::util::json_object;
 /// At most three categories. Each one is a query-filter term, and the matcher already reads
 /// up to 300 candidate rows per profile.
 pub const MAX_CATEGORIES: usize = 3;
-/// At most five role titles, each a phrase the matcher looks for in a job title.
-pub const MAX_SUBCATEGORIES: usize = 5;
 /// At most eight search terms, the same budget the deterministic keyword builder keeps.
 pub const MAX_KEYWORDS: usize = 8;
-/// A subcategory is a job title, not a sentence.
-pub const MAX_SUBCATEGORY_CHARS: usize = 40;
 pub const MAX_KEYWORD_CHARS: usize = 40;
 /// Shared with the assistant's extraction call: enough headroom for the reasoning tokens a
 /// reasoning model spends before the first `{`.
@@ -54,7 +50,6 @@ pub struct Facts<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Derived {
     pub categories: Vec<String>,
-    pub subcategories: Vec<String>,
     pub keywords: Vec<String>,
 }
 
@@ -72,7 +67,6 @@ impl Derived {
 #[derive(Debug, Default)]
 pub struct RawDerivation {
     pub categories: Vec<String>,
-    pub subcategories: Vec<String>,
     pub keywords: Vec<String>,
 }
 
@@ -135,13 +129,6 @@ pub fn sanitize(raw: RawDerivation) -> Derived {
         }
     }
 
-    let mut subcategories: Vec<String> = Vec::new();
-    for value in &raw.subcategories {
-        if let Some(label) = clean_label(value, MAX_SUBCATEGORY_CHARS) {
-            push_unique(&mut subcategories, label, MAX_SUBCATEGORIES);
-        }
-    }
-
     let mut keywords: Vec<String> = Vec::new();
     for value in &raw.keywords {
         if let Some(term) = clean_label(value, MAX_KEYWORD_CHARS) {
@@ -151,7 +138,6 @@ pub fn sanitize(raw: RawDerivation) -> Derived {
 
     Derived {
         categories,
-        subcategories,
         keywords,
     }
 }
@@ -163,7 +149,7 @@ pub fn parse(raw: &str) -> Option<RawDerivation> {
     let object = json_object(raw)?;
     // Hand-rolled rather than `serde_json::from_str` into a struct so that one unexpected
     // field type cannot throw the whole answer away: `{"categories":"ict"}` is a model
-    // mistake, and the subcategories it also wrote are still worth keeping.
+    // mistake, and the keywords it also wrote are still worth keeping.
     let value: serde_json::Value = serde_json::from_str(object).ok()?;
     let object = value.as_object()?;
     let list = |key: &str| -> Vec<String> {
@@ -180,7 +166,6 @@ pub fn parse(raw: &str) -> Option<RawDerivation> {
     };
     Some(RawDerivation {
         categories: list("categories"),
-        subcategories: list("subcategories"),
         keywords: list("keywords"),
     })
 }
@@ -198,14 +183,11 @@ fn messages(facts: &Facts<'_>) -> Vec<LlmMessage> {
         "You decide which job areas a candidate on a Somali jobs and tenders board can \
 actually apply for, from their education and work history. Reply with ONE JSON object and \
 nothing else:\n\
-{{\"categories\":[\"slug\"],\"subcategories\":[\"Job Title\"],\"keywords\":[\"term\"]}}\n\
+{{\"categories\":[\"slug\"],\"keywords\":[\"term\"]}}\n\
 Rules:\n\
 - categories: 1 to {MAX_CATEGORIES} slugs, and ONLY from this list:\n{slugs}\n\
-- subcategories: 3 to {MAX_SUBCATEGORIES} real job titles this person can apply for, in \
-Title Case — for example \"Data Analyst\", \"MIS Officer\", \"Programme Officer\". They must be \
-titles that appear in job adverts, not categories and not sentences, at most five words each.\n\
-- keywords: up to {MAX_KEYWORDS} short terms (tools, skills, sector words) that appear in \
-adverts for those roles.\n\
+- keywords: up to {MAX_KEYWORDS} short terms (tools, skills, sector words, job titles) that \
+appear in adverts for those roles — for example \"data analyst\", \"SQL\", \"programme officer\".\n\
 - Use what the person actually studied and actually did. Do not invent a field they did not \
 study or a job they did not hold. A master's in business administration on top of an ICT \
 degree with a data job means both areas.\n\
@@ -247,12 +229,11 @@ pub async fn derive(llm: &dyn LlmClient, facts: &Facts<'_>) -> Result<Derived, S
 
 /// The profile a completed interview is matched on.
 ///
-/// `categories` are the gate, `subcategories` re-rank inside it, `keywords` break the
-/// remaining ties. `source` says which of the two paths produced them, and `facts_key`
-/// fingerprints the answers so the next save can skip the model.
+/// `categories` are the gate, `keywords` rank inside it. `source` says which of the two
+/// paths produced them, and `facts_key` fingerprints the answers so the next save can skip
+/// the model.
 pub fn profile(
     categories: Vec<String>,
-    subcategories: Vec<String>,
     keywords: Vec<String>,
     source: &str,
     facts_key: String,
@@ -260,7 +241,6 @@ pub fn profile(
 ) -> MatchProfile {
     MatchProfile {
         categories,
-        subcategories,
         keywords,
         // Somalia-wide: the interview never asks for a city, and the matcher has no location
         // signal to rank on.
@@ -296,7 +276,6 @@ mod tests {
                 "health".to_string(),
                 "education".to_string(),
             ],
-            subcategories: (0..8).map(|n| format!("Role {n} Officer")).collect(),
             keywords: (0..12).map(|n| format!("term{n}")).collect(),
         };
         let derived = sanitize(raw);
@@ -305,7 +284,6 @@ mod tests {
             vec!["ict", "business_and_finance", "health"],
             "three categories are kept, the fourth is dropped"
         );
-        assert_eq!(derived.subcategories.len(), MAX_SUBCATEGORIES);
         assert_eq!(derived.keywords.len(), MAX_KEYWORDS);
         assert!(derived.is_usable());
     }
@@ -319,7 +297,6 @@ mod tests {
                 "computer_technology".to_string(),
                 "Information Technology".to_string(),
             ],
-            subcategories: Vec::new(),
             keywords: Vec::new(),
         };
         let derived = sanitize(raw);
@@ -332,37 +309,32 @@ mod tests {
         // Nothing valid is an unusable answer, not an empty-profile decision.
         let none = sanitize(RawDerivation {
             categories: vec!["nope".to_string()],
-            subcategories: vec!["Data Analyst".to_string()],
-            keywords: Vec::new(),
+            keywords: vec!["data analyst".to_string()],
         });
         assert!(none.categories.is_empty());
         assert!(!none.is_usable());
     }
 
     #[test]
-    fn role_titles_are_cleaned_deduped_and_bounded() {
+    fn keywords_are_cleaned_deduped_and_bounded() {
         let raw = RawDerivation {
             categories: vec!["ict".to_string()],
-            subcategories: vec![
+            keywords: vec![
                 "  Data   Analyst ".to_string(),
                 "data analyst".to_string(),
                 String::new(),
-                "x".repeat(MAX_SUBCATEGORY_CHARS + 1),
-                "MIS Officer".to_string(),
-            ],
-            keywords: vec![
-                " SQL ".to_string(),
+                "x".repeat(MAX_KEYWORD_CHARS + 1),
+                "SQL".to_string(),
                 "sql".to_string(),
                 "Reporting".to_string(),
             ],
         };
         let derived = sanitize(raw);
         assert_eq!(
-            derived.subcategories,
-            vec!["Data Analyst", "MIS Officer"],
-            "whitespace collapsed, duplicates and over-long titles dropped"
+            derived.keywords,
+            vec!["Data Analyst", "SQL", "Reporting"],
+            "whitespace collapsed, duplicates and over-long terms dropped"
         );
-        assert_eq!(derived.keywords, vec!["SQL", "Reporting"]);
     }
 
     #[test]
@@ -370,7 +342,7 @@ mod tests {
         assert!(parse("I think this person should be a data analyst.").is_none());
         assert!(parse("").is_none());
         // A truncated object does not deserialize into anything: the caller falls back.
-        assert!(parse(r#"{"categories":["ict"],"subcate"#).is_none());
+        assert!(parse(r#"{"categories":["ict"],"keywor"#).is_none());
         // Prose around a real object is fine — reasoning models write a sentence first.
         let framed = parse("Here is the JSON:\n```json\n{\"categories\":[\"ict\"]}\n```");
         assert_eq!(framed.unwrap().categories, vec!["ict"]);
@@ -439,8 +411,9 @@ mod tests {
     #[tokio::test]
     async fn derive_passes_the_facts_as_json_and_asks_for_a_bounded_answer() {
         let stub = StubLlm::new(Ok(LlmReply {
-            content: r#"{"categories":["ict","business_and_finance"],"subcategories":["Data Analyst","MIS Officer"],"keywords":["SQL"]}"#
-                .to_string(),
+            content:
+                r#"{"categories":["ict","business_and_finance"],"keywords":["SQL","data analyst"]}"#
+                    .to_string(),
             usage: LlmUsage::default(),
             finish_reason: Some("stop".to_string()),
         }));
@@ -451,8 +424,7 @@ mod tests {
         let derived = derive(stub.as_ref(), &facts(&education)).await.unwrap();
         assert_eq!(stub.calls(), 1);
         assert_eq!(derived.categories, vec!["ict", "business_and_finance"]);
-        assert_eq!(derived.subcategories.len(), 2);
-        assert_eq!(derived.keywords, vec!["SQL"]);
+        assert_eq!(derived.keywords, vec!["SQL", "data analyst"]);
 
         let seen = stub.seen.lock().unwrap();
         let request = &seen[0];

@@ -491,17 +491,12 @@ async fn update_profile(
         })
         .cloned();
 
-    let (categories, subcategories, keywords, category_source) = if let Some(stored) = reusable {
+    let (categories, keywords, category_source) = if let Some(stored) = reusable {
         tracing::debug!(
             user_id = %user.id,
             "discord profile: facts unchanged, reusing the stored derivation"
         );
-        (
-            stored.categories,
-            stored.subcategories,
-            stored.keywords,
-            stored.category_source,
-        )
+        (stored.categories, stored.keywords, stored.category_source)
     } else if complete_now {
         // One cheap call, and only now: a partial save never spends a query, and the member
         // must never end up unmatched because the model was down.
@@ -517,13 +512,11 @@ async fn update_profile(
                 tracing::info!(
                     user_id = %user.id,
                     categories = derived.categories.len(),
-                    subcategories = derived.subcategories.len(),
                     keywords = keywords.len(),
                     "discord profile: categories decided by the model"
                 );
                 (
                     derived.categories,
-                    derived.subcategories,
                     keywords,
                     crate::profile_llm::SOURCE_LLM.to_string(),
                 )
@@ -536,7 +529,6 @@ async fn update_profile(
                 );
                 (
                     categories,
-                    Vec::new(),
                     keywords,
                     crate::profile_llm::SOURCE_RULES.to_string(),
                 )
@@ -549,7 +541,6 @@ async fn update_profile(
                 );
                 (
                     categories,
-                    Vec::new(),
                     keywords,
                     crate::profile_llm::SOURCE_RULES.to_string(),
                 )
@@ -560,7 +551,6 @@ async fn update_profile(
         // something to match on. No model call — the answers are still arriving.
         (
             categories,
-            Vec::new(),
             keywords,
             crate::profile_llm::SOURCE_RULES.to_string(),
         )
@@ -568,7 +558,6 @@ async fn update_profile(
 
     let profile = crate::profile_llm::profile(
         categories.clone(),
-        subcategories,
         keywords,
         &category_source,
         facts_key,
@@ -737,7 +726,7 @@ async fn get_matches(
     let link = link_for(&state, &discord_id).await?;
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
 
-    let outcome = jobs::match_rows(&state, &link.user_id, limit, None, None).await?;
+    let outcome = jobs::match_rows(&state, &link.user_id, limit, None, None, None).await?;
     let data: Vec<serde_json::Value> = outcome
         .rows
         .iter()
@@ -751,7 +740,6 @@ async fn get_matches(
         threshold = outcome.threshold,
         reason = outcome.reason(),
         categories = outcome.areas.categories.len(),
-        subcategories = outcome.areas.subcategories.len(),
         "discord matches read"
     );
     Ok((
@@ -766,7 +754,6 @@ async fn get_matches(
                 "considered": outcome.considered,
                 "qualified": outcome.qualified,
                 "categories": outcome.areas.categories,
-                "subcategories": outcome.areas.subcategories,
                 "categorySource": outcome.areas.source,
             }
         })),
@@ -963,7 +950,6 @@ mod tests {
         }];
         user.match_profile = Some(MatchProfile {
             categories: Vec::new(),
-            subcategories: Vec::new(),
             keywords: vec!["marine".to_string(), "biology".to_string()],
             locations: Vec::new(),
             category_source: "rules".to_string(),
@@ -1161,7 +1147,7 @@ mod tests {
     #[tokio::test]
     async fn a_two_degree_profile_is_stored_and_the_model_decides_the_areas() {
         let llm = Arc::new(ScriptedLlm::new(vec![answer(
-            r#"{"categories":["health","business_and_finance"],"subcategories":["Programme Officer","Health Information Officer"],"keywords":["programme","officer","health"]}"#,
+            r#"{"categories":["health","business_and_finance"],"keywords":["programme","officer","health"]}"#,
         )]));
         let Some(state) = test_state_with_llm("jobify_test_discord_onboarding", llm.clone()).await
         else {
@@ -1200,11 +1186,6 @@ mod tests {
             profile["categories"],
             json!(["health", "business_and_finance"]),
             "the model's validated slugs, in the order it gave them"
-        );
-        assert_eq!(
-            profile["subcategories"],
-            json!(["Programme Officer", "Health Information Officer"]),
-            "the role titles the member can apply for are stored with the categories"
         );
         assert_eq!(profile["category_source"], "llm");
         assert_eq!(
@@ -1262,9 +1243,7 @@ mod tests {
         // the second save, which is what proves the reuse path did NOT call it.
         let llm = Arc::new(ScriptedLlm::new(vec![
             Err(crate::llm::LlmError::Provider(503)),
-            answer(
-                r#"{"categories":["health","business_and_finance"],"subcategories":["Programme Officer"],"keywords":[]}"#,
-            ),
+            answer(r#"{"categories":["health","business_and_finance"],"keywords":[]}"#),
         ]));
         let Some(state) =
             test_state_with_llm("jobify_test_discord_onboarding_fallback", llm.clone()).await
@@ -1303,7 +1282,6 @@ mod tests {
             json!(["health", "business_and_finance"]),
             "the deterministic map still gives the matcher a category filter"
         );
-        assert_eq!(profile["subcategories"], json!([]));
         assert_eq!(
             body["meta"]["onboarding_complete"], true,
             "the interview is still finished"
@@ -1332,7 +1310,7 @@ mod tests {
     #[tokio::test]
     async fn an_answer_with_no_known_category_is_not_stored_as_a_decision() {
         let llm = Arc::new(ScriptedLlm::new(vec![answer(
-            r#"{"categories":["computer_technology"],"subcategories":["Data Analyst"],"keywords":["sql"]}"#,
+            r#"{"categories":["computer_technology"],"keywords":["sql"]}"#,
         )]));
         let Some(state) = test_state_with_llm("jobify_test_discord_onboarding_bad_slug", llm).await
         else {
@@ -1364,22 +1342,14 @@ mod tests {
             profile["categories"],
             json!(["health", "business_and_finance"])
         );
-        assert_eq!(
-            profile["subcategories"],
-            json!([]),
-            "a title decided for an unknown area is dropped with the area"
-        );
     }
 
     /// A complete profile whose answers did not change reuses the stored model decision.
     #[tokio::test]
     async fn an_unchanged_resave_reuses_the_model_decision() {
-        let first = answer(
-            r#"{"categories":["health"],"subcategories":["Programme Officer"],"keywords":["programme"]}"#,
-        );
+        let first = answer(r#"{"categories":["health"],"keywords":["programme"]}"#);
         // A second reply is queued but must never be consumed.
-        let second =
-            answer(r#"{"categories":["education"],"subcategories":["Teacher"],"keywords":[]}"#);
+        let second = answer(r#"{"categories":["education"],"keywords":[]}"#);
         let llm = Arc::new(ScriptedLlm::new(vec![first, second]));
         let Some(state) =
             test_state_with_llm("jobify_test_discord_onboarding_reuse", llm.clone()).await
@@ -1410,10 +1380,6 @@ mod tests {
             again["data"]["match_profile"]["categories"],
             json!(["health"])
         );
-        assert_eq!(
-            again["data"]["match_profile"]["subcategories"],
-            json!(["Programme Officer"])
-        );
         assert_eq!(again["data"]["match_profile"]["category_source"], "llm");
     }
 
@@ -1421,7 +1387,7 @@ mod tests {
     #[tokio::test]
     async fn a_partial_save_never_calls_the_model() {
         let llm = Arc::new(ScriptedLlm::new(vec![answer(
-            r#"{"categories":["ict"],"subcategories":["Data Analyst"],"keywords":[]}"#,
+            r#"{"categories":["ict"],"keywords":[]}"#,
         )]));
         let Some(state) =
             test_state_with_llm("jobify_test_discord_onboarding_partial", llm.clone()).await

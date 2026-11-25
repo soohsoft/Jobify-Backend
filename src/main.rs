@@ -18,7 +18,7 @@ mod models;
 /// unit-tested on its own, because these lists decide who is sent what.
 mod onboarding;
 mod otp;
-/// The one completion-time model call that decides categories and subcategories. Kept out of
+/// The one completion-time model call that decides categories and keywords. Kept out of
 /// `onboarding` on purpose: that module is the deterministic fallback and must stay callable
 /// (and testable) with no provider at all.
 mod profile_llm;

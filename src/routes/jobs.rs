@@ -917,7 +917,7 @@ fn default_match_limit() -> u64 {
 // Match scoring: one normalised 0–100 percentage
 // ---------------------------------------------------------------------------
 //
-// The old score was an additive count (category 1, subcategory 3, keyword 1 or 0.5) with no
+// The old score was an additive count (category 1, keyword 1 or 0.5) with no
 // ceiling and no meaning: it ordered rows but could not answer "is this good enough to show
 // someone?", so an ICT member saw "Prequalified Enumerator" next to a real IT role.
 //
@@ -929,20 +929,15 @@ fn default_match_limit() -> u64 {
 //   base      20   Any admitted row starts at 20. Being in a decided field is real evidence
 //                  but it is not a job offer, so 20 alone is far under the cut-off.
 //   category  10   The stored slug is one of the member's slugs verbatim.
-//   phrase    45   The whole subcategory ("Data Analyst") is in the title — the strongest
-//                  signal, because it is a role the backend decided this member can apply
-//                  for.
-//   partial   30   Every word of a subcategory is in the title but not adjacent
-//                  ("Analyst, Data Unit"). Never added on top of the phrase.
-//   keyword   15   per keyword in the title, capped at 30 (two hits): a loose word is worth
-//                  far less than a decided role title.
+//   keyword   15   per keyword in the title, capped at 30 (two hits): a loose word is the
+//                  only signal inside an admitted category, so it is worth what it is worth.
 //   keyword    5   per keyword in the DESCRIPTION only, capped at 10, so a description can
 //                  never carry a row over the line by itself.
 //
-//   20 + 10 + 45  = 75   a subcategory title hit  → above the 70 cut-off
-//   20 + 10       = 30   a bare category match    → below it
-//   20 + 10 + 10  = 40   the most a description can add
-//   and the sum is capped at 100, so the top of the scale is a phrase hit plus title keywords.
+//   20 + 10            = 30   a bare category match     → below the 70 cut-off
+//   20 + 10 + 30       = 60   two title keywords
+//   20 + 10 + 30 + 10  = 70   the top of the scale: title and description keywords saturated
+//   and the sum is capped at 100, so nothing can exceed the scale.
 //
 // ONE function for every route: `GET /jobs`, `GET /jobs/match`, the bot's for-user list and
 // the alert refresh all score through `score_job`, so no two surfaces can disagree.
@@ -952,23 +947,11 @@ pub const MATCH_THRESHOLD_DEFAULT: i64 = 70;
 
 const SCORE_BASE: i64 = 20;
 const SCORE_CATEGORY_EXACT: i64 = 10;
-const SCORE_SUBCATEGORY_PHRASE: i64 = 45;
-const SCORE_SUBCATEGORY_PARTIAL: i64 = 30;
 const SCORE_KEYWORD_TITLE: i64 = 15;
 const SCORE_KEYWORD_TITLE_MAX: i64 = 30;
 const SCORE_KEYWORD_DESCRIPTION: i64 = 5;
 const SCORE_KEYWORD_DESCRIPTION_MAX: i64 = 10;
 const SCORE_MAX: i64 = 100;
-
-/// The whole-word tokens of a title, lowercased. Used for the partial-subcategory rule:
-/// "it" must match the word "IT", not the "it" inside "Digital".
-fn title_words(title: &str) -> Vec<String> {
-    title
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
 
 /// A job's fit for one profile, as a 0–100 percentage.
 ///
@@ -990,27 +973,6 @@ pub fn score_job(job: &JobDoc, profile: &MatchProfile) -> i64 {
 
     let title = job.title.to_lowercase();
     let description = job.description.to_lowercase();
-    let words = title_words(&title);
-
-    // A decided role title is the whole phrase, so "data analyst" in "Senior Data Analyst"
-    // counts and "data" alone does not. The partial rule only applies when the phrase did
-    // not match, so one subcategory can never be counted twice.
-    let mut subcategory = 0;
-    for wanted in &profile.subcategories {
-        let phrase = wanted.trim().to_lowercase();
-        if phrase.is_empty() {
-            continue;
-        }
-        if title.contains(&phrase) {
-            subcategory = SCORE_SUBCATEGORY_PHRASE;
-            break;
-        }
-        let parts: Vec<&str> = phrase.split_whitespace().collect();
-        if parts.len() > 1 && parts.iter().all(|part| words.iter().any(|w| w == part)) {
-            subcategory = subcategory.max(SCORE_SUBCATEGORY_PARTIAL);
-        }
-    }
-    score += subcategory;
 
     let mut in_title = 0;
     let mut in_description = 0;
@@ -1126,7 +1088,6 @@ async fn match_jobs(
                 "country": country_wanted,
                 "duplicatesRemoved": ranked.duplicates_removed,
                 "categories": profile.categories,
-                "subcategories": profile.subcategories,
                 "categorySource": profile.category_source,
             }
         })),
@@ -1144,6 +1105,11 @@ pub struct ForUserQuery {
     /// `so` (the default), another short code, or `all`; same rule as `GET /jobs`.
     #[serde(default)]
     country: Option<String>,
+    /// Overrides the fit cut-off for this read only. `/jobs` browsing passes `0` because the
+    /// member asked to see what is live in their areas, not only the rows that would justify
+    /// an alert; the digest keeps the configured cut-off. Clamped to 0..=100.
+    #[serde(default)]
+    threshold: Option<i64>,
 }
 
 /// `GET /internal/jobs/for-user/{discord_id}` — the member's own list, addressed by the
@@ -1199,6 +1165,7 @@ async fn jobs_for_user(
         limit as i64,
         kind,
         query.country.as_deref(),
+        query.threshold,
     )
     .await?;
     let data: Vec<Value> = outcome
@@ -1214,7 +1181,6 @@ async fn jobs_for_user(
         threshold = outcome.threshold,
         reason = outcome.reason(),
         categories = outcome.areas.categories.len(),
-        subcategories = outcome.areas.subcategories.len(),
         source = %outcome.areas.source,
         "for-user match read"
     );
@@ -1233,7 +1199,6 @@ async fn jobs_for_user(
                 "country": outcome.country,
                 "duplicatesRemoved": outcome.duplicates_removed,
                 "categories": outcome.areas.categories,
-                "subcategories": outcome.areas.subcategories,
                 "categorySource": outcome.areas.source,
             }
         })),
@@ -1533,13 +1498,19 @@ pub(crate) async fn match_rows(
     limit: i64,
     kind: Option<&str>,
     country_requested: Option<&str>,
+    threshold_override: Option<i64>,
 ) -> Result<MatchOutcome, AppError> {
+    // Browsing passes 0: the member asked what is live in their areas, so every admitted row
+    // is listed and ranked rather than hidden under the alert cut-off.
+    let threshold = threshold_override
+        .map(|value| value.clamp(0, 100))
+        .unwrap_or(state.config.match_threshold);
     let empty = |country: &str| MatchOutcome {
         rows: Vec::new(),
         areas: crate::models::MatchAreas::default(),
         considered: 0,
         qualified: 0,
-        threshold: state.config.match_threshold,
+        threshold,
         country: country.to_string(),
         duplicates_removed: 0,
     };
@@ -1557,7 +1528,6 @@ pub(crate) async fn match_rows(
         return Ok(empty(&country_wanted));
     };
 
-    let threshold = state.config.match_threshold;
     let ranked = ranked_candidates(
         state,
         &profile,
@@ -1573,7 +1543,6 @@ pub(crate) async fn match_rows(
     .await?;
     let areas = crate::models::MatchAreas {
         categories: profile.categories.clone(),
-        subcategories: profile.subcategories.clone(),
         source: profile.category_source.clone(),
     };
     Ok(MatchOutcome {
@@ -1741,76 +1710,59 @@ mod tests {
         serde_json::from_value(value).expect("a minimal job document must deserialize")
     }
 
-    /// The arithmetic, checked at the boundaries the product turns on: a decided role title
-    /// in the title clears the 70 cut-off, a bare category match does not, and a description
-    /// can never carry a row over the line on its own.
+    /// The arithmetic, checked at the boundaries the product turns on: inside a decided
+    /// category a row is only as good as the advert's own words, and the top of the scale —
+    /// both keyword caps saturated — is exactly the 70 cut-off.
     #[test]
-    fn a_subcategory_phrase_in_the_title_clears_the_cut_off_and_a_category_alone_does_not() {
+    fn a_category_alone_stays_below_the_cut_off_and_saturated_keywords_reach_it() {
         use super::{MATCH_THRESHOLD_DEFAULT, score_job};
 
         let profile = MatchProfile {
             categories: vec!["ict".to_string()],
-            subcategories: vec!["Data Analyst".to_string()],
-            keywords: Vec::new(),
+            keywords: vec![
+                "data".to_string(),
+                "analyst".to_string(),
+                "sql".to_string(),
+                "reporting".to_string(),
+            ],
             locations: Vec::new(),
             category_source: "llm".to_string(),
             facts_key: String::new(),
             updated_at: String::new(),
         };
 
-        // 20 base + 10 exact category + 45 phrase = 75.
-        let phrase = job_from(serde_json::json!({
-            "_id": "job-1",
-            "title": "REACH Data Analyst",
-            "description": "",
-            "category": "ict",
-        }));
-        assert_eq!(score_job(&phrase, &profile), 75);
-        assert!(score_job(&phrase, &profile) >= MATCH_THRESHOLD_DEFAULT);
-
-        // 20 + 10 = 30: in the right field, nothing about the job itself. This is the row that
-        // used to be listed beside a real IT role.
+        // 20 base + 10 exact category = 30: in the right field, nothing about the job itself.
+        // This is the row that used to be listed beside a real IT role.
         let bare = job_from(serde_json::json!({
-            "_id": "job-2",
+            "_id": "job-1",
             "title": "Prequalified Enumerator",
-            "description": "Collect data for the MEAL unit",
+            "description": "",
             "category": "ict",
         }));
         assert_eq!(score_job(&bare, &profile), 30);
         assert!(score_job(&bare, &profile) < MATCH_THRESHOLD_DEFAULT);
 
-        // 20 + 10 + 30: every word present but not adjacent — real evidence, not a match.
-        let partial = job_from(serde_json::json!({
-            "_id": "job-3",
-            "title": "Analyst, Data Unit",
+        // 20 + 10 + 30: two title keywords saturate the title cap — real evidence, still
+        // short of the cut-off on its own.
+        let titled = job_from(serde_json::json!({
+            "_id": "job-2",
+            "title": "Data Analyst",
             "description": "",
             "category": "ict",
         }));
-        assert_eq!(score_job(&partial, &profile), 60);
-        assert!(score_job(&partial, &profile) < score_job(&phrase, &profile));
-    }
+        assert_eq!(score_job(&titled, &profile), 60);
+        assert!(score_job(&titled, &profile) < MATCH_THRESHOLD_DEFAULT);
 
-    // The partial rule matches words, not substrings: "IT" must not match "Digital".
-    #[test]
-    fn a_partial_match_needs_the_words_themselves() {
-        use super::score_job;
-
-        let profile = MatchProfile {
-            categories: vec!["ict".to_string()],
-            subcategories: vec!["IT Support".to_string()],
-            ..MatchProfile::default()
-        };
-        let digital = job_from(serde_json::json!({
-            "_id": "job-1",
-            "title": "Digital Marketing Officer",
-            "description": "Support the marketing team",
+        // 20 + 10 + 30 + 10 = 70: both caps saturated. This is the highest score a profile
+        // with no locations can produce, and it lands exactly on the default cut-off.
+        let saturated = job_from(serde_json::json!({
+            "_id": "job-3",
+            "title": "Data Analyst",
+            "description": "SQL reporting dashboards",
             "category": "ict",
         }));
-        assert_eq!(
-            score_job(&digital, &profile),
-            30,
-            "'it' inside 'Digital' must not count, and 'support' alone is not the phrase"
-        );
+        assert_eq!(score_job(&saturated, &profile), 70);
+        assert!(score_job(&saturated, &profile) >= MATCH_THRESHOLD_DEFAULT);
     }
 
     /// A description-only keyword adds at most 5 per hit, capped at 10 — it can never lift a
@@ -1821,7 +1773,6 @@ mod tests {
 
         let profile = MatchProfile {
             categories: vec!["ict".to_string()],
-            subcategories: vec!["Network Administrator".to_string()],
             keywords: vec![
                 "cctv".to_string(),
                 "troubleshooting".to_string(),
@@ -1860,7 +1811,6 @@ mod tests {
 
         let profile = MatchProfile {
             categories: vec!["ict".to_string()],
-            subcategories: vec!["Data Analyst".to_string()],
             keywords: vec!["data".to_string()],
             ..MatchProfile::default()
         };
@@ -1880,30 +1830,37 @@ mod tests {
         assert_eq!(score_job(&uncategorised, &profile), 0);
     }
 
-    /// The scale saturates at 100 instead of growing with every keyword hit.
+    /// The scale has a hard ceiling and the maximum attainable score is now 70: base,
+    /// category, and both keyword caps. Nothing a profile can say pushes a row above it.
     #[test]
-    fn the_score_is_capped_at_one_hundred() {
-        use super::score_job;
+    fn the_score_stops_at_the_top_of_the_scale() {
+        use super::{MATCH_THRESHOLD_DEFAULT, score_job};
 
         let profile = MatchProfile {
             categories: vec!["ict".to_string()],
-            subcategories: vec!["Data Analyst".to_string()],
             keywords: vec![
                 "data".to_string(),
                 "analyst".to_string(),
                 "sql".to_string(),
                 "reporting".to_string(),
                 "dashboards".to_string(),
+                "mongodb".to_string(),
+                "excel".to_string(),
             ],
             ..MatchProfile::default()
         };
         let job = job_from(serde_json::json!({
             "_id": "job-1",
             "title": "Data Analyst, SQL Reporting Dashboards",
-            "description": "data analyst",
+            "description": "MongoDB and Excel",
             "category": "ict",
         }));
-        assert_eq!(score_job(&job, &profile), 100);
+        assert_eq!(
+            score_job(&job, &profile),
+            70,
+            "30 title keywords + 10 description keywords is the whole scale"
+        );
+        assert_eq!(score_job(&job, &profile), MATCH_THRESHOLD_DEFAULT);
     }
 
     /// The bot's one call: same rows and shape as `/jobs/match`, addressed by snowflake, and
@@ -1932,6 +1889,7 @@ mod tests {
                 limit: 5,
                 kind: None,
                 country: None,
+                threshold: None,
             }),
         )
         .await
@@ -1957,8 +1915,7 @@ mod tests {
                 "education": [],
                 "match_profile": {
                     "categories": ["ict"],
-                    "subcategories": ["Data Analyst"],
-                    "keywords": ["sql"],
+                    "keywords": ["data", "analyst", "sql", "reporting"],
                     "locations": [],
                     "category_source": "llm",
                 },
@@ -1985,6 +1942,7 @@ mod tests {
                 limit: 5,
                 kind: Some("job".to_string()),
                 country: None,
+                threshold: None,
             }),
         )
         .await
@@ -1993,17 +1951,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["meta"]["reason"], "ok");
         assert_eq!(body["meta"]["categories"], serde_json::json!(["ict"]));
-        assert_eq!(
-            body["meta"]["subcategories"],
-            serde_json::json!(["Data Analyst"])
-        );
         assert_eq!(body["meta"]["categorySource"], "llm");
         let rows = body["data"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "rows: {body}");
         assert_eq!(rows[0]["job"]["_id"], "job-901");
         assert_eq!(
-            rows[0]["matchScore"], 80,
-            "base 20 + exact category 10 + 'Data Analyst' in the title 45 + 'SQL' in the description 5"
+            rows[0]["matchScore"], 70,
+            "base 20 + exact category 10 + two title keywords 30 + two description keywords 10"
         );
         assert_eq!(body["meta"]["threshold"], 70);
         assert_eq!(body["meta"]["queued"], 0, "a read never queues");
@@ -2045,8 +1999,7 @@ mod tests {
                     "education": [],
                     "match_profile": {
                         "categories": ["ict"],
-                        "subcategories": ["Data Analyst"],
-                        "keywords": ["sql"],
+                        "keywords": ["data", "analyst", "analysis", "sql"],
                         "locations": [],
                         "category_source": "llm",
                     },
@@ -2057,7 +2010,6 @@ mod tests {
                     "education": [],
                     "match_profile": {
                         "categories": ["ict"],
-                        "subcategories": ["IT Manager"],
                         "keywords": ["cctv"],
                         "locations": [],
                         "category_source": "llm",
@@ -2114,6 +2066,7 @@ mod tests {
                 limit: 5,
                 kind: None,
                 country: None,
+                threshold: None,
             }),
         )
         .await
@@ -2129,7 +2082,10 @@ mod tests {
         let rows = bot["data"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "rows: {bot}");
         assert_eq!(rows[0]["job"]["_id"], "job-strong");
-        assert_eq!(rows[0]["matchScore"], 80, "75 from the title + 5 for 'SQL'");
+        assert_eq!(
+            rows[0]["matchScore"], 70,
+            "20 base + 10 category + 30 title keywords + 10 description keywords"
+        );
 
         // 2. A member with nothing above the cut-off: an honest empty list, not a 404.
         let (status, Json(weak)) = jobs_for_user(
@@ -2139,6 +2095,7 @@ mod tests {
                 limit: 5,
                 kind: None,
                 country: None,
+                threshold: None,
             }),
         )
         .await
@@ -2193,10 +2150,10 @@ mod tests {
             .await
             .unwrap()
             .expect("the strong match must be queued");
-        assert_eq!(stored.match_score, Some(80));
+        assert_eq!(stored.match_score, Some(70));
 
         // 5. The feed keeps every live row — browsing is not matching — and reports the same
-        //    0–100, so a 30% row cannot look like a 75% one.
+        //    0–100, so a 30% row cannot look like a 70% one.
         let (_, Json(feed)) = list(
             State(state.clone()),
             Some(Extension(AuthUser {
@@ -2229,8 +2186,11 @@ mod tests {
             })
             .collect();
         assert_eq!(scores.len(), 3, "the feed is not cut off: {feed}");
-        assert_eq!(scores["job-strong"], 80);
-        assert_eq!(scores["job-weak"], 30);
+        assert_eq!(scores["job-strong"], 70);
+        assert_eq!(
+            scores["job-weak"], 35,
+            "in the category, one keyword buried in the description"
+        );
         assert_eq!(
             scores["job-wash"], 0,
             "a foreign category scores 0 in the feed too"

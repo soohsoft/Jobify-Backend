@@ -58,8 +58,9 @@ impl Config {
                 .unwrap_or(30)
                 .clamp(0, 1000),
             // 70 is the product decision: a category match alone (30) is not an offer, and a
-            // subcategory title hit (75) is. A garbage or out-of-range value falls back to
-            // the default rather than 0 (which would show everything) or 101 (nothing).
+            // row with both its title (30) and description (10) keyword caps saturated is —
+            // that is the top of the attainable scale. A garbage or out-of-range value falls
+            // back to the default rather than 0 (which would show everything) or 101 (nothing).
             match_threshold: {
                 let default = crate::routes::jobs::MATCH_THRESHOLD_DEFAULT;
                 env_var("MATCH_THRESHOLD", &default.to_string())

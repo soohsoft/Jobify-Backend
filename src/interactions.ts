@@ -1,10 +1,10 @@
 /**
  * Component and modal handling: the four-step interview plus the small buttons attached to
- * `/alerts`, `/credits` and the completion message.
+ * the alerts panel, `/balance` and the completion message.
  *
  * Every branch starts by checking the session, because an old message can outlive a restart
- * or a finished interview. A dead session gets a plain "run /start again" rather than a
- * half-applied profile write.
+ * or a finished interview. A dead session gets a plain "send me a message" and nothing is
+ * written, rather than a half-applied profile write.
  */
 import { MessageFlags, type ButtonInteraction, type Interaction, type ModalSubmitInteraction, type StringSelectMenuInteraction, type ActionRowBuilder, type ButtonBuilder } from 'discord.js';
 
@@ -57,7 +57,7 @@ export async function handleInteraction(interaction: Interaction, ctx: BotContex
 
 async function expired(interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction): Promise<void> {
   const payload = {
-    content: 'That setup step has expired. Run `/start` to pick it up again — anything you already answered is saved.',
+    content: 'That setup step has expired. Send me a message and we will pick it up again — anything you already answered is saved.',
     flags: MessageFlags.Ephemeral,
   } as const;
   try {
@@ -78,7 +78,7 @@ async function stepFailed(
       ? 'I could not reach Jobify just now — your answer was not saved. Please try again.'
       : err instanceof BackendError && err.status === 400
         ? `That answer was refused: ${err.message}`
-        : 'I could not save that answer. Please try again — if it keeps failing, run `/start` again.';
+        : 'I could not save that answer. Please try again — if it keeps failing, send me a message to pick the setup up again.';
   ctx.logger.error('onboarding step failed', {
     discordId: interaction.user.id,
     step: interaction.customId,
@@ -249,7 +249,7 @@ function experienceYearsFromBand(band: string): number | null {
  * Step 4: the last answer, then "Setup complete" with the member's CURRENT matches.
  *
  * The bot does not enable alerts here — the backend does it when onboarding completes, and
- * skips it for anyone who said `/stop`. Re-enabling from the bot would quietly undo that.
+ * skips it for anyone who switched alerts off. Re-enabling from the bot would quietly undo that.
  * The matches are the backend's own scored rows (max 5), rendered by the digest formatter.
  */
 async function completeInterview(
@@ -404,7 +404,7 @@ async function handleModal(interaction: ModalSubmitInteraction, ctx: BotContext)
   if (interaction.customId === CID.nameModal) {
     const name = interaction.fields.getTextInputValue('name').trim();
     if (name.length === 0) {
-      await interaction.reply({ content: 'I need a name — run `/start` and try again.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: 'I need a name — send me a message and we will start again.', flags: MessageFlags.Ephemeral });
       return;
     }
     await advanceFromModal(interaction, ctx, async () => {
@@ -438,7 +438,7 @@ async function handleModal(interaction: ModalSubmitInteraction, ctx: BotContext)
   if (interaction.customId === CID.positionModal) {
     const position = interaction.fields.getTextInputValue('position').trim();
     if (position.length === 0) {
-      await interaction.reply({ content: 'A job title is needed — run `/start` and try again.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: 'A job title is needed — send me a message and we will start again.', flags: MessageFlags.Ephemeral });
       return;
     }
     await advanceFromModal(interaction, ctx, async () => {

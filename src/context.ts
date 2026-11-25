@@ -64,7 +64,7 @@ export interface BotContext {
   sessions: OnboardingSessions;
   /** A guild channel where plain messages are answered without a mention. Unset = mention only. */
   freeChannelId?: string;
-  /** The taxonomy, cached: it changes only with a deploy and every `/start` needs it. */
+  /** The taxonomy, cached: it changes only with a deploy and every interview needs it. */
   categories: () => Promise<Category[]>;
   /** A DM to a Discord id; throws when the member cannot be reached. */
   sendDm: SendDm;

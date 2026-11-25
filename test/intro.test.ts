@@ -109,9 +109,12 @@ test('the intro explains search, commands, the digest and carries the marker', (
   const content = introContent(8, 'Africa/Nairobi');
   assert.ok(content.includes('**How Jobify works**'));
   assert.ok(content.includes('`nurse jobs in Mogadishu`'));
-  assert.ok(content.includes('/start'));
-  assert.ok(content.includes('/alerts'));
+  assert.ok(content.includes('/jobs'));
+  assert.ok(content.includes('/balance'));
   assert.ok(content.includes('/account'));
+  for (const gone of ['/start', '/alerts', '/stop', '/credits', '/help', '/company']) {
+    assert.ok(!content.includes(gone), `the intro still names ${gone}`);
+  }
   assert.ok(content.includes('08:00 EAT'));
   assert.ok(content.trimEnd().endsWith(INTRO_MARKER), 'the marker must be the last line');
   assert.ok(content.length <= 1900);

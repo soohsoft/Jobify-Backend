@@ -6,7 +6,7 @@
  * First contact is different: a member with no usable profile is walked into the interview
  * instead of being answered with the assistant's generic "I can help with..." line. That
  * reply would otherwise be the only thing a brand-new member ever sees, because nothing tells
- * them `/start` exists. The onboarding prompt is free — no assistant call, no query charged.
+ * them the interview exists. The onboarding prompt is free — no assistant call, no query charged.
  *
  * The reply to an onboarded member is the assistant's own sentence plus up to three real rows
  * as links. Nothing else is generated here — no summarising, no "here are some tips" — because
@@ -26,8 +26,8 @@ const WELCOME =
   'Welcome to Jobify. Four quick questions and I will start sending you matches. First: what is your name?';
 
 /**
- * Starts the interview the same way `/start` does, carrying forward the answers already on
- * file so the modals are pre-filled rather than empty.
+ * Starts the interview the same way the join welcome does, carrying forward the answers
+ * already on file so the modals are pre-filled rather than empty.
  */
 async function startInterview(
   message: Message,

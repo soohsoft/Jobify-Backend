@@ -445,7 +445,7 @@ export function completionPrompt(input: CompletionInput): {
   lines.push(
     alerts?.enabled
       ? `Alerts: on, ${alerts.mode === 'instant' ? 'instant' : `daily at ${hours} (${input.digestTz})`}`
-      : 'Alerts: off — switch them on with `/alerts` whenever you want the digest.',
+      : 'Alerts: off — your account page (`/account`) turns them back on whenever you want the digest.',
   );
 
   lines.push('');

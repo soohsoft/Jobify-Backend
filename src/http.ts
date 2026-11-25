@@ -200,7 +200,8 @@ export class Backend {
     });
     const meta = envelope.meta ?? {};
     // The backend is the authority on both: it knows that an "Other" degree completes
-    // onboarding and whether `/stop` must be respected, and the bot must not re-derive either.
+    // onboarding and whether the member switched alerts off, and the bot must not re-derive
+    // either.
     return {
       user: envelope.data,
       onboarding_complete:

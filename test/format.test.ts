@@ -12,7 +12,6 @@ import {
   dmFailureReason,
   formatAssistantReply,
   formatRows,
-  helpText,
   jobLink,
   matchLabel,
   noMatchesCopy,
@@ -453,9 +452,11 @@ test('two genuinely different jobs with the same title both survive', () => {
   assert.equal(rendered.match(/\*\*Data Analyst\*\*/g)?.length, 2);
 });
 
-test('help is at most ten lines', () => {
-  const lines = helpText().split('\n');
-  assert.ok(lines.length <= 10, `help has ${lines.length} lines`);
-  assert.ok(helpText().includes('/start'));
-  assert.ok(helpText().includes('/stop'));
+test('the digest footer points at commands that still exist', () => {
+  const message = digestMessage([rowInput()], { appBaseUrl: APP });
+  const footer = message.split('\n').at(-1) ?? '';
+  assert.ok(footer.includes('`/account`'), footer);
+  for (const gone of ['/start', '/alerts', '/stop', '/credits', '/help', '/company']) {
+    assert.ok(!footer.includes(gone), `footer still names ${gone}: ${footer}`);
+  }
 });

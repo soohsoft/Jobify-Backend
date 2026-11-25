@@ -3,8 +3,8 @@
  *
  * A join is the only moment the bot can speak to someone who has not yet written. The DM is
  * the product's real surface, so the interview starts there: the message carries the same
- * education prompt `/start` builds, and the existing button handlers pick the session up
- * unchanged because it lives in the same in-memory store.
+ * name prompt a free-text first contact builds, and the existing button handlers pick the
+ * session up unchanged because it lives in the same in-memory store.
  *
  * DMs are frequently closed on Discord ("Cannot send messages to this user", code 50007).
  * Then the welcome goes once into the free-text channel with one explicit @mention and a hint
@@ -58,7 +58,7 @@ export function plainWelcome(member: JoinMember): MessagePayload {
         welcomeLines(nameFor(member)),
         '',
         'Your profile is already set up, so I will keep sending your daily matches.',
-        '`/start` redoes the interview · `/alerts` turns the digest off · `/account` for payment and company details.',
+        '`/account` opens your portal — payment, alerts and company details.',
       ].join('\n'),
     ),
   };
@@ -75,7 +75,7 @@ export function interviewWelcome(member: JoinMember): MessagePayload {
 export function channelFallbackMessage(member: JoinMember, interview: boolean): MessagePayload & { mention: string } {
   const mention = `<@${member.id}>`;
   const hint = interview
-    ? 'I could not DM you — Discord returned 50007. Type your role and place right here (for example `nurse jobs in Mogadishu`) and we will start, or open your DMs (Server Settings → Privacy Settings) and run `/start`.'
+    ? 'I could not DM you — Discord returned 50007. Type your role and place right here (for example `nurse jobs in Mogadishu`) and we will start, or open your DMs (Server Settings → Privacy Settings) and message me there.'
     : 'I could not DM you — Discord returned 50007. Your profile is already set up; open your DMs (Server Settings → Privacy Settings) so the daily digest can reach you, or type a role and place here, e.g. `nurse jobs in Mogadishu`.';
   return {
     mention,

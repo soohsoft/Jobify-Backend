@@ -19,7 +19,7 @@ export interface AlertPrefs {
   enabled: boolean;
   mode: string;
   last_sent_at: string;
-  /** True when the MEMBER switched alerts off (`/stop`, `/alerts off`), so onboarding
+  /** True when the MEMBER switched alerts off (the alerts Off button, the portal toggle), so onboarding
    *  (including a re-run) must not switch them back on. */
   user_disabled: boolean;
   excluded_employers: string[];

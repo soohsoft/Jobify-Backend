@@ -9,22 +9,30 @@ Node 20.6+ (uses `--import` for tests), discord.js v14, TypeScript strict.
 
 ## Commands
 
+Four commands, and nothing else in the picker:
+
 | Command | What it does |
 |---|---|
-| `/start` | Registers the member by Discord id, then runs the four-step interview: name → education (level, then field for bachelor/master/phd, with an "another degree?" loop up to 4) → last job title → years of experience. There is no location step: Jobify covers all of Somalia. Each answer is written to the backend immediately, so stopping halfway still leaves a usable profile. Ends with **Setup complete**, the member's current matches (up to 5) and a pointer at `/jobs`. |
 | `/jobs [query]` | With a query: the purpose-bound assistant. Without: the newest live jobs in the member's sectors. |
 | `/tenders [query]` | The same, `kind=tender`. |
-| `/alerts` | On/off, instant vs daily, and a button to re-run the interview. |
-| `/credits` | Free searches left this period, purchased balance, Buy credits. |
+| `/balance` | Free searches left this period, purchased balance, Buy credits. (Was `/credits`.) |
 | `/account` | Mints a one-time portal link (15 min, single use) and DMs it. |
-| `/company` | Company name + services via a modal. |
-| `/help` | Ten lines. |
-| `/stop` | Alerts off; the account and profile are kept. |
+
+Onboarding is not a command: the four-step interview (name → education, level then field for
+bachelor/master/phd with an "another degree?" loop up to 4 → last job title → years of
+experience; no location step, Jobify covers all of Somalia) starts from a member's first free
+text, and the join welcome. Each answer is written to the backend immediately, so stopping
+halfway still leaves a usable profile. It ends with **Setup complete**, the member's current
+matches (up to 5) and a pointer at `/jobs`.
+
+Alerts are changed with the buttons on the alerts panel and in the portal behind `/account`;
+company details live in the portal too. A command a cached client still shows (`/start`,
+`/credits`, `/alerts`, `/company`, `/help`, `/stop`) is answered with the four that exist.
 
 Free text: a DM to the bot (or an @mention in a server) goes to the assistant with the
 sender's Discord id. The reply is the assistant's own sentence plus up to three real rows as
 links. A brand-new member is not answered by the assistant at all: their first message starts
-the same four-step interview as `/start` (pre-filled with the answers already on file), and that
+the same four-step interview a first contact starts (pre-filled with the answers already on file), and that
 welcome costs no query. Writing again mid-interview re-sends the current step rather than
 restarting it.
 
@@ -37,7 +45,7 @@ today's behaviour.
 
 `GuildMemberAdd` (requires the privileged **Server Members** intent, enabled in the developer
 portal) upserts the account and DMs the member: three lines of welcome plus the same education
-prompt `/start` builds, so the interview starts before the member says anything. A member who
+name prompt the interview opens with, so the interview starts before the member says anything. A member who
 already has a profile gets the welcome without the interview. With DMs closed Discord answers
 50007; the bot then posts one message in the free channel that @mentions them once and says
 how to fix it. The DM is attempted once, and the log records `path: dm|channel|failed`.
@@ -79,6 +87,10 @@ npm run build
 Global commands are registered on every boot (`client.application.commands.set`), so a new
 command appears after a restart without touching the portal. Discord caches per-client for up
 to an hour; `GET /applications/{app_id}/commands` shows the truth immediately.
+
+Each guild the bot is in gets the same list on boot (`guild.commands.set`). Guild copies
+SHADOW the global ones, so a copy registered by hand for instant testing would keep a removed
+command in the picker forever; syncing both means the four-command list is the only list.
 
 ### systemd
 
@@ -159,15 +171,15 @@ Internal routes, all `x-api-key`:
 | `GET /internal/discord/user/{discord_id}` | profile, alerts, credits in one read |
 | `POST /internal/discord/link-token` | `/account`, Buy credits |
 | `GET /internal/discord/link/{user_id}` | digest: user id → Discord id |
-| `POST /internal/discord/alerts` | `/alerts`, `/stop` |
-| `POST /internal/discord/company` | `/company` |
+| `POST /internal/discord/alerts` | the alerts panel buttons (`alerts:*`) |
+| `POST /internal/discord/company` | the `company:submit` modal |
 | `POST /internal/assistant/query` | `/jobs <query>`, `/tenders <query>`, free text |
 | `GET /internal/deliveries`, `POST /internal/deliveries/{sent,failed}`, `POST /internal/matches/refresh` | digest |
 
 Public: `GET /categories` (the 28-slug taxonomy the sector multi-select renders) and
 `GET /jobs` (browsing and the "N live openings" count).
 
-### Why `/company` writes through an internal route
+### Why company details write through an internal route
 
 `PATCH /me/company` is Bearer-only and the bot has no bearer token. Two options were possible:
 make the bot fetch a magic link and act as a browser, or add a snowflake-addressed write. The
@@ -184,7 +196,7 @@ tenders-only member would accumulate job notifications they are never sent.
 
 ## Tests
 
-`npm test` runs 56 unit tests with a stubbed backend — no network, no gateway:
+`npm test` runs 118 unit tests with a stubbed backend — no network, no gateway:
 
 - request building and envelope unwrapping, the 402 `out_of_credits` path, 5xx retry and
   timeout classification (`test/http.test.ts`);
@@ -198,6 +210,9 @@ tenders-only member would accumulate job notifications they are never sent.
   member still gets one answer, mid-interview re-prompts reuse the session, and the optional
   free-text channel is mention-free while other guild channels stay ignored
   (`test/messages.test.ts`);
+- the command list itself: exactly `/jobs`, `/tenders`, `/balance`, `/account`, with `/balance`
+  answering the old `/credits` panel and a cached old name answered politely
+  (`test/commands.test.ts`);
 - the wall clock in `Africa/Nairobi`, the once-a-day guard (`test/scheduler.test.ts`).
 
 ## Project layout

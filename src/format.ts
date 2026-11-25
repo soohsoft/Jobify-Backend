@@ -239,7 +239,7 @@ export function digestMessage(
   const lines = [title, '', formatRows(delivered, { appBaseUrl: options.appBaseUrl, max, showScore: true })];
   const waiting = remaining + (options.extraWaiting ?? 0);
   if (waiting > 0) lines.push('', `_${waiting} more waiting — they'll come in tomorrow's digest._`);
-  lines.push('', '_Reply here to ask about any of them, /alerts to change the schedule, /stop to switch these off._');
+  lines.push('', '_Reply here to ask about any of them. Your account page (`/account`) changes the schedule or switches these off._');
   return lines.join('\n');
 }
 
@@ -329,26 +329,10 @@ export function assistantFailureCopy(status: number, code: string): AssistantFai
     };
   }
   if (status === 404 || code === 'not_found') {
-    return { content: 'Run `/start` first so I know who you are, then ask me again.', offerPurchase: false };
+    return { content: 'I do not have your account yet — run `/account` once so I know who you are, then ask me again.', offerPurchase: false };
   }
   if (code === 'timeout' || code === 'network') {
     return { content: 'I could not reach Jobify just now. Please try again in a moment.', offerPurchase: false };
   }
   return { content: 'Something went wrong on my side. Please try again in a moment.', offerPurchase: false };
-}
-
-/** The `/help` text: exactly ten lines, no marketing. */
-export function helpText(): string {
-  return [
-    '**Jobify — Somali jobs and tenders, inside Discord**',
-    '`/start` — set up your profile (about a minute)',
-    '`/jobs [query]` — search jobs, or list the newest in your fields',
-    '`/tenders [query]` — the same for tenders',
-    '`/alerts` — instant, daily or off; the daily digest arrives at 08:00 EAT',
-    '`/credits` — free searches left this period, and how to buy more',
-    '`/account` — a private one-time portal link (payment, company profile)',
-    '`/company` — set your company name and services',
-    '`/help` — this list. `/stop` — alerts off, account and profile kept.',
-    'Or just message me here with what you are looking for — that is a search too.',
-  ].join('\n');
 }

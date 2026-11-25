@@ -446,12 +446,13 @@ test('an answer given mid-interview is saved, and the session keeps its place', 
   assert.equal(sessions.get(MEMBER)?.step, 'another_degree');
 });
 
-test('a click with no session answers “run /start again” and writes nothing', async () => {
+test('a click with no session says how to resume and writes nothing', async () => {
   const { ctx, calls } = harness();
   const clickResult = await click(ctx, CID.education('bachelor'));
   assert.deepEqual(clickResult.updates, []);
   assert.equal(calls.saves.length, 0);
-  assert.ok(renders(clickResult.replies).includes('Run `/start`'));
+  assert.ok(renders(clickResult.replies).includes('Send me a message'));
+  assert.ok(!renders(clickResult.replies).includes('/start'), 'no removed command in the copy');
 });
 
 // ---------------------------------------------------------------------------
@@ -496,7 +497,7 @@ test('a member who said /stop is shown alerts off after finishing', async () => 
   const completion = renders(years.edits);
   assert.ok(completion.startsWith('**Setup complete**'));
   assert.ok(completion.includes('Alerts: off'), completion);
-  assert.ok(completion.includes('`/alerts`'), 'and tells them how to switch them back on');
+  assert.ok(completion.includes('`/account`'), 'and tells them where to switch them back on');
 });
 
 test('when the match read fails the setup still completes', async () => {

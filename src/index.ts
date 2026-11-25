@@ -98,6 +98,19 @@ async function main(): Promise<void> {
         // is loud but not fatal.
         logger.error('command registration failed', errorFields(err));
       }
+      // Guild-scoped copies SHADOW the global ones, and this app has registered both (instant
+      // visibility while testing). A copy left over from an older build keeps a removed
+      // command (`/start`, `/credits`) in the picker no matter what the global set says, so
+      // every guild is brought to the same list on boot. One guild in practice; a failure
+      // here is logged and never fatal — the global set is already correct.
+      for (const guild of ready.guilds.cache.values()) {
+        try {
+          await guild.commands.set(commands);
+          logger.info('guild commands registered', { guildId: guild.id, count: commands.length });
+        } catch (err) {
+          logger.error('guild command registration failed', { guildId: guild.id, ...errorFields(err) });
+        }
+      }
       scheduler.start();
 
       // The pinned intro is the channel's front door; a failure here must not stop the bot.

@@ -1067,10 +1067,14 @@ async fn match_jobs(
 
     // An empty list after the cut-off is a normal answer, not an error: `reason` says so and
     // `considered` shows the member the decision was made on real rows rather than none.
-    let reason = if data.is_empty() {
-        "below_threshold"
-    } else {
+    // Same vocabulary as `MatchOutcome::reason`: nothing admitted is `no_candidates`, not a
+    // low fit. The portal prints its own sentence per reason.
+    let reason = if !data.is_empty() {
         "ok"
+    } else if ranked.considered == 0 {
+        "no_candidates"
+    } else {
+        "below_threshold"
     };
     let total = data.len();
     Ok((
@@ -1470,10 +1474,15 @@ impl MatchOutcome {
     pub fn reason(&self) -> &'static str {
         if self.areas.categories.is_empty() {
             "no_match_profile"
-        } else if self.rows.is_empty() {
-            "below_threshold"
-        } else {
+        } else if !self.rows.is_empty() {
             "ok"
+        } else if self.considered == 0 {
+            // Nothing was even admitted for the profile: an empty tender corpus, or a kind
+            // filter with no stock. Reporting `below_threshold` here would claim rows scored
+            // low when none were scored — the empty list is the corpus, not the member's fit.
+            "no_candidates"
+        } else {
+            "below_threshold"
         }
     }
 }

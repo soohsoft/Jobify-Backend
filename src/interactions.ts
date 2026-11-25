@@ -17,6 +17,7 @@ import {
   FIELD_OPTIONS,
   MAX_EDUCATION,
   anotherPrompt,
+  browseTabsRow,
   completionPrompt,
   educationPrompt,
   experiencePrompt,
@@ -332,7 +333,12 @@ async function browseTab(
 ): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const reply = await browseRows(ctx, interaction.user.id, kind);
-  await interaction.editReply({ content: reply.content, components: reply.components ?? [] });
+  // The tabs ride along with the list, so switching between Jobs and Tenders is always one
+  // press away instead of typing a command again.
+  await interaction.editReply({
+    content: reply.content,
+    components: [browseTabsRow(), ...(reply.components ?? [])],
+  });
 }
 
 async function restartInterview(interaction: ButtonInteraction, ctx: BotContext): Promise<void> {

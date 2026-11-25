@@ -17,7 +17,7 @@ import type { Message } from 'discord.js';
 import type { BotContext } from './context.js';
 import { browseRows } from './commands.js';
 import { formatAssistantReply } from './format.js';
-import { namePrompt, promptForStep, type OnboardingSession } from './onboarding.js';
+import { browseTabsRow, namePrompt, promptForStep, type OnboardingSession } from './onboarding.js';
 import { assistantErrorReply, clampContent } from './ui.js';
 
 const MAX_INPUT = 300;
@@ -142,10 +142,31 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
       const reply = await browseRows(ctx, message.author.id, browseKind);
       await message.reply({
         content: reply.content,
-        ...(reply.components ? { components: reply.components } : {}),
+        components: [browseTabsRow(), ...(reply.components ?? [])],
         allowedMentions: { parse: [] },
       });
       ctx.logger.info('free-text browse', { discordId: message.author.id, kind: browseKind });
+      return;
+    }
+
+    // A greeting is not a search. Opening the chat and typing "hi" used to spend an assistant
+    // call and answer with nothing useful; now it answers with the two tabs, which is what a
+    // member arriving without a question actually wants.
+    const greeting =
+      /^(hi+|hey+|hello+|yo|sup|start|menu|help|salaam|salam|asc|asalaamu\s*calaykum|good\s+(?:morning|afternoon|evening))[\s!.?]*$/i.test(
+        bare,
+      );
+    if (greeting) {
+      const me = await ctx.backend.getUser(message.author.id).catch(() => null);
+      const named = me?.user.name ? `, ${me.user.name}` : '';
+      await message.reply({
+        content:
+          `**What would you like to see${named}?**\n` +
+          'Tap a tab, or ask me anything — for example `nurse jobs in Mogadishu`.',
+        components: [browseTabsRow()],
+        allowedMentions: { parse: [] },
+      });
+      ctx.logger.info('free-text greeting menu', { discordId: message.author.id });
       return;
     }
 

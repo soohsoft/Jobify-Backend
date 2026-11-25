@@ -14,7 +14,7 @@
  */
 import type { BotContext, MessagePayload } from './context.js';
 import { errorFields } from './log.js';
-import { namePrompt } from './onboarding.js';
+import { browseTabsRow, namePrompt } from './onboarding.js';
 import { clampContent } from './ui.js';
 
 /** Discord's "you cannot DM this user" code. Logged, never matched for control flow alone. */
@@ -58,9 +58,12 @@ export function plainWelcome(member: JoinMember): MessagePayload {
         welcomeLines(nameFor(member)),
         '',
         'Your profile is already set up, so I will keep sending your daily matches.',
-        '`/account` opens your portal — payment, alerts and company details.',
+        'Tap **Jobs** or **Tenders** to see what is live — `/account` opens your portal.',
       ].join('\n'),
     ),
+    // The two tabs, on a greeting that is not an interview: a returning member should never
+    // have to remember a command to see a list.
+    components: [browseTabsRow()],
   };
 }
 

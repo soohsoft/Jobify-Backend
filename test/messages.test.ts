@@ -344,3 +344,27 @@ test('with no free-text channel set, every guild message still needs a mention',
   assert.equal(calls.upsert, 0);
   assert.equal(replies.length, 0);
 });
+
+test('an onboarded member who says hello gets the two tabs, not an assistant search', async () => {
+  const { ctx, calls } = setup({ onboarded: true, storedOnboarded: true });
+
+  const sent = messageFor({ content: 'hi' });
+  await handleMessage(sent.message, ctx, BOT_ID);
+
+  assert.equal(calls.assistant, 0, 'a greeting must not spend an assistant call');
+  const reply = sent.replies[0];
+  assert.ok(reply?.content.includes('What would you like to see'), reply?.content);
+  // The tabs, so the visit ends in a list rather than in copy telling them to type a command.
+  assert.deepEqual(
+    componentIds(reply).slice(0, 2),
+    ['onb:browse:job', 'onb:browse:tender'],
+  );
+});
+
+test('a greeting from a member who is not set up still starts the interview', async () => {
+  const { ctx, sessions } = setup({ onboarded: false });
+
+  await handleMessage(messageFor({ content: 'hello' }).message, ctx, BOT_ID);
+
+  assert.equal(sessions.size, 1, 'the interview, not a menu');
+});

@@ -206,7 +206,13 @@ test('an already onboarded member gets the plain welcome and no interview', asyn
   assert.ok(payload.content.includes('Welcome to Jobify'));
   assert.ok(payload.content.includes('already set up'));
   assert.ok(!payload.content.includes('Step 1 of 4'), 'no interview copy');
-  assert.equal(payload.components, undefined, 'no interview buttons');
+  // Not the interview, but not a dead end either: the greeting carries the two tabs.
+  const row = payload.components?.[0]?.toJSON().components as { label?: string }[];
+  assert.deepEqual(
+    row.map((button) => button.label),
+    ['Jobs', 'Tenders'],
+    'the plain welcome offers the two tabs, not the interview',
+  );
 });
 
 test('an upsert that omits the flag falls back to GET /user for onboarding state', async () => {

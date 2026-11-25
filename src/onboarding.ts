@@ -427,6 +427,20 @@ export function watchingLine(profile: DiscordUser['match_profile']): string | nu
  * can do next. Rows come from the backend's own matcher through `formatRows`, so this is the
  * same renderer the daily digest uses.
  */
+/**
+ * The Jobs / Tenders pair, as a row that can stand on its own.
+ *
+ * It is reused wherever the member needs a way in without typing a command: the setup
+ * message, the welcome of a member who is already set up, and any greeting in the DM. One
+ * builder means the three surfaces cannot drift apart.
+ */
+export function browseTabsRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(CID.browseJobs).setLabel('Jobs').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(CID.browseTenders).setLabel('Tenders').setStyle(ButtonStyle.Primary),
+  );
+}
+
 export function completionPrompt(input: CompletionInput): {
   content: string;
   components: ActionRowBuilder<ButtonBuilder>[];
@@ -489,11 +503,10 @@ export function completionPrompt(input: CompletionInput): {
   return {
     content: lines.join('\n').slice(0, 1900),
     components: [
-      // Two tabs, not a menu: the member asked to see jobs or tenders, and both are one press
-      // away from the message that finishes setup.
+      // Two tabs on their own row — the same row every other surface uses — with the re-run
+      // beneath them so it is not mistaken for a third list.
+      browseTabsRow(),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(CID.browseJobs).setLabel('Jobs').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId(CID.browseTenders).setLabel('Tenders').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(CID.restart).setLabel('Change my answers').setStyle(ButtonStyle.Secondary),
       ),
     ],

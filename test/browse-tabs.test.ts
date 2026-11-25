@@ -120,8 +120,12 @@ test('the Tenders tab asks for a company profile instead of a CV list', async ()
   assert.ok(seen.content?.includes('Tenders are matched to a company, not a CV.'), seen.content);
   // The profile prompt, not an empty tender list: nothing is even asked of the matcher.
   assert.deepEqual(calls.kinds, [], 'no tender query runs before a company exists');
-  const row = (seen.components?.[0] as { toJSON: () => { components: { custom_id: string }[] } } | undefined)?.toJSON();
-  assert.equal(row?.components[0]?.custom_id, 'company:open');
+  // Row 0 is always the tab pair; the profile prompt sits under it.
+  const customIds = (seen.components ?? []).map(
+    (row) =>
+      (row as { toJSON: () => { components: { custom_id: string }[] } }).toJSON().components[0]?.custom_id,
+  );
+  assert.deepEqual(customIds, ['onb:browse:job', 'company:open']);
 });
 
 test('the Tenders tab lists tenders when the company profile exists', async () => {

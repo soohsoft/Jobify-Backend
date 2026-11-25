@@ -161,7 +161,13 @@ export async function browseRows(
   // no hint at the bottom, and no match percentage — the list is the jobs.
   const content = formatRows(
     rows.map((row) => feedRow(row.job, row.matchScore)),
-    { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS },
+    {
+      appBaseUrl: ctx.appBaseUrl,
+      max: MAX_BROWSE_ROWS,
+      // The frame names what the member is looking at: the same renderer serves both kinds,
+      // and a tender list that looks identical to a job list invites the wrong reading.
+      title: kind === 'tender' ? 'TENDERS' : 'JOBS',
+    },
   );
 
   return { content: clampContent(content.trimEnd()) };

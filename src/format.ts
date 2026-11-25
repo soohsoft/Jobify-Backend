@@ -174,9 +174,22 @@ export function uniqueRows(rows: RowInput[]): RowInput[] {
  * The rows, each on its own blank-line-separated block: the numbered line, the bare source
  * URL on the next line, then a blank line. Nothing else — no header, no footer, no count.
  */
+/**
+ * The rule that frames a list.
+ *
+ * Discord has no horizontal rule, so the line is drawn with box-drawing characters: they are
+ * monospaced in both the desktop and mobile clients, which keeps the two ends aligned no
+ * matter what the font does to the label between them. The label is what makes the frame do
+ * work — a member scanning their DMs sees "JOBS" or "TENDERS" before reading a single row,
+ * and "END" tells them the list finished rather than the message being cut off.
+ */
+export function dividerLine(label: string): string {
+  return `${'─'.repeat(7)}  ${label}  ${'─'.repeat(7)}`;
+}
+
 export function formatRows(
   rows: RowInput[],
-  options: { appBaseUrl: string; max?: number; startAt?: number; showScore?: boolean },
+  options: { appBaseUrl: string; max?: number; startAt?: number; showScore?: boolean; title?: string },
 ): string {
   const max = options.max ?? MAX_DIGEST_ROWS;
   const blocks = uniqueRows(rows)
@@ -191,7 +204,11 @@ export function formatRows(
       // card, which reads as a duplicate job. The link stays clickable.
       return link ? `${head}\n<${link}>` : head;
     });
-  return blocks.length === 0 ? '' : `${blocks.join('\n\n')}\n`;
+  if (blocks.length === 0) return '';
+  const body = blocks.join('\n\n');
+  // No title, no frame: an empty heading would draw two rules around nothing.
+  if (!options.title) return `${body}\n`;
+  return `${dividerLine(options.title)}\n${body}\n${dividerLine('END')}\n`;
 }
 
 /** The reply to one assistant answer: its own sentence, then the real rows as links. */

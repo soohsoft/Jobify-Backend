@@ -481,7 +481,7 @@ export function completionPrompt(input: CompletionInput): {
           url: row.job.url ?? null,
           matchScore: row.matchScore,
         })),
-        { appBaseUrl: input.appBaseUrl, max: MAX_DIGEST_ROWS },
+        { appBaseUrl: input.appBaseUrl, max: MAX_DIGEST_ROWS, title: 'MATCHES FOR YOU' },
       ),
     );
   } else if (input.matchReason === 'below_threshold') {

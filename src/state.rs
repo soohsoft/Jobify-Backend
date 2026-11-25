@@ -55,6 +55,13 @@ impl AppState {
         self.db.collection("jobs")
     }
 
+    /// Tenders live in their own collection with the SAME document shape as `jobs`; which
+    /// collection a row is in is the only thing that now says what it is. Nothing stored
+    /// carries a `kind` field.
+    pub fn tenders(&self) -> mongodb::Collection<crate::models::JobDoc> {
+        self.db.collection("tenders")
+    }
+
     pub fn users(&self) -> mongodb::Collection<crate::models::UserDoc> {
         self.db.collection("users")
     }

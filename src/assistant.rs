@@ -20,6 +20,7 @@
 //! provider failure refunds the reservation — a user is never billed for a request that
 //! produced no grounded answer.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
@@ -32,8 +33,10 @@ use crate::categories::Category;
 use crate::credits;
 use crate::error::AppError;
 use crate::llm::{LlmMessage, LlmRequest};
-use crate::models::{JobDoc, KIND_JOB, KIND_TENDER};
-use crate::routes::jobs::{country_accepts, country_query_clause, dedupe_rows, live_job_filter};
+use crate::models::JobDoc;
+use crate::routes::jobs::{
+    FeedScope, country_accepts, country_query_clause, dedupe_rows, live_job_filter,
+};
 use crate::routes::subscription::subscription_for;
 use crate::state::AppState;
 use crate::util::{escape_regex, nairobi_today, now_iso, uuid_id};
@@ -229,8 +232,8 @@ fn parse_answer(raw: &str) -> Option<Routed> {
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some(KIND_TENDER) => SearchKind::Tender,
-        Some(KIND_JOB) => SearchKind::Job,
+        Some("tender") => SearchKind::Tender,
+        Some("job") => SearchKind::Job,
         _ => SearchKind::Both,
     };
 
@@ -503,13 +506,13 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
     if let Some(clause) = country_query_clause(crate::country::SOMALIA) {
         clauses.push(clause);
     }
-    // Same rule as `GET /jobs`: "job" must also match the legacy rows that have no `kind`
-    // field, so it is a separate clause rather than another key on a shared document.
-    match routed.kind {
-        SearchKind::Both => {}
-        SearchKind::Tender => clauses.push(doc! { "kind": KIND_TENDER }),
-        SearchKind::Job => clauses.push(doc! { "$or": [{ "kind": KIND_JOB }, { "kind": null }] }),
-    }
+    // The kind is a destination, not a stored field: a search reads the collection(s) the
+    // extraction routed to, and each row reports the collection it came from.
+    let scope = match routed.kind {
+        SearchKind::Both => FeedScope::Both,
+        SearchKind::Tender => FeedScope::Tenders,
+        SearchKind::Job => FeedScope::Jobs,
+    };
 
     let filter = match clauses.len() {
         1 => clauses.remove(0),
@@ -520,15 +523,22 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
         .limit(MAX_SEARCH_ROWS as i64)
         .build();
 
-    let mut cursor = state.jobs().find(filter).with_options(options).await?;
+    let mut labels: HashMap<String, &'static str> = HashMap::new();
     let mut found: Vec<(i64, JobDoc)> = Vec::new();
-    while let Some(job) = cursor.try_next().await? {
-        // A row whose country was never derived is decided from its location text, exactly
-        // as the feed and the matcher do it.
-        if !country_accepts(&job, crate::country::SOMALIA) {
-            continue;
+    for (label, collection) in scope.collections(state) {
+        let mut cursor = collection
+            .find(filter.clone())
+            .with_options(options.clone())
+            .await?;
+        while let Some(job) = cursor.try_next().await? {
+            // A row whose country was never derived is decided from its location text,
+            // exactly as the feed and the matcher do it.
+            if !country_accepts(&job, crate::country::SOMALIA) {
+                continue;
+            }
+            labels.insert(job.id.clone(), label);
+            found.push((0, job));
         }
-        found.push((0, job));
     }
 
     // The same vacancy from two boards is one answer: an assistant reply must not repeat a
@@ -545,12 +555,15 @@ pub async fn search_jobs(state: &AppState, routed: &Routed) -> Result<Vec<Search
             } else {
                 Some(job.url.clone())
             };
+            // The row's kind is the collection it came out of, so the reply keeps the same
+            // `kind` field the client has always read.
+            let kind = labels.get(&job.id).copied().unwrap_or("job").to_string();
             SearchRow {
                 job_id: job.id,
                 title: job.title,
                 organization: job.organization,
                 location: job.location,
-                kind: job.kind,
+                kind,
                 deadline: job.deadline,
                 url,
             }
@@ -920,7 +933,6 @@ mod tests {
                 "location": "Hargeisa",
                 "description": "Warehouse duties",
                 "category": "logistics_and_supply_chain",
-                "kind": "job",
                 "url": "https://hornrelief.example/careers/warehouse-assistant",
                 // Far future, so the live rule keeps it: the 55 production rows are all
                 // outside the window and must not be used to test a positive match.
@@ -1522,7 +1534,6 @@ mod tests {
                     "organization": organization,
                     "location": "Mogadishu",
                     "description": description,
-                    "kind": "job",
                     "deadline": "2099-01-01",
                     "created_at": now_iso(),
                 })

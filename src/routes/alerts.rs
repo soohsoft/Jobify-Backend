@@ -16,7 +16,7 @@ use crate::state::AppState;
 use crate::util::{nairobi_today, now_iso};
 
 use super::ApiResult;
-use super::jobs::queue_matches_for_user;
+use super::jobs::{find_any_job, queue_matches_for_user};
 
 /// How many notifications one delivery page returns, and the hard ceiling a caller may ask
 /// for. A page rather than the whole backlog, so a large queue drains steadily.
@@ -131,12 +131,12 @@ async fn deliveries(
         .collect();
     let mut jobs = std::collections::HashMap::new();
     if !job_ids.is_empty() {
-        let mut job_cursor = state
-            .jobs()
-            .find(doc! { "_id": { "$in": &job_ids } })
-            .await?;
-        while let Some(job) = job_cursor.try_next().await? {
-            jobs.insert(job.id.clone(), job);
+        // A notification may point at a job or a tender; the id is all this route has, so it
+        // asks whichever collection holds it instead of assuming `jobs`.
+        for id in &job_ids {
+            if let Some(job) = find_any_job(&state, id).await? {
+                jobs.insert(job.id.clone(), job);
+            }
         }
     }
 
@@ -350,9 +350,7 @@ async fn not_a_fit(
         ));
     }
 
-    let job = state
-        .jobs()
-        .find_one(doc! { "_id": &job_id })
+    let job = find_any_job(&state, &job_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Job not found".to_string()))?;
 

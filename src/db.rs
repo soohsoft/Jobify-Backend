@@ -62,33 +62,42 @@ async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         )
         .await?;
 
-    // Matches the ingest upsert filter, so job upserts stay idempotent per source.
-    db.collection::<mongodb::bson::Document>("jobs")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "external_id": 1, "source": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
+    // The same index set on BOTH listing collections. Tenders are jobs with a different
+    // destination, so the ingest upsert key, the category+recency feed scan and the plain
+    // recency sort are identical. Creating them on an empty/new collection is fine: the
+    // build succeeds and the index is there before the first write.
+    for listing in ["jobs", "tenders"] {
+        let collection = db.collection::<mongodb::bson::Document>(listing);
 
-    // The feed and the matcher both order by recency and filter by category.
-    db.collection::<mongodb::bson::Document>("jobs")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "category": 1, "created_at": -1 })
-                .build(),
-        )
-        .await?;
+        // Matches the ingest upsert filter, so upserts stay idempotent per source.
+        collection
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "external_id": 1, "source": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await?;
 
-    // `GET /jobs?kind=` reads the whole feed through this field.
-    db.collection::<mongodb::bson::Document>("jobs")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "kind": 1, "created_at": -1 })
-                .build(),
-        )
-        .await?;
+        // The feed and the matcher both order by recency and filter by category.
+        collection
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "category": 1, "created_at": -1 })
+                    .build(),
+            )
+            .await?;
+
+        // A merged feed (`job` + `tender`) sorts the two collections by this field, and a
+        // single-collection read still needs it for the newest-first page.
+        collection
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "created_at": -1 })
+                    .build(),
+            )
+            .await?;
+    }
 
     // One notification per (user, job). Partial, so notifications carrying no job_id are
     // not all treated as the same null key.

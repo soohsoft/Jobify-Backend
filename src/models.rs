@@ -52,22 +52,10 @@ pub struct JobDoc {
     pub employment_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salary: Option<String>,
-    /// "job" or "tender". Every document stored before this field existed is a job, so
-    /// the default is also the migration: nothing is rewritten, and the API reports the
-    /// 55 legacy rows as `"kind": "job"` without a single write.
-    #[serde(default = "default_job_kind")]
-    pub kind: String,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
-}
-
-pub const KIND_JOB: &str = "job";
-pub const KIND_TENDER: &str = "tender";
-
-pub fn default_job_kind() -> String {
-    KIND_JOB.to_string()
 }
 
 /// What the scraper posts. Mirrors `scraper/src/types.ts` exactly.
@@ -104,9 +92,9 @@ pub struct JobInput {
     pub employment_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salary: Option<String>,
-    /// Optional on the wire. Anything that is not "tender" (absent, blank, mis-cased, or a
-    /// value the taxonomy does not know) is stored as "job": a listing is never rejected
-    /// over a label.
+    /// Optional on the wire and a ROUTING instruction, not stored data: "tender" sends the
+    /// document to the `tenders` collection, anything else (absent, blank, mis-cased, or an
+    /// unknown label) to `jobs`. A listing is never rejected over a label.
     #[serde(default)]
     pub kind: Option<String>,
 }

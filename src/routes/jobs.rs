@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use mongodb::Collection;
 use mongodb::bson::{Document, doc};
 use mongodb::options::FindOptions;
 use serde::Deserialize;
@@ -15,9 +16,7 @@ use std::collections::HashMap;
 use crate::auth::AuthUser;
 use crate::country::{self, ALL_COUNTRIES, SOMALIA};
 use crate::error::AppError;
-use crate::models::{
-    AlertPrefs, JobDoc, JobInput, KIND_JOB, KIND_TENDER, MatchProfile, NotificationDoc,
-};
+use crate::models::{AlertPrefs, JobDoc, JobInput, MatchProfile, NotificationDoc};
 use crate::state::AppState;
 use crate::util::{escape_regex, nairobi_days_ago, nairobi_today, now_iso, uuid_id};
 
@@ -68,6 +67,59 @@ pub const UNDATED_JOB_LIFETIME_DAYS: i64 = 14;
 /// rows, so this is the headroom dedupe needs; `meta.scanned` and `meta.total` show when a
 /// caller has run into it.
 pub const FEED_SCAN_CAP: i64 = 500;
+
+/// Which collection(s) one read should use.
+///
+/// This replaces the old `kind` field inside a document: the collection a row lives in IS
+/// its kind, so a read chooses a destination instead of adding a query clause. Both
+/// collections are read and merged when the caller asks for `both` (or says nothing).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FeedScope {
+    Jobs,
+    Tenders,
+    Both,
+}
+
+impl FeedScope {
+    /// The `?kind=` vocabulary. Absent, blank, `both` and `all` mean both collections;
+    /// anything that is not a job or a tender spelling is a 400, because a typo must not
+    /// silently widen a list from one kind to two.
+    pub(crate) fn parse(raw: Option<&str>) -> Result<Self, AppError> {
+        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            None | Some("") | Some("both") | Some("all") => Ok(Self::Both),
+            Some("job") | Some("jobs") => Ok(Self::Jobs),
+            Some("tender") | Some("tenders") => Ok(Self::Tenders),
+            Some(other) => Err(AppError::BadRequest(format!(
+                "kind must be \"job\" or \"tender\" — got '{other}'"
+            ))),
+        }
+    }
+
+    /// The stored preference (`users.wants`). Applied leniently: it is data written by an
+    /// earlier version, so an unrecognised value means both rather than a 400.
+    pub(crate) fn from_preference(raw: Option<&str>) -> Self {
+        Self::parse(raw).unwrap_or(Self::Both)
+    }
+
+    /// The collections this scope reads, each with the label its rows should report.
+    pub(crate) fn collections(self, state: &AppState) -> Vec<(&'static str, Collection<JobDoc>)> {
+        match self {
+            Self::Jobs => vec![("job", state.jobs())],
+            Self::Tenders => vec![("tender", state.tenders())],
+            Self::Both => vec![("job", state.jobs()), ("tender", state.tenders())],
+        }
+    }
+}
+
+/// Read one document by id from whichever collection holds it. Used by the paths that only
+/// have an id in hand — a saved row, a queued notification, "not a fit" — because a client
+/// passes the id it was given and must not have to know the kind.
+pub(crate) async fn find_any_job(state: &AppState, id: &str) -> Result<Option<JobDoc>, AppError> {
+    if let Some(job) = state.jobs().find_one(doc! { "_id": id }).await? {
+        return Ok(Some(job));
+    }
+    Ok(state.tenders().find_one(doc! { "_id": id }).await?)
+}
 
 /// The country a request is asking for: `?country=` when given, otherwise the member's own
 /// country, otherwise Somalia. `all` is passed through as its own sentinel and turns the
@@ -449,29 +501,15 @@ async fn list(
         );
     }
 
-    // A `kind` filter is a separate clause rather than another key in `filter`, because
-    // `filter` may already hold an `$or` from the search box and a Document cannot hold the
-    // same key twice. "job" must also match the legacy rows, which have no `kind` field at
-    // all: `null` matches both an explicit null and a missing field.
-    let kind_clause = match query.kind.as_deref().map(str::trim) {
-        Some("") | None => None,
-        Some(KIND_TENDER) => Some(doc! { "kind": KIND_TENDER }),
-        Some(KIND_JOB) => Some(doc! { "$or": [ { "kind": KIND_JOB }, { "kind": null } ] }),
-        Some(other) => {
-            return Err(AppError::BadRequest(format!(
-                "kind must be \"{KIND_JOB}\" or \"{KIND_TENDER}\" — got '{other}'"
-            )));
-        }
-    };
+    // `kind` now selects a COLLECTION rather than adding a clause: a document no longer
+    // carries the field, so there is nothing to filter on. Absent/`both` reads both.
+    let scope = FeedScope::parse(query.kind.as_deref())?;
 
     let mut clauses = Vec::new();
     if !filter.is_empty() {
         clauses.push(filter);
     }
     clauses.push(live_job_filter());
-    if let Some(kind) = kind_clause {
-        clauses.push(kind);
-    }
     if let Some(country) = country_query_clause(&country_wanted) {
         clauses.push(country);
     }
@@ -498,21 +536,31 @@ async fn list(
         .sort(doc! { "created_at": -1, "_id": -1 })
         .limit(FEED_SCAN_CAP)
         .build();
-    let mut cursor = state.jobs().find(filter).with_options(options).await?;
+
+    // Read a bounded window from EACH selected collection, then merge and sort in memory.
+    // Reading `limit + offset` per collection and concatenating would let one collection's
+    // slice decide the merged order (and would drop rows the other collection should have
+    // contributed); the scan window is larger than any page and `meta.scanned` says so.
     let mut scanned = 0usize;
     let mut rows: Vec<(i64, JobDoc)> = Vec::new();
-    while let Some(job) = cursor.try_next().await? {
-        // The country gate is re-applied here because a row whose `country` was never
-        // derived is decided from its location text, which a Mongo clause cannot do.
-        if !country_accepts(&job, &country_wanted) {
-            continue;
+    for (_label, collection) in scope.collections(&state) {
+        let mut cursor = collection
+            .find(filter.clone())
+            .with_options(options.clone())
+            .await?;
+        while let Some(job) = cursor.try_next().await? {
+            // The country gate is re-applied here because a row whose `country` was never
+            // derived is decided from its location text, which a Mongo clause cannot do.
+            if !country_accepts(&job, &country_wanted) {
+                continue;
+            }
+            scanned += 1;
+            let score = profile
+                .as_ref()
+                .map(|profile| score_job(&job, profile))
+                .unwrap_or(0);
+            rows.push((score, job));
         }
-        scanned += 1;
-        let score = profile
-            .as_ref()
-            .map(|profile| score_job(&job, profile))
-            .unwrap_or(0);
-        rows.push((score, job));
     }
 
     let (mut rows, duplicates_removed) = dedupe_rows(rows);
@@ -563,12 +611,30 @@ async fn list(
     ))
 }
 
-async fn get_by_id(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    let job = state
-        .jobs()
-        .find_one(doc! { "_id": &id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Job not found".to_string()))?;
+#[derive(Deserialize, Default)]
+pub struct JobQuery {
+    /// `job`/`tender` (or the plurals) narrows the lookup to one collection. Absent means
+    /// "either": the id is looked up in `jobs` first, then `tenders`, because a client
+    /// holding an id should not have to remember which list it came from.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+async fn get_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<JobQuery>,
+) -> ApiResult {
+    let scope = FeedScope::parse(query.kind.as_deref())?;
+
+    let mut found = None;
+    for (_label, collection) in scope.collections(&state) {
+        if let Some(job) = collection.find_one(doc! { "_id": &id }).await? {
+            found = Some(job);
+            break;
+        }
+    }
+    let job = found.ok_or_else(|| AppError::NotFound("Job not found".to_string()))?;
 
     Ok((
         StatusCode::OK,
@@ -613,9 +679,13 @@ async fn list_saved(
     let ids: Vec<String> = rows.iter().map(|row| row.job_id.clone()).collect();
     let mut by_id: HashMap<String, JobDoc> = HashMap::new();
     if !ids.is_empty() {
-        let mut cursor = state.jobs().find(doc! { "_id": { "$in": &ids } }).await?;
-        while let Some(job) = cursor.try_next().await? {
-            by_id.insert(job.id.clone(), job);
+        // A saved row can point at either collection: the save route accepted any id it
+        // could find, so the read must look in both or a saved tender silently disappears.
+        for collection in [state.jobs(), state.tenders()] {
+            let mut cursor = collection.find(doc! { "_id": { "$in": &ids } }).await?;
+            while let Some(job) = cursor.try_next().await? {
+                by_id.insert(job.id.clone(), job);
+            }
         }
     }
 
@@ -653,8 +723,8 @@ async fn save_job(
     Path(id): Path<String>,
 ) -> ApiResult {
     // A save of something that does not exist is a client bug, not an empty list to be
-    // discovered later from a saved row pointing at nothing.
-    if state.jobs().find_one(doc! { "_id": &id }).await?.is_none() {
+    // discovered later from a saved row pointing at nothing. Either collection counts.
+    if find_any_job(&state, &id).await?.is_none() {
         return Err(AppError::NotFound("Job not found".to_string()));
     }
 
@@ -829,9 +899,6 @@ async fn ingest_jobs(
         if let Some(value) = input.salary.as_deref().filter(|s| !s.trim().is_empty()) {
             set.insert("salary", value);
         }
-        // Always written, and always a known value: a listing is never rejected over its
-        // kind, and the 55 legacy documents are read as "job" through the serde default.
-        set.insert("kind", canonical_kind(&input.kind));
         if !input.requirements.is_empty() {
             set.insert("requirements", &input.requirements);
         }
@@ -839,10 +906,23 @@ async fn ingest_jobs(
             set.insert("qualifications", &input.qualifications);
         }
 
-        let update = doc! { "$set": set, "$setOnInsert": set_on_insert };
+        // The kind is a DESTINATION, not a stored field. A tender is upserted into its own
+        // collection; anything else is a job. The upsert key (external_id, source) is the
+        // same in both, so re-ingesting one listing stays idempotent wherever it lives.
+        let collection = match canonical_kind(&input.kind) {
+            FeedScope::Tenders => state.tenders(),
+            _ => state.jobs(),
+        };
 
-        match state
-            .jobs()
+        // `kind` is removed rather than merely not written: a row ingested before the split
+        // still carries it, and re-ingesting is the cheapest moment to drop the stale field.
+        let update = doc! {
+            "$set": set,
+            "$setOnInsert": set_on_insert,
+            "$unset": { "kind": "" },
+        };
+
+        match collection
             .update_one(
                 doc! { "external_id": &input.external_id, "source": &input.source },
                 update,
@@ -880,18 +960,14 @@ fn canonical_category(raw: &Option<String>) -> Option<&'static str> {
     crate::categories::Category::from_slug(slug).map(|category| category.slug())
 }
 
-/// "tender" is the only alternative to a job. Anything else — absent, blank, mis-cased or
-/// unknown — is stored as "job": the label is never a reason to drop a listing, and a
-/// tender that stops claiming to be one becomes a job rather than keeping a stale type.
-fn canonical_kind(raw: &Option<String>) -> &'static str {
-    match raw
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some(KIND_TENDER) => KIND_TENDER,
-        _ => KIND_JOB,
+/// The collection an ingest payload is routed to. "tender" is the only alternative to a
+/// job; anything else — absent, blank, mis-cased or unknown — is a job, so the label is
+/// never a reason to drop a listing, and a tender that stops claiming to be one becomes a
+/// job rather than keeping a stale type.
+fn canonical_kind(raw: &Option<String>) -> FeedScope {
+    match FeedScope::parse(raw.as_deref()) {
+        Ok(FeedScope::Tenders) => FeedScope::Tenders,
+        _ => FeedScope::Jobs,
     }
 }
 
@@ -1048,7 +1124,7 @@ async fn match_jobs(
         &Ranking {
             limit: limit as i64,
             threshold,
-            kind_clause: kind_preference_clause("both"),
+            scope: FeedScope::Both,
             country: &country_wanted,
         },
     )
@@ -1133,22 +1209,9 @@ async fn jobs_for_user(
 ) -> ApiResult {
     let discord_id = discord_id.trim();
     let limit = query.limit.clamp(1, 20);
-    let kind = query
-        .kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| match value.to_ascii_lowercase().as_str() {
-            // `both` is spelled out by a caller that has a stored preference, so accept it.
-            "both" | "all" => Ok(None),
-            other if other == KIND_JOB || other == "jobs" => Ok(Some(KIND_JOB)),
-            other if other == KIND_TENDER || other == "tenders" => Ok(Some(KIND_TENDER)),
-            other => Err(AppError::BadRequest(format!(
-                "kind must be \"{KIND_JOB}\" or \"{KIND_TENDER}\" — got '{other}'"
-            ))),
-        })
-        .transpose()?
-        .flatten();
+    // `both` is spelled out by a caller that has a stored preference, so accept it. An
+    // unknown value is a 400: this is a caller instruction, not stored data.
+    let scope = FeedScope::parse(query.kind.as_deref())?;
 
     // The snowflake is the account's identity, so an unknown one means no account. A
     // malformed id can only be a caller bug and is treated the same way rather than
@@ -1167,7 +1230,7 @@ async fn jobs_for_user(
         &state,
         &link.user_id,
         limit as i64,
-        kind,
+        scope,
         query.country.as_deref(),
         query.threshold,
     )
@@ -1224,28 +1287,10 @@ async fn queued_job_ids(state: &AppState, user_id: &str) -> Result<Vec<String>, 
     Ok(ids)
 }
 
-/// The job/tender preference as a query clause.
-///
-/// `None` means "no narrowing": `both`, an absent preference, and every account that
-/// predates the field all include tenders and jobs. "jobs" must also match a MISSING `kind`
-/// field — the older listings carry none — which is why it is an `$or` rather than an
-/// equality. Both the plural (`wants`) and singular (`?kind=`) spellings are accepted so a
-/// caller never has to translate between two vocabularies for the same idea.
-fn kind_preference_clause(wanted: &str) -> Option<Document> {
-    let wanted = wanted.trim().to_ascii_lowercase();
-    if wanted == "jobs" || wanted == KIND_JOB {
-        Some(doc! { "$or": [ doc! { "kind": KIND_JOB }, doc! { "kind": null } ] })
-    } else if wanted == "tenders" || wanted == KIND_TENDER {
-        Some(doc! { "kind": KIND_TENDER })
-    } else {
-        None
-    }
-}
-
 /// Candidates for a profile, scored, cut off and sorted.
 ///
 /// The single place that decides what is eligible: the live-job rule, the profile's
-/// categories, the user's own rejections, the kind preference, what has already been queued
+/// categories, the user's own rejections, the kind scope, what has already been queued
 /// and — the last line — the fit cut-off. The portal list and the automated alert path both
 /// come through here, so a row cannot be good enough for one and not the other.
 ///
@@ -1261,11 +1306,11 @@ pub(crate) struct Ranked {
 }
 
 /// The narrowing one matcher read applies, as one value so the call sites cannot pass the
-/// country and the kind clause in the wrong order.
+/// country and the kind scope in the wrong order.
 pub(crate) struct Ranking<'a> {
     pub limit: i64,
     pub threshold: i64,
-    pub kind_clause: Option<Document>,
+    pub scope: FeedScope,
     pub country: &'a str,
 }
 
@@ -1283,12 +1328,8 @@ async fn ranked_candidates(
 
     // What the member asked for, and where they are. Applied as its own `$and` element
     // because `live_job_filter` already owns the top-level `$or`, and a Document cannot hold
-    // one key twice; `None` ("both", and every account with no preference stored) adds
-    // nothing, and `?country=all` adds nothing either.
+    // one key twice; `?country=all` adds nothing.
     let mut extra: Vec<Document> = Vec::new();
-    if let Some(clause) = ranking.kind_clause.clone() {
-        extra.push(clause);
-    }
     if let Some(clause) = country_query_clause(country) {
         extra.push(clause);
     }
@@ -1322,24 +1363,33 @@ async fn ranked_candidates(
         );
     }
 
+    // Both collections are read into ONE pool and scored together before the cut-off, the
+    // dedupe, the sort and the limit. Scoring each collection and merging afterwards would
+    // truncate one kind before the other had a chance to compete for the same slots.
     let options = FindOptions::builder().limit(300).build();
-    let mut cursor = state.jobs().find(filter).with_options(options).await?;
     let mut scored: Vec<(i64, JobDoc)> = Vec::new();
     let mut considered = 0usize;
-    while let Some(job) = cursor.try_next().await? {
-        // Country first: a member in Somalia is never shown a Djibouti row, and a row whose
-        // country was never derived is decided from its location text.
-        if !country_accepts(&job, country) {
-            continue;
+    for (_label, collection) in ranking.scope.collections(state) {
+        let mut cursor = collection
+            .find(filter.clone())
+            .with_options(options.clone())
+            .await?;
+        while let Some(job) = cursor.try_next().await? {
+            // Country first: a member in Somalia is never shown a Djibouti row, and a row
+            // whose country was never derived is decided from its location text.
+            if !country_accepts(&job, country) {
+                continue;
+            }
+            considered += 1;
+            let score = score_job(&job, profile);
+            // A 0 means the category gate rejected the row (the query already excludes
+            // those, so this is the hand-built-document case). Either way it can never be
+            // shown.
+            if score < threshold {
+                continue;
+            }
+            scored.push((score, job));
         }
-        considered += 1;
-        let score = score_job(&job, profile);
-        // A 0 means the category gate rejected the row (the query already excludes those, so
-        // this is the hand-built-document case). Either way it can never be shown.
-        if score < threshold {
-            continue;
-        }
-        scored.push((score, job));
     }
 
     // Two boards carrying the same vacancy are one row here too, and BEFORE the limit slices
@@ -1431,7 +1481,7 @@ pub async fn queue_matches_for_user(
     let exclusions = user.alerts.clone().unwrap_or_default();
     let exclude = queued_job_ids(state, user_id).await?;
     // A member who asked for tenders only must not be queued jobs they will never be sent.
-    let kind_clause = kind_preference_clause(user.wants.as_deref().unwrap_or("both"));
+    let scope = FeedScope::from_preference(user.wants.as_deref());
     // The digest is a Somalia-only list unless the member's own location says otherwise:
     // the same country default the portal and `/jobs` use.
     let country_wanted = country::default_for_member(user.location.as_deref());
@@ -1443,7 +1493,7 @@ pub async fn queue_matches_for_user(
         &Ranking {
             limit,
             threshold,
-            kind_clause,
+            scope,
             country: country_wanted,
         },
     )
@@ -1495,9 +1545,10 @@ impl MatchOutcome {
 /// It always reads, never queues: the caller decides whether a read should consume alert
 /// state, and every current caller says no.
 ///
-/// `kind` is "job"/"tender" to narrow, anything else (including `None`) for both; it is
-/// applied to the query rather than after scoring so a member who asked for tenders is not
-/// shown jobs that occupied the returned slots.
+/// `scope` selects which collection(s) are read: `Jobs`, `Tenders`, or `Both` merged into
+/// one candidate pool. It is applied as a destination rather than a scoring filter, so a
+/// member who asked for tenders is not shown jobs that occupied the returned slots — and an
+/// empty tenders collection reports `no_candidates` instead of a phantom low fit.
 ///
 /// An empty category list is the "no usable profile" state, which is normal on the way into
 /// onboarding.
@@ -1505,7 +1556,7 @@ pub(crate) async fn match_rows(
     state: &AppState,
     user_id: &str,
     limit: i64,
-    kind: Option<&str>,
+    scope: FeedScope,
     country_requested: Option<&str>,
     threshold_override: Option<i64>,
 ) -> Result<MatchOutcome, AppError> {
@@ -1545,7 +1596,7 @@ pub(crate) async fn match_rows(
         &Ranking {
             limit,
             threshold,
-            kind_clause: kind_preference_clause(kind.unwrap_or("both")),
+            scope,
             country: &country_wanted,
         },
     )
@@ -1568,7 +1619,7 @@ pub(crate) async fn match_rows(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppError, Document, JobDoc, Json, MatchProfile, StatusCode, canonical_category,
+        AppError, Document, FeedScope, JobDoc, Json, MatchProfile, StatusCode, canonical_category,
         canonical_kind, doc,
     };
 
@@ -1578,45 +1629,45 @@ mod tests {
 
     #[test]
     fn a_kind_is_tender_only_when_it_says_so() {
-        assert_eq!(canonical_kind(&raw("tender")), "tender");
-        assert_eq!(canonical_kind(&raw("  TENDER  ")), "tender");
-        // Everything else is a job, and nothing is rejected over the label.
-        assert_eq!(canonical_kind(&raw("job")), "job");
-        assert_eq!(canonical_kind(&raw("consultancy")), "job");
-        assert_eq!(canonical_kind(&raw("")), "job");
-        assert_eq!(canonical_kind(&None), "job");
+        // The kind is now a DESTINATION: "tender" routes to the tenders collection, and
+        // everything else — including a label nobody knows — is a job.
+        assert_eq!(canonical_kind(&raw("tender")), FeedScope::Tenders);
+        assert_eq!(canonical_kind(&raw("  TENDER  ")), FeedScope::Tenders);
+        assert_eq!(canonical_kind(&raw("job")), FeedScope::Jobs);
+        assert_eq!(canonical_kind(&raw("consultancy")), FeedScope::Jobs);
+        assert_eq!(canonical_kind(&raw("")), FeedScope::Jobs);
+        assert_eq!(canonical_kind(&None), FeedScope::Jobs);
     }
 
-    // The alert path narrows on what the member asked for, and "jobs" has to keep matching
-    // the older listings that carry no `kind` field at all — an equality would hide them.
+    // The read parameter keeps both spellings and both `both` aliases, and an unknown value
+    // is refused rather than quietly widened to the whole corpus.
     #[test]
-    fn the_wants_preference_narrows_the_query_and_both_adds_no_clause() {
-        use super::kind_preference_clause;
-        use mongodb::bson::Bson;
-
-        assert!(kind_preference_clause("both").is_none());
-        assert!(kind_preference_clause("").is_none());
-        assert!(kind_preference_clause("anything else").is_none());
-
-        let tenders = kind_preference_clause("TENDERS").expect("tenders must narrow");
-        assert_eq!(tenders.get_str("kind").unwrap(), "tender");
-        assert!(tenders.get("$or").is_none());
-
-        let jobs = kind_preference_clause("jobs").expect("jobs must narrow");
-        let alternatives = jobs.get_array("$or").expect("jobs is an $or").clone();
-        assert_eq!(alternatives.len(), 2);
+    fn a_kind_parameter_selects_a_collection_and_refuses_an_unknown_value() {
+        assert_eq!(FeedScope::parse(None).unwrap(), FeedScope::Both);
+        assert_eq!(FeedScope::parse(Some("")).unwrap(), FeedScope::Both);
+        assert_eq!(FeedScope::parse(Some("both")).unwrap(), FeedScope::Both);
+        assert_eq!(FeedScope::parse(Some("ALL")).unwrap(), FeedScope::Both);
         assert_eq!(
-            alternatives[0]
-                .as_document()
-                .unwrap()
-                .get_str("kind")
-                .unwrap(),
-            "job"
+            FeedScope::parse(Some("TENDERS")).unwrap(),
+            FeedScope::Tenders
         );
-        assert!(matches!(
-            alternatives[1].as_document().unwrap().get("kind"),
-            Some(Bson::Null)
-        ));
+        assert_eq!(
+            FeedScope::parse(Some("tender")).unwrap(),
+            FeedScope::Tenders
+        );
+        assert_eq!(FeedScope::parse(Some("jobs")).unwrap(), FeedScope::Jobs);
+        assert_eq!(FeedScope::parse(Some(" job ")).unwrap(), FeedScope::Jobs);
+        assert!(FeedScope::parse(Some("nonsense")).is_err());
+
+        // The stored preference never errors: unknown data means "both".
+        assert_eq!(
+            FeedScope::from_preference(Some("nonsense")),
+            FeedScope::Both
+        );
+        assert_eq!(
+            FeedScope::from_preference(Some("tenders")),
+            FeedScope::Tenders
+        );
     }
 
     #[test]
@@ -2586,5 +2637,329 @@ mod tests {
             "location": "Garowe",
         }));
         assert!(!same_vacancy(&icrc_a, &un));
+    }
+
+    // -----------------------------------------------------------------------
+    // The split: tenders live in their own collection
+    // -----------------------------------------------------------------------
+
+    /// Ingest routes by `kind` and stores NO `kind` field. A tender lands in `tenders`, a
+    /// job and a payload with no label land in `jobs`; the same (external_id, source) key
+    /// keeps a repeated run idempotent wherever it went.
+    #[tokio::test]
+    async fn ingest_routes_tenders_to_their_own_collection_and_stores_no_kind_field() {
+        use super::{IngestPayload, ingest_jobs};
+        use crate::config::Config;
+        use crate::state::AppState;
+        use axum::extract::State;
+
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return;
+        };
+        let db = client.database("jobify_test_ingest_split");
+        let _ = db.drop().await;
+        let state = AppState::new(db.clone(), Config::from_env());
+
+        let payload = serde_json::from_value::<IngestPayload>(serde_json::json!([
+            {
+                "external_id": "tender-1",
+                "source": "reliefweb",
+                "title": "Water network rehabilitation tender",
+                "kind": "tender",
+                "url": "https://example.org/tender-1",
+            },
+            {
+                "external_id": "job-1",
+                "source": "reliefweb",
+                "title": "Data Analyst",
+                "kind": "job",
+                "url": "https://example.org/job-1",
+            },
+            {
+                "external_id": "job-2",
+                "source": "reliefweb",
+                "title": "Driver",
+                "url": "https://example.org/job-2",
+            }
+        ]))
+        .expect("an ingest payload must deserialize");
+
+        let (status, Json(body)) = ingest_jobs(State(state.clone()), Json(payload))
+            .await
+            .expect("ingest must succeed");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["received"], 3);
+        assert_eq!(body["data"]["persisted"], 3);
+        assert_eq!(body["data"]["failed"], 0);
+
+        let tenders = db.collection::<Document>("tenders");
+        let jobs = db.collection::<Document>("jobs");
+        assert_eq!(
+            tenders.count_documents(doc! {}).await.unwrap(),
+            1,
+            "only the tender may land in `tenders`"
+        );
+        assert_eq!(
+            jobs.count_documents(doc! {}).await.unwrap(),
+            2,
+            "kind=job and a missing kind both land in `jobs`"
+        );
+
+        let stored = tenders
+            .find_one(doc! { "external_id": "tender-1" })
+            .await
+            .unwrap()
+            .expect("the tender must be stored in its own collection");
+        assert!(
+            stored.get("kind").is_none(),
+            "a stored document must carry no kind field: {stored:?}"
+        );
+        assert_eq!(
+            stored.get_str("title").unwrap(),
+            "Water network rehabilitation tender"
+        );
+
+        let stored_job = jobs
+            .find_one(doc! { "external_id": "job-1" })
+            .await
+            .unwrap()
+            .expect("the job must be stored in `jobs`");
+        assert!(stored_job.get("kind").is_none(), "no kind on a job either");
+
+        // The upsert key still holds: a second run updates the same tender instead of
+        // adding a copy, so re-ingest is idempotent in the new collection too.
+        let repeat = serde_json::from_value::<IngestPayload>(serde_json::json!({
+            "external_id": "tender-1",
+            "source": "reliefweb",
+            "title": "Water network rehabilitation tender (revised)",
+            "kind": "tender",
+        }))
+        .expect("a single payload must deserialize");
+        let _ = ingest_jobs(State(state), Json(repeat)).await.unwrap();
+        assert_eq!(
+            tenders.count_documents(doc! {}).await.unwrap(),
+            1,
+            "re-ingesting the same (external_id, source) must upsert, not duplicate"
+        );
+
+        let _ = db.drop().await;
+    }
+
+    /// `GET /jobs?kind=` selects the collection and never mixes the two unless both were
+    /// asked for. The merged list is newest-first across BOTH collections, not one page
+    /// followed by the other.
+    #[tokio::test]
+    async fn the_feed_reads_the_named_collection_and_merges_both_newest_first() {
+        use super::{JobsQuery, list};
+        use crate::config::Config;
+        use crate::state::AppState;
+        use axum::extract::{Query, State};
+
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return;
+        };
+        let db = client.database("jobify_test_feed_split");
+        let _ = db.drop().await;
+        let state = AppState::new(db.clone(), Config::from_env());
+
+        db.collection::<Document>("jobs")
+            .insert_one(doc! {
+                "_id": "job-old",
+                "title": "Driver",
+                "location": "Mogadishu",
+                "deadline": "2099-01-01",
+                "created_at": "2026-01-01T09:00:00Z",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("jobs")
+            .insert_one(doc! {
+                "_id": "job-new",
+                "title": "Data Analyst",
+                "location": "Mogadishu",
+                "deadline": "2099-01-01",
+                "created_at": "2026-03-01T09:00:00Z",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("tenders")
+            .insert_many([
+                doc! {
+                    "_id": "tender-middle",
+                    "title": "Vehicle maintenance tender",
+                    "location": "Mogadishu",
+                    "deadline": "2099-01-01",
+                    "created_at": "2026-02-01T09:00:00Z",
+                },
+                doc! {
+                    "_id": "tender-newest",
+                    "title": "Solar installation tender",
+                    "location": "Mogadishu",
+                    "deadline": "2099-01-01",
+                    "created_at": "2026-04-01T09:00:00Z",
+                },
+            ])
+            .await
+            .unwrap();
+
+        let query = |kind: Option<&str>| JobsQuery {
+            q: None,
+            search: None,
+            location: None,
+            organization: None,
+            category: None,
+            country: Some("all".to_string()),
+            kind: kind.map(str::to_string),
+            page: 1,
+            limit: 20,
+        };
+        let ids = |body: &serde_json::Value| -> Vec<String> {
+            body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["_id"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let (_, Json(tenders)) = list(State(state.clone()), None, Query(query(Some("tender"))))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&tenders),
+            vec!["tender-newest".to_string(), "tender-middle".to_string()],
+            "kind=tender must read only the tenders collection: {tenders}"
+        );
+        assert_eq!(tenders["meta"]["total"], 2);
+
+        let (_, Json(jobs)) = list(State(state.clone()), None, Query(query(Some("job"))))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&jobs),
+            vec!["job-new".to_string(), "job-old".to_string()],
+            "kind=job must read only the jobs collection: {jobs}"
+        );
+
+        // No `kind` at all means both, ordered by created_at across the merge.
+        let (_, Json(both)) = list(State(state.clone()), None, Query(query(None)))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&both),
+            vec![
+                "tender-newest".to_string(),
+                "job-new".to_string(),
+                "tender-middle".to_string(),
+                "job-old".to_string(),
+            ],
+            "the merged feed must be newest-first across both collections: {both}"
+        );
+        assert_eq!(both["meta"]["total"], 4);
+
+        let _ = db.drop().await;
+    }
+
+    /// A tender-scoped match with an empty `tenders` collection is `no_candidates`, not
+    /// `below_threshold`: nothing was scored, so nothing can have scored low. The same
+    /// member still sees their job when the scope includes `jobs`.
+    #[tokio::test]
+    async fn a_tender_scoped_match_is_no_candidates_when_tenders_is_empty() {
+        use super::{ForUserQuery, jobs_for_user};
+        use crate::config::Config;
+        use crate::state::AppState;
+        use axum::extract::{Path, Query, State};
+
+        let uri = std::env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017/jobify".to_string());
+        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+            eprintln!("skipping: no MongoDB reachable at {uri}");
+            return;
+        };
+        let db = client.database("jobify_test_tender_no_candidates");
+        let _ = db.drop().await;
+        let state = AppState::new(db.clone(), Config::from_env());
+
+        db.collection::<Document>("discord_links")
+            .insert_one(doc! {
+                "_id": "link-950",
+                "discord_id": "900000000000000950",
+                "user_id": "user-950",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("users")
+            .insert_one(doc! {
+                "_id": "user-950",
+                "name": "Sahra",
+                "education": [],
+                "match_profile": {
+                    "categories": ["ict"],
+                    "keywords": ["data", "analyst", "sql", "reporting"],
+                    "locations": [],
+                    "category_source": "llm",
+                },
+            })
+            .await
+            .unwrap();
+        // A job that WOULD match: proves the empty answer comes from the scope, not the fit.
+        db.collection::<Document>("jobs")
+            .insert_one(doc! {
+                "_id": "job-950",
+                "title": "Data Analyst",
+                "organization": "Hormuud",
+                "description": "SQL reporting",
+                "category": "ict",
+                "deadline": "2099-01-01",
+                "created_at": crate::util::now_iso(),
+            })
+            .await
+            .unwrap();
+
+        let (status, Json(tenders_only)) = jobs_for_user(
+            State(state.clone()),
+            Path("900000000000000950".to_string()),
+            Query(ForUserQuery {
+                limit: 5,
+                kind: Some("tender".to_string()),
+                country: None,
+                threshold: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tenders_only["meta"]["reason"], "no_candidates");
+        assert_eq!(
+            tenders_only["meta"]["considered"], 0,
+            "the jobs row must not be read under a tender scope: {tenders_only}"
+        );
+        assert_eq!(tenders_only["meta"]["total"], 0);
+        assert_eq!(tenders_only["data"].as_array().unwrap().len(), 0);
+
+        // Same member, jobs scope: the row is there, so the empty answer above was the
+        // collection and not the profile.
+        let (_, Json(jobs_only)) = jobs_for_user(
+            State(state),
+            Path("900000000000000950".to_string()),
+            Query(ForUserQuery {
+                limit: 5,
+                kind: Some("job".to_string()),
+                country: None,
+                threshold: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(jobs_only["meta"]["reason"], "ok");
+        assert_eq!(jobs_only["data"][0]["job"]["_id"], "job-950");
+
+        let _ = db.drop().await;
     }
 }

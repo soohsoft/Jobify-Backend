@@ -186,7 +186,10 @@ export function formatRows(
       // The source page is the only useful destination; the portal is a fallback for rows the
       // backend could not resolve, and a local portal renders no link at all.
       const link = sourceLink(row.url) ?? jobLink(options.appBaseUrl, row.jobId);
-      return link ? `${head}\n${link}` : head;
+      // Angle brackets stop Discord unfurling the source page. Without them every row appears
+      // twice in the channel: once as the line the bot wrote and once as the site's preview
+      // card, which reads as a duplicate job. The link stays clickable.
+      return link ? `${head}\n<${link}>` : head;
     });
   return blocks.length === 0 ? '' : `${blocks.join('\n\n')}\n`;
 }

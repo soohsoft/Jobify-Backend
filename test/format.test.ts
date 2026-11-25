@@ -380,7 +380,7 @@ test('the digest with nothing to send says the same sentence, never "0 new match
 
 const SOURCE_TWO = 'https://somalijobs.com/jobs/hargeisa/2222/driver';
 
-test('a job block is the numbered line, then the bare URL, then a blank line', () => {
+test('a job block is the numbered line, then the URL in angle brackets, then a blank line', () => {
   const rendered = formatRows(
     [
       rowInput({ url: SOURCE }),
@@ -396,12 +396,14 @@ test('a job block is the numbered line, then the bare URL, then a blank line', (
     { appBaseUrl: APP, max: 5 },
   );
 
+  // Angle brackets keep Discord from unfurling the source page into a preview card, which
+  // otherwise shows every job a second time.
   assert.equal(
     rendered,
     '1. **Data Analyst** — Horn Relief — Mogadishu — closes 2026-12-03\n' +
-      `${SOURCE}\n\n` +
+      `<${SOURCE}>\n\n` +
       '2. **Driver** — NGO — Hargeisa — closes 2026-01-09\n' +
-      `${SOURCE_TWO}\n`,
+      `<${SOURCE_TWO}>\n`,
   );
   // Nothing around the rows: no header, no footer, no count, no percentage.
   assert.ok(!rendered.includes('%'));

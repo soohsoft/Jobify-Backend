@@ -250,7 +250,17 @@ export function digestMessage(
   const { delivered, remaining } = capRows(uniqueRows(rows), max);
   // A digest with nothing to send says the product sentence, never "0 new matches".
   if (delivered.length === 0) return NO_MATCHES_SENTENCE;
-  const title = delivered.length === 1 ? '**1 new match for you on Jobify**' : `**${delivered.length} new matches for you on Jobify**`;
+  // The opening sentence is what a phone shows on its lock screen, so it carries the news
+  // itself: count, title, employer. Push previews are plain text — bold markers arrive as
+  // literal `**` — so this line has no markdown in it at all, and the framed list below it is
+  // what the member sees once they open the message.
+  const lead = delivered[0];
+  const where = [lead?.organization, lead?.location].filter(Boolean).join(' — ');
+  const leadLine = `${lead?.title ?? ''}${where ? ` — ${where}` : ''}`.slice(0, 110);
+  const title =
+    delivered.length === 1
+      ? `1 new match for you on Jobify: ${leadLine}`
+      : `${delivered.length} new matches for you on Jobify — first: ${leadLine}`;
   // The digest is the ONE surface that keeps the percentage: it is the list the member gets
   // unprompted, and the score is how the backend decided to send it at all.
   const lines = [

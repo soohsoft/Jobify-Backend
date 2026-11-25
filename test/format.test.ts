@@ -206,7 +206,9 @@ test('a digest row links from the row or the embedded job, and one vacancy is se
   const rendered = digestMessage([deliveryRow(nested), deliveryRow(atRow)], { appBaseUrl: LOCAL });
   assert.equal(rendered.match(/somalijobs\.com/g)?.length, 1);
   assert.ok(!rendered.includes('localhost'));
-  assert.ok(rendered.includes('**1 new match for you on Jobify**'), rendered);
+  assert.ok(rendered.includes('1 new match for you on Jobify'), rendered);
+  // The push notification shows this line verbatim, so it must carry no markdown.
+  assert.ok(!rendered.startsWith('**'), 'the opening line is plain text for the lock screen');
 });
 
 // ---------------------------------------------------------------------------
@@ -277,7 +279,7 @@ test('the digest cap is five rows and the remainder is reported', () => {
 
   const message = digestMessage(rows, { appBaseUrl: APP });
   assert.equal(message.match(/\/jobs\/job-/g)?.length, 5);
-  assert.ok(message.includes('**5 new matches for you on Jobify**'));
+  assert.ok(message.includes('5 new matches for you on Jobify'));
   assert.ok(message.includes("4 more waiting"));
   assert.ok(message.length < 2000, 'a digest DM must fit in one Discord message');
 });
@@ -286,7 +288,7 @@ test('a single match reads naturally', () => {
   const message = digestMessage([{ title: 'Only Role', organization: 'Org', location: null, deadline: null, jobId: 'job-9' }], {
     appBaseUrl: APP,
   });
-  assert.ok(message.includes('**1 new match for you on Jobify**'));
+  assert.ok(message.includes('1 new match for you on Jobify'));
 });
 
 test('a delivery prefers the embedded job document and falls back to the notification title', () => {
@@ -370,7 +372,7 @@ test('the digest with nothing to send says the same sentence, never "0 new match
   const row = rowInput({ matchScore: 87 });
   const message = digestMessage([row], { appBaseUrl: APP });
   assert.ok(message.includes('87% match'), message);
-  assert.ok(message.startsWith('**1 new match for you on Jobify**'), message);
+  assert.ok(message.startsWith('1 new match for you on Jobify'), message);
 });
 
 // ---------------------------------------------------------------------------

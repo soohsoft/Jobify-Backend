@@ -40,6 +40,11 @@ pub struct JobDoc {
     /// those two differently.
     #[serde(default)]
     pub deadline: Option<String>,
+    /// When a deadline backfill last visited this posting's page: set whether it found a
+    /// closing date or found none. Without it the backfill would re-visit the same undated
+    /// rows on every run, since "no deadline" is also what a row it has never looked at says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_checked_at: Option<String>,
     #[serde(default)]
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

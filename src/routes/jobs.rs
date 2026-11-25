@@ -37,6 +37,10 @@ pub fn internal_router() -> Router<AppState> {
         // This is the same payload shape addressed by the member's Discord identity, which
         // is what "/jobs for me" means in the product.
         .route("/internal/jobs/for-user/{discord_id}", get(jobs_for_user))
+        // Deadline backfill: a second, slower pass whose only job is to visit postings that
+        // publish no closing date on their card and read it off the page itself.
+        .route("/internal/jobs/missing-deadline", get(missing_deadline))
+        .route("/internal/jobs/{id}/deadline", post(set_deadline))
 }
 
 pub fn protected_router() -> Router<AppState> {
@@ -783,6 +787,121 @@ async fn sources(State(state): State<AppState>) -> ApiResult {
         StatusCode::OK,
         Json(json!({ "status": "success", "data": data })),
     ))
+}
+
+#[derive(Deserialize)]
+struct MissingDeadlineQuery {
+    limit: Option<i64>,
+    /// Rows checked more recently than this are skipped, so a backfill makes progress
+    /// through the backlog instead of re-visiting the same undated postings every run.
+    recheck_after_days: Option<i64>,
+}
+
+/// `GET /internal/jobs/missing-deadline` — the postings a deadline backfill should revisit:
+/// no closing date stored, and either never checked or last checked longer ago than
+/// `recheck_after_days`.
+async fn missing_deadline(
+    State(state): State<AppState>,
+    Query(query): Query<MissingDeadlineQuery>,
+) -> ApiResult {
+    let limit = query.limit.unwrap_or(40).clamp(1, 200);
+    let recheck = query.recheck_after_days.unwrap_or(7).max(0);
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(recheck))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let filter = doc! {
+        "deadline": null,
+        "$or": [
+            { "deadline_checked_at": { "$exists": false } },
+            { "deadline_checked_at": null },
+            { "deadline_checked_at": { "$lt": &cutoff } },
+        ],
+    };
+
+    let mut rows: Vec<Value> = Vec::new();
+    for (label, collection) in FeedScope::Both.collections(&state) {
+        let mut cursor = collection
+            .find(filter.clone())
+            .sort(doc! { "created_at": -1 })
+            .limit(limit)
+            .await?;
+        while let Some(job) = cursor.try_next().await? {
+            rows.push(json!({
+                "id": job.id,
+                "url": job.url,
+                "source": job.source,
+                "source_name": job.source_name,
+                "title": job.title,
+                "kind": label,
+            }));
+        }
+        if rows.len() as i64 >= limit {
+            break;
+        }
+    }
+    rows.truncate(limit as usize);
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": rows })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct DeadlineUpdate {
+    /// `YYYY-MM-DD`, or null to record "visited, the page publishes no closing date".
+    deadline: Option<String>,
+}
+
+fn valid_deadline_date(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let parsed = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()?;
+    let year = chrono::Datelike::year(&parsed);
+    if !(2020..=2100).contains(&year) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// `POST /internal/jobs/{id}/deadline` — the backfill's write. Sets the closing date when it
+/// found one, and always stamps `deadline_checked_at`, so a posting whose page genuinely
+/// publishes no date is not visited again on every run.
+async fn set_deadline(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<DeadlineUpdate>,
+) -> ApiResult {
+    let deadline = match body.deadline.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => Some(
+            valid_deadline_date(raw)
+                .ok_or_else(|| AppError::BadRequest("deadline must be YYYY-MM-DD".into()))?,
+        ),
+        _ => None,
+    };
+
+    let now = now_iso();
+    let mut set = doc! { "deadline_checked_at": &now, "updated_at": &now };
+    if let Some(value) = &deadline {
+        set.insert("deadline", value);
+    }
+    let update = doc! { "$set": set };
+
+    for (_label, collection) in FeedScope::Both.collections(&state) {
+        let result = collection
+            .update_one(doc! { "_id": &id }, update.clone())
+            .await?;
+        if result.matched_count > 0 {
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "data": { "id": id, "deadline": deadline, "checked_at": now },
+                })),
+            ));
+        }
+    }
+
+    Err(AppError::NotFound(format!("job '{id}' not found")))
 }
 
 #[derive(Deserialize)]

@@ -257,10 +257,10 @@ export function digestMessage(
   const lead = delivered[0];
   const where = [lead?.organization, lead?.location].filter(Boolean).join(' — ');
   const leadLine = `${lead?.title ?? ''}${where ? ` — ${where}` : ''}`.slice(0, 110);
-  const title =
-    delivered.length === 1
-      ? `1 new match for you on Jobify: ${leadLine}`
-      : `${delivered.length} new matches for you on Jobify — first: ${leadLine}`;
+  // The lead line IS the job. No "1 new match for you on Jobify:" — the member already knows
+  // the bot is Jobify and that a notification means a match; the only thing worth the first
+  // characters of a lock screen is which job it is.
+  const title = leadLine;
   // The digest is the ONE surface that keeps the percentage: it is the list the member gets
   // unprompted, and the score is how the backend decided to send it at all.
   const lines = [

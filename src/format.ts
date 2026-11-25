@@ -253,7 +253,19 @@ export function digestMessage(
   const title = delivered.length === 1 ? '**1 new match for you on Jobify**' : `**${delivered.length} new matches for you on Jobify**`;
   // The digest is the ONE surface that keeps the percentage: it is the list the member gets
   // unprompted, and the score is how the backend decided to send it at all.
-  const lines = [title, '', formatRows(delivered, { appBaseUrl: options.appBaseUrl, max, showScore: true })];
+  const lines = [
+    title,
+    '',
+    // Framed like every other list: the DM arrives unprompted, so it must announce itself.
+    // trimEnd: formatRows closes with a newline for block layout, and inside a message with
+    // lines after it that newline becomes a second blank line before the footer.
+    formatRows(delivered, {
+      appBaseUrl: options.appBaseUrl,
+      max,
+      showScore: true,
+      title: 'NEW FOR YOU',
+    }).trimEnd(),
+  ];
   const waiting = remaining + (options.extraWaiting ?? 0);
   if (waiting > 0) lines.push('', `_${waiting} more waiting — they'll come in tomorrow's digest._`);
   lines.push('', '_Reply here to ask about any of them. Your account page (`/account`) changes the schedule or switches these off._');

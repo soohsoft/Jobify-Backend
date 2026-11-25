@@ -8,9 +8,6 @@
 export interface MatchProfile {
   /** Canonical category slugs. These are the backend's query filter for this member. */
   categories: string[];
-  /** Role titles the backend decided the member can apply for ("Data Analyst"). Empty when
-   *  the derivation was unavailable and the deterministic fallback produced the categories. */
-  subcategories: string[];
   keywords: string[];
   locations: string[];
   /** "llm" or "rules" — recorded by the backend, never chosen here. */
@@ -83,7 +80,6 @@ export interface MatchMeta {
   reason: string;
   total: number;
   categories: string[];
-  subcategories: string[];
   categorySource?: string;
   /**
    * The backend's internal cut-off. Reported by the contract but never shown to a member:

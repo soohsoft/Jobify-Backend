@@ -15,6 +15,7 @@
 import type { Message } from 'discord.js';
 
 import type { BotContext } from './context.js';
+import { browseRows } from './commands.js';
 import { formatAssistantReply } from './format.js';
 import { namePrompt, promptForStep, type OnboardingSession } from './onboarding.js';
 import { assistantErrorReply, clampContent } from './ui.js';
@@ -128,6 +129,19 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
         experienceYears: upsert.user.experience_years ?? null,
       });
       ctx.logger.info('onboarding started from free text', { discordId: message.author.id });
+      return;
+    }
+
+    // A bare "jobs" / "job" / "tenders" is a request for the member's own list, not a paid
+    // search: it goes through the same matcher `/jobs` uses, so typing it can never answer
+    // with an unrelated row the way a text search over the whole corpus would.
+    const bare = text.toLowerCase().replace(/[.!?]+$/, '').trim();
+    const browseKind =
+      /^(jobs?|vacanc(?:y|ies))$/.test(bare) ? 'job' : /^tenders?$/.test(bare) ? 'tender' : null;
+    if (browseKind) {
+      const content = await browseRows(ctx, message.author.id, browseKind);
+      await message.reply({ content, allowedMentions: { parse: [] } });
+      ctx.logger.info('free-text browse', { discordId: message.author.id, kind: browseKind });
       return;
     }
 

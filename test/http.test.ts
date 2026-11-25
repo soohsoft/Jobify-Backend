@@ -236,7 +236,6 @@ test('jobsForUser asks the backend for the member by snowflake and unwraps rows 
         reason: 'ok',
         total: 5,
         categories: ['ict'],
-        subcategories: ['Data Analyst', 'MIS Officer'],
         categorySource: 'llm',
       },
     }),
@@ -255,7 +254,6 @@ test('jobsForUser asks the backend for the member by snowflake and unwraps rows 
   assert.equal(rows[0]?.matchScore, 4.5);
   // The decision is rendered from meta, never re-derived in the bot.
   assert.deepEqual(meta.categories, ['ict']);
-  assert.deepEqual(meta.subcategories, ['Data Analyst', 'MIS Officer']);
   assert.equal(meta.categorySource, 'llm');
   assert.equal(meta.reason, 'ok');
 });
@@ -270,7 +268,6 @@ test('jobsForUser tolerates a meta-less backend and an unknown member is an erro
   const { rows, meta } = await backend.jobsForUser('1');
   assert.deepEqual(rows, []);
   assert.deepEqual(meta.categories, []);
-  assert.deepEqual(meta.subcategories, []);
   assert.equal(meta.total, 0);
 
   await assert.rejects(() => backend.jobsForUser('unknown'), (err: unknown) => {

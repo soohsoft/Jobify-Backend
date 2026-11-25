@@ -50,7 +50,7 @@ interface Harness {
 }
 
 function harness(
-  options: { user?: Partial<DiscordUser>; matches?: MatchRow[]; decidedSubcategories?: string[] } = {},
+  options: { user?: Partial<DiscordUser>; matches?: MatchRow[] } = {},
 ): Harness {
   const user: DiscordUser = {
     id: 'u1',
@@ -98,12 +98,11 @@ function harness(
         alerts.mode = 'daily';
       }
       // What the backend decides at completion. The bot only ever READS this: it must never
-      // derive categories or role titles of its own, so the fixture makes the decision here
+      // derive categories of its own, so the fixture makes the decision here
       // exactly where the real backend does.
       if (complete && user.match_profile === null) {
         user.match_profile = {
           categories: ['health'],
-          subcategories: options.decidedSubcategories ?? ['Programme Officer', 'MIS Officer'],
           keywords: ['programme'],
           locations: [],
           category_source: 'llm',
@@ -136,7 +135,6 @@ function harness(
           reason: user.match_profile ? 'ok' : 'no_match_profile',
           total: rows.length,
           categories: user.match_profile?.categories ?? [],
-          subcategories: user.match_profile?.subcategories ?? [],
           categorySource: user.match_profile?.category_source ?? '',
         },
       };

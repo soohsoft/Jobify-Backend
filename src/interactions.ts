@@ -266,8 +266,8 @@ async function completeInterview(
     let matches: Awaited<ReturnType<BotContext['backend']['jobsForUser']>>['rows'] = [];
     let matchReason: string | null = null;
     try {
-      // The backend's own for-user read: it decided the categories and role titles, so the
-      // first digest is exactly the list `/jobs` will show.
+      // The backend's own for-user read: it decided the categories, so the first digest is
+      // exactly the list `/jobs` will show.
       const list = await ctx.backend.jobsForUser(discordId, { limit: MAX_DIGEST_ROWS });
       matches = list.rows;
       matchReason = list.meta.reason;

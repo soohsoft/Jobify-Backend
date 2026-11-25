@@ -214,18 +214,21 @@ export class Backend {
   /**
    * The member's own list, from the route that addresses them by their snowflake.
    *
-   * The backend decides the categories and subcategories at the end of onboarding and this is
+   * The backend decides the categories at the end of onboarding and this is
    * the same read the portal's `/jobs/match` makes: identical rows, identical `matchScore`,
    * identical `meta`. `kind` narrows to jobs or tenders and is applied to the query, not after
    * the fact, so `/tenders` cannot be crowded out by jobs.
    */
   async jobsForUser(
     discordId: string,
-    options: { limit?: number; kind?: 'job' | 'tender' } = {},
+    options: { limit?: number; kind?: 'job' | 'tender'; threshold?: number } = {},
   ): Promise<MatchList> {
     const search = new URLSearchParams();
     search.set('limit', String(options.limit ?? 5));
     if (options.kind) search.set('kind', options.kind);
+    // Browsing asks for the member's areas, not only the rows that would justify an alert:
+    // `threshold=0` lists everything live in them and the digest keeps the configured bar.
+    if (typeof options.threshold === 'number') search.set('threshold', String(options.threshold));
     const envelope = await this.requestEnvelope<MatchRow[]>(
       'GET',
       `/internal/jobs/for-user/${encodeURIComponent(discordId)}?${search.toString()}`,
@@ -239,7 +242,6 @@ export class Backend {
         reason: typeof meta.reason === 'string' ? meta.reason : 'ok',
         total: typeof meta.total === 'number' ? meta.total : envelope.data.length,
         categories: strings(meta.categories),
-        subcategories: strings(meta.subcategories),
         ...(typeof meta.categorySource === 'string' ? { categorySource: meta.categorySource } : {}),
         ...(typeof meta.threshold === 'number' ? { threshold: meta.threshold } : {}),
         ...(typeof meta.considered === 'number' ? { considered: meta.considered } : {}),

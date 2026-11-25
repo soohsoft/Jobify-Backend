@@ -94,28 +94,26 @@ function feedRow(job: FeedJob, matchScore?: number | null): RowInput {
 
 /**
  * The "plain list from the matcher": the newest live rows for the member, as the BACKEND
- * decided them.
+ * decided them. Returns the reply text so both the `/jobs` command and a bare "jobs" typed
+ * in chat answer from the member's own areas — the same list, one decision.
  *
  * One call (`GET /internal/jobs/for-user/{discord_id}`), not one per category: the backend
- * owns the multi-category filter, the subcategory ranking and the kind narrowing, so `/jobs`
- * and the portal's `/jobs/match` show the same thing in the same order. Fetching the public
- * feed once per category — what this used to do — could not see subcategories at all and
- * could not narrow on `kind` without losing rows to the page limit.
+ * owns the multi-category filter and the ranking, so `/jobs` and the portal's `/jobs/match`
+ * show the same thing in the same order. Fetching the public feed once per category — what
+ * this used to do — could not narrow on `kind` without losing rows to the page limit.
  */
-async function browse(
+export async function browseRows(
   ctx: BotContext,
-  interaction: ChatInputCommandInteraction,
+  discordId: string,
   kind: 'job' | 'tender',
-): Promise<void> {
-  const discordId = interaction.user.id;
-  const { rows, meta } = await ctx.backend.jobsForUser(discordId, { limit: MAX_BROWSE_ROWS, kind });
-  const areas = meta.subcategories.length > 0 ? meta.subcategories : meta.categories;
+): Promise<string> {
+  const { rows, meta } = await ctx.backend.jobsForUser(discordId, {
+    limit: MAX_BROWSE_ROWS,
+    kind,
+    threshold: 0,
+  });
   if (meta.categories.length === 0) {
-    await interaction.editReply({
-      content:
-        'I do not have a work area for you yet — run `/start` and I will ask you four quick questions.',
-    });
-    return;
+    return 'I do not have a work area for you yet — run `/start` and I will ask you four quick questions.';
   }
 
   if (rows.length === 0) {
@@ -123,15 +121,12 @@ async function browse(
     // matched closely enough. The member gets the product sentence — the scoring behind it
     // stays internal — and weak rows are never listed to pad the reply.
     if (meta.reason === 'below_threshold') {
-      await interaction.editReply({ content: noMatchesCopy() });
-      return;
+      return noMatchesCopy();
     }
-    await interaction.editReply({
-      content:
-        `Nothing live in your fields right now (${areas.join(', ')}).\n` +
-        'I check again every day and will DM you when something matches — or ask me for something specific.',
-    });
-    return;
+    return (
+      `Nothing live in your fields right now (${meta.categories.join(', ')}).\n` +
+      'I check again every day and will DM you when something matches — or ask me for something specific.'
+    );
   }
 
   // ONLY the rows: the owner's line format IS the message. No header, no "I watch for…",
@@ -141,7 +136,15 @@ async function browse(
     { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS },
   );
 
-  await interaction.editReply({ content: clampContent(content.trimEnd()) });
+  return clampContent(content.trimEnd());
+}
+
+async function browse(
+  ctx: BotContext,
+  interaction: ChatInputCommandInteraction,
+  kind: 'job' | 'tender',
+): Promise<void> {
+  await interaction.editReply({ content: await browseRows(ctx, interaction.user.id, kind) });
 }
 
 async function search(

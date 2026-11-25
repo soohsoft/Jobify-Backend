@@ -404,17 +404,14 @@ export function plainList(items: string[]): string {
 /**
  * The one sentence that shows the member what the backend decided for them.
  *
- * The interview never asks them to pick a sector: the backend derives the categories and the
- * role titles at the end, and this is where that decision is said out loud — "I will watch
- * for Data Analyst, MIS Officer and Business Analyst" — so it is visible rather than implied.
+ * The interview never asks them to pick a sector: the backend derives the categories from
+ * their education at the end, and this is where that decision is said out loud — "I will
+ * watch for roles in health" — so it is visible rather than implied.
  *
- * Written to survive a degraded derivation: with role titles it names them; with only the
- * categories (the rules fallback, i.e. the model was unavailable) it names those; with
- * neither it returns `null` and the caller omits the line rather than printing an empty list.
+ * With no categories decided (a degree the map does not know) it returns `null` and the
+ * caller omits the line rather than printing an empty list.
  */
 export function watchingLine(profile: DiscordUser['match_profile']): string | null {
-  const roles = profile?.subcategories ?? [];
-  if (roles.length > 0) return `I will watch for ${plainList(roles)}.`;
   const categories = profile?.categories ?? [];
   if (categories.length > 0) return `I will watch for roles in ${plainList(categories)}.`;
   return null;

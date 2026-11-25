@@ -44,7 +44,6 @@ function user(overrides: Partial<DiscordUser> = {}): DiscordUser {
     location: null,
     match_profile: {
       categories: ['health'],
-      subcategories: ['Programme Officer', 'MIS Officer'],
       keywords: ['programme'],
       locations: [],
       category_source: 'llm',
@@ -198,10 +197,10 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
   assert.ok(prompt.content.includes('Senior Programme Officer'));
   assert.ok(prompt.content.includes('3–5 years'));
   assert.ok(prompt.content.includes('Alerts: on, daily at 08:00 (Africa/Nairobi)'));
-  // The derived role titles are said out loud: the member never picks a sector, so this is
+  // The derived categories are said out loud: the member never picks a sector, so this is
   // where they see what the backend decided to watch for.
   assert.ok(
-    prompt.content.includes('I will watch for Programme Officer and MIS Officer.'),
+    prompt.content.includes('I will watch for roles in health.'),
     prompt.content,
   );
   // Five rows is the digest ceiling, and each one is a real link to the job.
@@ -272,7 +271,7 @@ test('the completion message is honest when nothing matches or alerts are off', 
   assert.ok(prompt.content.includes('Nothing live matches your answers this minute'));
   assert.ok(prompt.content.includes('Alerts: off'), 'an explicit /stop is reported as off, not silently overridden');
   assert.ok(!prompt.content.includes('/jobs/job-'));
-  assert.ok(!prompt.content.includes('I will watch for'), 'no role line when the backend decided nothing');
+  assert.ok(!prompt.content.includes('I will watch for'), 'no watching line when the backend decided nothing');
 });
 
 test('the completion message uses the plain empty state when every row is below the bar', () => {
@@ -309,28 +308,14 @@ test('a completion read with no profile still says "nothing live", not the empty
   assert.ok(!prompt.content.includes(NO_MATCHES_SENTENCE));
 });
 
-test('the watching line names the derived role titles, and degrades rather than lying', () => {
-  // The normal case: the backend's derivation produced role titles.
-  assert.equal(
-    watchingLine({
-      categories: ['ict'],
-      subcategories: ['Data Analyst', 'MIS Officer', 'Programme Officer'],
-      keywords: [],
-      locations: [],
-      category_source: 'llm',
-      updated_at: '',
-    }),
-    'I will watch for Data Analyst, MIS Officer and Programme Officer.',
-  );
-  // The rules fallback: the model was down, so only categories were stored. Say what is
-  // actually known instead of naming roles nobody derived.
+test('the watching line names the categories the backend derived, and degrades rather than lying', () => {
+  // The normal case: the backend's derivation produced categories from the member's education.
   assert.equal(
     watchingLine({
       categories: ['ict', 'business_and_finance'],
-      subcategories: [],
       keywords: [],
       locations: [],
-      category_source: 'rules',
+      category_source: 'llm',
       updated_at: '',
     }),
     'I will watch for roles in ict and business_and_finance.',
@@ -339,7 +324,6 @@ test('the watching line names the derived role titles, and degrades rather than 
   assert.equal(
     watchingLine({
       categories: [],
-      subcategories: [],
       keywords: [],
       locations: [],
       category_source: 'rules',
@@ -350,12 +334,11 @@ test('the watching line names the derived role titles, and degrades rather than 
   assert.equal(watchingLine(null), null);
 });
 
-test('the completion message still completes when the subcategories are absent', () => {
+test('the completion message omits the watching line when no category was derived', () => {
   const prompt = completionPrompt({
     user: user({
       match_profile: {
-        categories: ['health'],
-        subcategories: [],
+        categories: [],
         keywords: ['programme'],
         locations: [],
         category_source: 'rules',
@@ -369,6 +352,6 @@ test('the completion message still completes when the subcategories are absent',
   });
 
   assert.ok(prompt.content.startsWith('**Setup complete**'));
-  assert.ok(prompt.content.includes('I will watch for roles in health.'));
-  assert.ok(!prompt.content.includes('I will watch for .'), 'no empty role list is printed');
+  assert.ok(!prompt.content.includes('I will watch for'), prompt.content);
+  assert.ok(!prompt.content.includes('I will watch for .'), 'no empty list is printed');
 });

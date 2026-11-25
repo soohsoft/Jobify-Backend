@@ -6,6 +6,9 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   type InteractionEditReplyOptions,
   type InteractionReplyOptions,
   type MessageCreateOptions,
@@ -39,6 +42,41 @@ export function buyCreditsRow(): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('credits:buy').setLabel('Buy credits').setStyle(ButtonStyle.Primary),
   );
+}
+
+/**
+ * Tenders are matched to a company, not to a CV: name + services are what the matcher scores.
+ * The button opens the same modal the old `/company` command did, because that command is gone
+ * but the company profile is still the input a tender match needs.
+ */
+export function companyRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('company:open').setLabel('Set company profile').setStyle(ButtonStyle.Primary),
+  );
+}
+
+export function companyModal(): ModalBuilder {
+  return new ModalBuilder()
+    .setCustomId('company:submit')
+    .setTitle('Company profile')
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId('name')
+          .setLabel('Company name')
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(120)
+          .setRequired(true),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId('services')
+          .setLabel('Services (comma separated, up to 10)')
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(400)
+          .setRequired(false),
+      ),
+    );
 }
 
 export interface AssistantErrorReply {

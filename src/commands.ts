@@ -24,7 +24,7 @@ import {
 } from './format.js';
 import { BackendError } from './http.js';
 import { educationSummary, experienceLabel } from './onboarding.js';
-import { assistantErrorReply, buyCreditsRow, clampContent, respond } from './ui.js';
+import { assistantErrorReply, buyCreditsRow, clampContent, companyRow, respond } from './ui.js';
 import type { FeedJob, UserEnvelope } from './types.js';
 
 /**
@@ -95,18 +95,42 @@ function feedRow(job: FeedJob, matchScore?: number | null): RowInput {
  * show the same thing in the same order. Fetching the public feed once per category — what
  * this used to do — could not narrow on `kind` without losing rows to the page limit.
  */
+export interface BrowseReply {
+  content: string;
+  components?: ActionRowBuilder<ButtonBuilder>[];
+}
+
 export async function browseRows(
   ctx: BotContext,
   discordId: string,
   kind: 'job' | 'tender',
-): Promise<string> {
+): Promise<BrowseReply> {
+  // A tender match is scored against a COMPANY — name and services — not a CV. Asking a member
+  // with no company profile for a tender list would answer "nothing live" for a reason they
+  // never set up, so the first tender request offers the profile instead.
+  if (kind === 'tender') {
+    const me = await ctx.backend.getUser(discordId).catch(() => null);
+    if (me && me.user.company == null) {
+      return {
+        content: [
+          '**Tenders are matched to a company, not a CV.**',
+          'Tell me the company name and the services it offers (for example: construction, logistics, water works) and I will match tenders to those.',
+        ].join('\n'),
+        components: [companyRow()],
+      };
+    }
+  }
+
   const { rows, meta } = await ctx.backend.jobsForUser(discordId, {
     limit: MAX_BROWSE_ROWS,
     kind,
     threshold: 0,
   });
   if (meta.categories.length === 0) {
-    return 'I do not have a work area for you yet — send me a message and I will ask you four quick questions.';
+    return {
+      content:
+        'I do not have a work area for you yet — send me a message and I will ask you four quick questions.',
+    };
   }
 
   if (rows.length === 0) {
@@ -114,21 +138,23 @@ export async function browseRows(
     // matched closely enough. The member gets the product sentence — the scoring behind it
     // stays internal — and weak rows are never listed to pad the reply.
     if (meta.reason === 'below_threshold') {
-      return noMatchesCopy();
+      return { content: noMatchesCopy() };
     }
     // `no_candidates` (browsing runs at threshold 0, so this is the only way to be empty)
     // means nothing was admitted at all: the corpus for that kind is empty, not the member's
     // fit. Tenders say so plainly, because a jobs board cannot stand in for them.
     if (kind === 'tender') {
-      return (
-        'No tenders are live right now.\n' +
-        'I check every day and will DM you when one matches your services — or ask me for something specific.'
-      );
+      return {
+        content:
+          'No tenders are live right now.\n' +
+          'I check every day and will DM you when one matches your services — or ask me for something specific.',
+      };
     }
-    return (
-      `Nothing live in your fields right now (${meta.categories.join(', ')}).\n` +
-      'I check again every day and will DM you when something matches — or ask me for something specific.'
-    );
+    return {
+      content:
+        `Nothing live in your fields right now (${meta.categories.join(', ')}).\n` +
+        'I check again every day and will DM you when something matches — or ask me for something specific.',
+    };
   }
 
   // ONLY the rows: the owner's line format IS the message. No header, no "I watch for…",
@@ -138,7 +164,7 @@ export async function browseRows(
     { appBaseUrl: ctx.appBaseUrl, max: MAX_BROWSE_ROWS },
   );
 
-  return clampContent(content.trimEnd());
+  return { content: clampContent(content.trimEnd()) };
 }
 
 async function browse(
@@ -146,7 +172,11 @@ async function browse(
   interaction: ChatInputCommandInteraction,
   kind: 'job' | 'tender',
 ): Promise<void> {
-  await interaction.editReply({ content: await browseRows(ctx, interaction.user.id, kind) });
+  const reply = await browseRows(ctx, interaction.user.id, kind);
+  await interaction.editReply({
+    content: reply.content,
+    ...(reply.components ? { components: reply.components } : {}),
+  });
 }
 
 async function search(

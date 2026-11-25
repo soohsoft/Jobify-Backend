@@ -29,7 +29,7 @@ import {
   type OnboardingSession,
 } from './onboarding.js';
 import type { EducationEntry } from './types.js';
-import { assistantErrorReply } from './ui.js';
+import { assistantErrorReply, companyModal } from './ui.js';
 import { BackendError } from './http.js';
 import { MAX_DIGEST_ROWS } from './format.js';
 
@@ -99,6 +99,11 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
   const id = interaction.customId;
   const discordId = interaction.user.id;
 
+  if (id === 'company:open') {
+    // The company modal has to be the first response to the click: no defer, no edit.
+    await interaction.showModal(companyModal());
+    return;
+  }
   if (id === 'credits:buy') {
     await buyCredits(interaction, ctx);
     return;

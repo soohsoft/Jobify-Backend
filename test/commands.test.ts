@@ -13,7 +13,7 @@ import { RequestGuard, type BotContext } from '../src/context.js';
 import type { Backend } from '../src/http.js';
 import type { Logger } from '../src/log.js';
 import { OnboardingSessions } from '../src/onboarding.js';
-import type { DiscordUser, UserEnvelope } from '../src/types.js';
+import type { CompanyProfile, DiscordUser, UserEnvelope } from '../src/types.js';
 
 const MEMBER = '900000000000000931';
 const APP = 'https://app.jobify.test';
@@ -62,8 +62,11 @@ function interactionFor(commandName: string): {
   return { interaction: interaction as unknown as Parameters<typeof handleCommand>[0], replies, deferred };
 }
 
-function ctxFor(): { ctx: BotContext; calls: { assistant: number } } {
-  const calls = { assistant: 0 };
+function ctxFor(options: { company?: CompanyProfile | null } = {}): {
+  ctx: BotContext;
+  calls: { assistant: number; browse: Array<{ kind?: string; threshold?: number }> };
+} {
+  const calls = { assistant: 0, browse: [] as Array<{ kind?: string; threshold?: number }> };
   const user: DiscordUser = {
     id: 'u1',
     name: 'Sahra Ali',
@@ -81,6 +84,7 @@ function ctxFor(): { ctx: BotContext; calls: { assistant: number } } {
     sectors: [],
     skills: [],
     wants: null,
+    ...(Object.hasOwn(options, 'company') ? { company: options.company } : {}),
   };
   const envelope: UserEnvelope = {
     user,
@@ -106,6 +110,19 @@ function ctxFor(): { ctx: BotContext; calls: { assistant: number } } {
   const backend = {
     upsertUser: async () => ({ user, onboarding_complete: true, alerts_enabled: false }),
     getUser: async () => envelope,
+    jobsForUser: async (_discordId: string, opts: { kind?: string; threshold?: number }) => {
+      calls.browse.push(opts);
+      return {
+        rows: [],
+        meta: {
+          reason: 'no_candidates',
+          total: 0,
+          categories: ['ict'],
+          categorySource: 'llm',
+          threshold: opts.threshold ?? 70,
+        },
+      };
+    },
     assistantQuery: async () => {
       calls.assistant += 1;
       throw new Error('a slash command must not call the assistant without a query');
@@ -194,4 +211,34 @@ test('a cached /credits answers with the surviving commands instead of failing',
   for (const name of ['/jobs', '/tenders', '/balance', '/account']) {
     assert.ok(reply.content.includes(name), `the answer names ${name}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Tenders are matched to a company, not a CV
+// ---------------------------------------------------------------------------
+
+test('/tenders with no company profile asks for the company instead of listing jobs', async () => {
+  const { ctx, calls } = ctxFor();
+  const { interaction, replies } = interactionFor('tenders');
+  await handleCommand(interaction, ctx);
+
+  assert.equal(calls.browse.length, 0, 'the matcher is not asked before there is a company');
+  const reply = replies.at(-1);
+  assert.ok(reply);
+  assert.match(reply.content, /Tenders are matched to a company/);
+  const ids = (reply.components ?? []).flatMap((row) => row.toJSON().components.map((button) => button.custom_id));
+  assert.deepEqual(ids, ['company:open']);
+});
+
+test('/tenders with a company profile asks the matcher for tenders and says none are live', async () => {
+  const { ctx, calls } = ctxFor({ company: { name: 'Horn Builders', services: ['construction'] } });
+  const { interaction, replies } = interactionFor('tenders');
+  await handleCommand(interaction, ctx);
+
+  assert.equal(calls.browse.length, 1);
+  assert.equal(calls.browse[0]?.kind, 'tender');
+  assert.equal(calls.browse[0]?.threshold, 0);
+  const reply = replies.at(-1);
+  assert.ok(reply);
+  assert.match(reply.content, /No tenders are live right now/);
 });

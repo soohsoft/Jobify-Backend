@@ -139,8 +139,12 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
     const browseKind =
       /^(jobs?|vacanc(?:y|ies))$/.test(bare) ? 'job' : /^tenders?$/.test(bare) ? 'tender' : null;
     if (browseKind) {
-      const content = await browseRows(ctx, message.author.id, browseKind);
-      await message.reply({ content, allowedMentions: { parse: [] } });
+      const reply = await browseRows(ctx, message.author.id, browseKind);
+      await message.reply({
+        content: reply.content,
+        ...(reply.components ? { components: reply.components } : {}),
+        allowedMentions: { parse: [] },
+      });
       ctx.logger.info('free-text browse', { discordId: message.author.id, kind: browseKind });
       return;
     }

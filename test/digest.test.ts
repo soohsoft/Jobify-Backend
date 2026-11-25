@@ -68,14 +68,14 @@ function fakeBackend(options: {
 test('a user with nine pending matches gets one DM of five and four left pending', async () => {
   const pending = Array.from({ length: 9 }, (_, index) => delivery(`n${index + 1}`, 'u1'));
   const { backend, sent, failed } = fakeBackend({ pending });
-  const dms: Array<{ discordId: string; content: string }> = [];
+  const dms: Array<{ discordId: string; content: string; components?: unknown[] }> = [];
 
   const report = await runDigest({
     backend,
     appBaseUrl: APP,
     logger: silentLogger,
-    sendDm: async (discordId, content) => {
-      dms.push({ discordId, content });
+    sendDm: async (discordId, payload) => {
+      dms.push({ discordId, content: payload.content, components: payload.components });
     },
   });
 
@@ -83,6 +83,14 @@ test('a user with nine pending matches gets one DM of five and four left pending
   assert.equal(dms[0]?.discordId, 'discord-u1');
   assert.equal(dms[0]?.content.match(/\/jobs\/job-/g)?.length, 5);
   assert.ok(dms[0]?.content.includes('4 more waiting'));
+  // The notification carries the tabs: tapping a push lands on a message that can be used.
+  const buttons = (dms[0]?.components?.[0] as { toJSON: () => { components: { custom_id: string }[] } })
+    .toJSON()
+    .components;
+  assert.deepEqual(
+    buttons.map((button) => button.custom_id),
+    ['onb:browse:job', 'onb:browse:tender'],
+  );
 
   // Only the five that were actually sent are marked; the rest stay for tomorrow.
   assert.deepEqual(sent.flat().sort(), ['n1', 'n2', 'n3', 'n4', 'n5']);

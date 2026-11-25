@@ -12,9 +12,11 @@
  * - a blocked bot (403 / 50007) IS terminal: the backend pauses that member's alerts, which
  *   is the only way to stop a queue that can never be delivered from looking healthy.
  */
+import type { MessagePayload } from './context.js';
 import { BackendError } from './http.js';
 import type { Backend } from './http.js';
 import type { Logger } from './log.js';
+import { browseTabsRow } from './onboarding.js';
 import { capRows, deliveryRow, dmFailureReason, digestMessage, MAX_DIGEST_ROWS } from './format.js';
 import type { Delivery } from './types.js';
 
@@ -23,7 +25,8 @@ export interface DigestDeps {
     Backend,
     'refreshMatches' | 'deliveries' | 'linkForUser' | 'markSent' | 'markFailed'
   >;
-  sendDm: (discordId: string, content: string) => Promise<void>;
+  /** A DM with the digest text and the two tabs, so the message it lands on is usable. */
+  sendDm: (discordId: string, payload: MessagePayload) => Promise<void>;
   appBaseUrl: string;
   logger: Logger;
   pageSize?: number;
@@ -133,7 +136,9 @@ export async function runDigest(deps: DigestDeps): Promise<DigestReport> {
     );
 
     try {
-      await deps.sendDm(discordId, content);
+      // The tabs ride on the notification itself: tapping a push opens this message, and a
+      // message with no buttons is a dead end for a member who wants to look further.
+      await deps.sendDm(discordId, { content, components: [browseTabsRow()] });
     } catch (err) {
       const reason = dmFailureReason(err);
       logger.warn('digest: DM failed', {

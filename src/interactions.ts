@@ -8,7 +8,7 @@
  */
 import { MessageFlags, type ButtonInteraction, type Interaction, type ModalSubmitInteraction, type StringSelectMenuInteraction, type ActionRowBuilder, type ButtonBuilder } from 'discord.js';
 
-import { alertsPanel, handleCommand } from './commands.js';
+import { alertsPanel, browseRows, handleCommand } from './commands.js';
 import type { BotContext } from './context.js';
 import {
   CID,
@@ -110,6 +110,13 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
   }
   if (id.startsWith('alerts:')) {
     await alertsButton(interaction, ctx, id.slice('alerts:'.length));
+    return;
+  }
+  // The Jobs / Tenders tabs on the completion message. Deliberately before the session check:
+  // they are a read, they need no interview in progress, and the setup message can be pressed
+  // months after it was sent.
+  if (id === CID.browseJobs || id === CID.browseTenders) {
+    await browseTab(interaction, ctx, id === CID.browseTenders ? 'tender' : 'job');
     return;
   }
   if (id === CID.restart) {
@@ -308,6 +315,24 @@ async function completeInterview(
   } catch (err) {
     await stepFailed(interaction, ctx, err);
   }
+}
+
+/**
+ * The Jobs / Tenders tabs.
+ *
+ * Ephemeral on purpose: pressing a tab shows the list to the member who pressed it, and the
+ * setup message with its two tabs stays where it is, so the same message can be used again.
+ * `browseRows` is the same function `/jobs` and `/tenders` call, so the tabs cannot drift from
+ * the commands — including the tender rule that asks for a company profile first.
+ */
+async function browseTab(
+  interaction: ButtonInteraction,
+  ctx: BotContext,
+  kind: 'job' | 'tender',
+): Promise<void> {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const reply = await browseRows(ctx, interaction.user.id, kind);
+  await interaction.editReply({ content: reply.content, components: reply.components ?? [] });
 }
 
 async function restartInterview(interaction: ButtonInteraction, ctx: BotContext): Promise<void> {

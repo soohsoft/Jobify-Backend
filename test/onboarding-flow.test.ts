@@ -358,7 +358,7 @@ test('the happy path: name → bachelor Health → no second degree → position
   assert.ok(completion.includes('Senior Programme Officer'));
   assert.ok(completion.includes('3–5 years'));
   assert.equal(completion.match(/\/jobs\/job-/g)?.length, 5, 'five rows, the digest ceiling');
-  assert.ok(completion.includes('`/jobs` lists everything for you at any time'));
+  assert.ok(completion.includes('**Jobs** and **Tenders** below open the full list'));
   assert.ok(completion.includes('Alerts: on'));
 
   assert.equal(calls.matches, 1);
@@ -518,5 +518,9 @@ test('when the match read fails the setup still completes', async () => {
   const completion = renders(years.edits);
   assert.ok(completion.startsWith('**Setup complete**'));
   assert.ok(completion.includes('Nothing live matches your answers this minute'));
-  assert.ok(completion.includes('`/jobs`'), 'the fallback path still points at /jobs');
+  // The fallback copy ends on the same invitation: the two tabs sit right under it.
+  assert.ok(
+    completion.includes('**Jobs** and **Tenders** below open the full list'),
+    'the fallback path still offers the two tabs',
+  );
 });

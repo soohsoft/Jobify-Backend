@@ -113,6 +113,10 @@ export const CID = {
   positionModal: 'onb:position:modal',
   experience: (value: string): string => `onb:exp:${value}`,
   restart: 'onb:restart',
+  // The two tabs the completion message offers. They stay outside the interview: pressing one
+  // never touches a session, so an old setup message still works weeks later.
+  browseJobs: 'onb:browse:job',
+  browseTenders: 'onb:browse:tender',
 } as const;
 
 export class OnboardingSessions {
@@ -475,12 +479,21 @@ export function completionPrompt(input: CompletionInput): {
       'Nothing live matches your answers this minute — I check again every day and will DM you the moment something does.',
     );
   }
-  lines.push('', '`/jobs` lists everything for you at any time, not just these five.');
+  // The tabs are the real invitation; "these five" only makes sense when there are five.
+  const tabsLine =
+    input.matches.length > 0
+      ? '**Jobs** and **Tenders** below open the full list — not just these five.'
+      : '**Jobs** and **Tenders** below open the full list at any time.';
+  lines.push('', tabsLine);
 
   return {
     content: lines.join('\n').slice(0, 1900),
     components: [
+      // Two tabs, not a menu: the member asked to see jobs or tenders, and both are one press
+      // away from the message that finishes setup.
       new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(CID.browseJobs).setLabel('Jobs').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(CID.browseTenders).setLabel('Tenders').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(CID.restart).setLabel('Change my answers').setStyle(ButtonStyle.Secondary),
       ),
     ],

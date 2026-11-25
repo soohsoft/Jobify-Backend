@@ -210,10 +210,16 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
   assert.ok(prompt.content.includes('**Programme Officer 1** — '), prompt.content);
   assert.ok(prompt.content.includes('**Programme Officer 5** — '), prompt.content);
   assert.ok(!prompt.content.includes('% match'), 'the list view drops the match label');
-  assert.ok(prompt.content.includes('`/jobs` lists everything for you at any time'));
-  assert.equal(
-    (prompt.components[0]?.toJSON().components[0] as { custom_id?: string } | undefined)?.custom_id,
-    CID.restart,
+  assert.ok(prompt.content.includes('**Jobs** and **Tenders** below open the full list'));
+  // Three buttons in one row: the two tabs first, the re-run last.
+  const buttons = prompt.components[0]?.toJSON().components as { custom_id?: string; label?: string }[];
+  assert.deepEqual(
+    buttons.map((button) => [button.custom_id, button.label]),
+    [
+      [CID.browseJobs, 'Jobs'],
+      [CID.browseTenders, 'Tenders'],
+      [CID.restart, 'Change my answers'],
+    ],
   );
 });
 

@@ -37,7 +37,7 @@ const WELCOME =
  * simultaneous channel writes, which is what Discord punishes.
  */
 async function reply(message: Message, ctx: BotContext, payload: Parameters<Message['reply']>[0]): Promise<void> {
-  if (ctx.outbound) await ctx.outbound.acquire(message.author.id, REPLY_GAP_MS);
+  if (ctx.outbound) await ctx.outbound.acquire(message.channelId, REPLY_GAP_MS);
   await message.reply(payload);
 }
 

@@ -86,8 +86,14 @@ export interface OutboundPacer {
   acquire(key: string, gapMs?: number): Promise<void>;
 }
 
-/** A gap that keeps a member's own conversation responsive while still spacing a crowd. */
-export const REPLY_GAP_MS = 300;
+/**
+ * The gap between two messages into the SAME channel.
+ *
+ * Discord's per-channel limit is 5 messages / 5 s — i.e. one per second — so anything under
+ * 1 000 ms is a 429 waiting to happen, whatever the bot-wide rate says. 1 000 is used for
+ * replies (a person reads slower than that) and 1 200 for proactive DMs.
+ */
+export const REPLY_GAP_MS = 1_000;
 
 export interface BotContext {
   /** Optional so tests can build a context without a pacer; production always sets it. */
@@ -155,7 +161,9 @@ export function createDmSender(
 
   return async (discordId, payload) => {
     let channel = await openChannel(discordId);
-    await limiter.acquire(discordId);
+    // The channel, not the member: a DM channel is one per member, but a guild reply shares a
+    // channel with everyone else in it, and Discord's 5-per-5-seconds rule is per channel.
+    await limiter.acquire(channel.id, 1_200);
     try {
       await withDiscordRetry(() => channel.send(payload), {
         attempts: 3,

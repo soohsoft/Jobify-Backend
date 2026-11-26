@@ -162,6 +162,6 @@ test('a member writing three times in a row is answered within a second each', a
   });
 
   const started = clock.now();
-  for (let i = 0; i < 3; i += 1) await limiter.acquire('member-a', 300); // reply gap
-  assert.ok(clock.now() - started <= 900, 'a conversation is not slowed by the digest pacing');
+  for (let i = 0; i < 3; i += 1) await limiter.acquire('channel-a', 1_000); // one per second, per channel
+  assert.equal(clock.now() - started, 2_000, 'three replies into one channel take two gaps, not three');
 });

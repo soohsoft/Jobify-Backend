@@ -55,33 +55,6 @@ export function companyRow(): ActionRowBuilder<ButtonBuilder> {
   );
 }
 
-/**
- * The company profile form: name + services, the two fields the tender matcher scores. An empty
- * name clears the company, same as `PATCH /me/company`.
- */
-export function companyModal(): ModalBuilder {
-  return new ModalBuilder()
-    .setCustomId('company:submit')
-    .setTitle('Company profile')
-    .addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId('name')
-          .setLabel('Company name')
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(120)
-          .setRequired(true),
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId('services')
-          .setLabel('Services (comma separated, up to 10)')
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(400)
-          .setRequired(false),
-      ),
-    );
-}
 
 export interface AssistantErrorReply {
   content: string;

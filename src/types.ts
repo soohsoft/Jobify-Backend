@@ -29,6 +29,8 @@ export interface AlertPrefs {
 export interface CompanyProfile {
   name: string;
   services: string[];
+  /** Chosen from `COMPANY_CITIES` in the bot's third company step. */
+  location?: string | null;
   website?: string | null;
   description?: string | null;
 }

@@ -9,6 +9,14 @@
 import { MessageFlags, type ButtonInteraction, type Interaction, type ModalSubmitInteraction, type StringSelectMenuInteraction, type ActionRowBuilder, type ButtonBuilder } from 'discord.js';
 
 import { alertsPanel, browseRows, handleCommand, startProfileInterview } from './commands.js';
+import {
+  companyCancelRow,
+  companyCityRow,
+  companyDrafts,
+  companyNameModal,
+  companyNextRow,
+  companyServicesModal,
+} from './company.js';
 import type { BotContext } from './context.js';
 import {
   CID,
@@ -29,7 +37,7 @@ import {
   type OnboardingSession,
 } from './onboarding.js';
 import type { EducationEntry } from './types.js';
-import { assistantErrorReply, companyModal } from './ui.js';
+import { assistantErrorReply } from './ui.js';
 import { BackendError } from './http.js';
 import { MAX_DIGEST_ROWS } from './format.js';
 
@@ -43,7 +51,7 @@ export async function handleInteraction(interaction: Interaction, ctx: BotContex
     return;
   }
   if (interaction.isStringSelectMenu()) {
-    await handleSelect(interaction);
+    await handleSelect(interaction, ctx);
     return;
   }
   if (interaction.isModalSubmit()) {
@@ -100,8 +108,26 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
   const discordId = interaction.user.id;
 
   if (id === 'company:open') {
-    // The company modal has to be the first response to the click: no defer, no edit.
-    await interaction.showModal(companyModal());
+    // Three steps, because the city is a dropdown and a modal can only hold text inputs.
+    // Step 1 has to be the click's first response: no defer, no edit.
+    const existing = await ctx.backend.getUser(discordId).catch(() => null);
+    companyDrafts.start(discordId);
+    companyDrafts.patch(discordId, { name: existing?.user.company?.name ?? undefined });
+    await interaction.showModal(companyNameModal(existing?.user.company?.name ?? undefined));
+    return;
+  }
+  if (id === 'company:services') {
+    const draft = companyDrafts.get(discordId);
+    if (!draft?.name) {
+      await interaction.reply({ content: 'That company setup expired — press Set company profile to start again.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await interaction.showModal(companyServicesModal(draft.services));
+    return;
+  }
+  if (id === 'company:cancel') {
+    companyDrafts.clear(discordId);
+    await interaction.reply({ content: 'Company setup cancelled — nothing was saved.', flags: MessageFlags.Ephemeral });
     return;
   }
   if (id === 'credits:buy') {
@@ -407,7 +433,11 @@ async function buyCredits(interaction: ButtonInteraction, ctx: BotContext): Prom
 // interaction router still needs to answer one politely if an old message is clicked.
 // ---------------------------------------------------------------------------
 
-async function handleSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+async function handleSelect(interaction: StringSelectMenuInteraction, ctx: BotContext): Promise<void> {
+  if (interaction.customId === 'company:city') {
+    await companyCitySelect(interaction, ctx, interaction.values[0] ?? '');
+    return;
+  }
   await expired(interaction);
 }
 
@@ -416,8 +446,12 @@ async function handleSelect(interaction: StringSelectMenuInteraction): Promise<v
 // ---------------------------------------------------------------------------
 
 async function handleModal(interaction: ModalSubmitInteraction, ctx: BotContext): Promise<void> {
-  if (interaction.customId === 'company:submit') {
-    await companySubmit(interaction, ctx);
+  if (interaction.customId === 'company:submit:name') {
+    await companyNameSubmit(interaction, ctx);
+    return;
+  }
+  if (interaction.customId === 'company:submit:services') {
+    await companyServicesSubmit(interaction, ctx);
     return;
   }
 
@@ -501,35 +535,83 @@ async function advanceFromModal(
   }
 }
 
-async function companySubmit(interaction: ModalSubmitInteraction, ctx: BotContext): Promise<void> {
+async function companyNameSubmit(interaction: ModalSubmitInteraction, ctx: BotContext): Promise<void> {
   const name = interaction.fields.getTextInputValue('name').trim();
+  if (name.length === 0) {
+    await interaction.reply({ content: 'I need a company name — press Set company profile to start again.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  companyDrafts.patch(interaction.user.id, { name });
+  // A modal submit cannot answer with another modal, so step 2 is one button away — the message
+  // names the company it just captured so the member can see the draft is real.
+  await interaction.reply({
+    content: `**1 of 3 — company name saved:** ${name}\nNext: what the company does. These services are what tenders are matched against.`,
+    components: [companyNextRow()],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function companyServicesSubmit(interaction: ModalSubmitInteraction, ctx: BotContext): Promise<void> {
   const services = interaction.fields
     .getTextInputValue('services')
     .split(',')
     .map((service) => service.trim())
     .filter((service) => service.length > 0);
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (services.length === 0) {
+    await interaction.reply({ content: 'List at least one service — for example: Construction, Logistics.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const draft = companyDrafts.patch(interaction.user.id, { services });
+  await interaction.reply({
+    content: `**Company profile — 3 of 3**\nWhere is **${draft.name ?? 'the company'}** based?`,
+    components: [companyCityRow(), companyCancelRow()],
+    flags: MessageFlags.Ephemeral,
+  });
+  ctx.logger.info('company draft awaiting city', { discordId: interaction.user.id, services: services.length });
+}
+
+/** Step 3 — the city. Writes the whole draft in one call, so a company is never half-saved. */
+async function companyCitySelect(
+  interaction: StringSelectMenuInteraction,
+  ctx: BotContext,
+  city: string,
+): Promise<void> {
+  const discordId = interaction.user.id;
+  const draft = companyDrafts.get(discordId);
+  if (!draft?.name || !draft.services?.length) {
+    companyDrafts.clear(discordId);
+    await interaction.update({
+      content: 'That company setup expired — press Set company profile to start again.',
+      components: [],
+    });
+    return;
+  }
+  await interaction.deferUpdate();
   try {
     const result = await ctx.backend.setCompany({
-      discord_id: interaction.user.id,
-      name,
-      services,
+      discord_id: discordId,
+      name: draft.name,
+      services: draft.services,
+      location: city,
     });
     const stored = result.user.company;
+    companyDrafts.clear(discordId);
     ctx.logger.info('company profile saved from Discord', {
-      discordId: interaction.user.id,
+      discordId,
       services: stored?.services.length ?? 0,
+      location: city,
     });
     await interaction.editReply({
       content: stored
-        ? `Saved: **${stored.name}**${stored.services.length ? ` — ${stored.services.join(', ')}` : ''}.\nThe portal shows the full company profile.`
+        ? `Saved: **${stored.name}** — ${stored.services.join(', ')}${stored.location ? `, ${stored.location}` : ''}.\nTenders are matched to these services now.`
         : 'Your company profile was cleared.',
+      components: [browseTabsRow()],
     });
   } catch (err) {
     const failure =
       err instanceof BackendError && err.status === 400
         ? { content: `That could not be saved: ${err.message}` }
         : assistantErrorReply(err);
-    await interaction.editReply({ content: failure.content });
+    await interaction.editReply({ content: failure.content, components: [] });
   }
 }

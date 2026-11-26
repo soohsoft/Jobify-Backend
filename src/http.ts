@@ -274,6 +274,7 @@ export class Backend {
     discord_id: string;
     name: string;
     services: string[];
+    location?: string | null;
     website?: string | null;
     description?: string | null;
   }): Promise<{ user: UserEnvelope['user']; company_set: boolean }> {

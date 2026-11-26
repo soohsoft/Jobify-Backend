@@ -1145,6 +1145,11 @@ const SCORE_CATEGORY_EXACT: i64 = 10;
 /// A nudge, not a filter: the member's chosen employer type when the organisation name looks
 /// like it. See `employer_type_matches`.
 const SCORE_EMPLOYER_TYPE: i64 = 5;
+/// The member picked this very sector in "which sectors do you want to be notified about?".
+/// That is an explicit subscription, not a hint, so a row in a picked sector clears the
+/// threshold on its own (20 + 10 + 40 = 70). Keywords then rank above the cut-off rather than
+/// deciding whether the member hears about their own chosen sector at all.
+const SCORE_POSITION_EXACT: i64 = 40;
 const SCORE_KEYWORD_TITLE: i64 = 15;
 const SCORE_KEYWORD_TITLE_MAX: i64 = 30;
 const SCORE_KEYWORD_DESCRIPTION: i64 = 5;
@@ -1187,6 +1192,13 @@ pub fn score_job(job: &JobDoc, profile: &MatchProfile) -> i64 {
         }
     }
     score += in_title + in_description;
+    if profile
+        .positions
+        .iter()
+        .any(|position| position.eq_ignore_ascii_case(category))
+    {
+        score += SCORE_POSITION_EXACT;
+    }
     if employer_type_matches(&job.organization, &profile.employer_types) {
         score += SCORE_EMPLOYER_TYPE;
     }
@@ -2011,6 +2023,31 @@ mod tests {
             "description": description,
             "category": category,
         }))
+    }
+
+    /// A sector the member picked for notifications is a subscription, not a hint: a plain row
+    /// in that sector must clear the cut-off even when no keyword appears in its title. Without
+    /// this, an ICT member heard nothing because ICT postings rarely repeat the keyword list.
+    #[test]
+    fn a_picked_sector_clears_the_threshold_by_itself() {
+        use super::{MATCH_THRESHOLD_DEFAULT, score_job};
+
+        let profile = MatchProfile {
+            categories: vec!["computing".to_string()],
+            keywords: vec!["ict officer".to_string()],
+            positions: vec!["ict".to_string()],
+            ..Default::default()
+        };
+        let plain = job_of(
+            "ict",
+            "Cybersecurity Expert",
+            "FEDERAL GOVERNMENT OF SOMALIA",
+            "Protect the payment system.",
+        );
+        assert!(
+            score_job(&plain, &profile) >= MATCH_THRESHOLD_DEFAULT,
+            "a picked sector is enough on its own"
+        );
     }
 
     /// The two answers taken after the last job must reach the matcher: the positions WIDEN the

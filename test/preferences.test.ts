@@ -158,7 +158,7 @@ test('choosing an employer type moves straight on, and a pick on one page surviv
   assert.deepEqual(sessions.get(MEMBER)?.employerTypes, ['government']);
   assert.equal(sessions.get(MEMBER)?.step, 'positions');
   assert.ok(
-    (employer.updates[0] as { content: string }).content.includes('Which sectors are you interested'),
+    (employer.updates[0] as { content: string }).content.includes('Which sectors are you interested to get notified about'),
   );
 
   // Page 1 → health, then page 2 → wash: both stay picked.

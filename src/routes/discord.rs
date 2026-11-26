@@ -825,6 +825,7 @@ async fn set_company(
         CompanyRequest {
             name: body.name,
             services: body.services,
+            location: body.location,
             website: body.website,
             description: body.description,
         },

@@ -564,6 +564,7 @@ async fn delete_match_profile(
 pub const MAX_COMPANY_SERVICES: usize = 10;
 pub const MAX_COMPANY_SERVICE_CHARS: usize = 40;
 pub const MAX_COMPANY_NAME_CHARS: usize = 120;
+pub const MAX_COMPANY_LOCATION_CHARS: usize = 120;
 pub const MAX_COMPANY_WEBSITE_CHARS: usize = 300;
 pub const MAX_COMPANY_DESCRIPTION_CHARS: usize = 1000;
 
@@ -653,6 +654,7 @@ pub(crate) async fn apply_company(
     let company = CompanyProfile {
         name,
         services: clean_services(body.services)?,
+        location: normalize_optional(body.location, MAX_COMPANY_LOCATION_CHARS, "location")?,
         website: normalize_optional(body.website, MAX_COMPANY_WEBSITE_CHARS, "website")?,
         description: normalize_optional(
             body.description,
@@ -1186,5 +1188,25 @@ mod tests {
         );
         let err = normalize_optional(Some("x".repeat(301)), 300, "website").expect_err("too long");
         assert!(err.message().contains("website"));
+    }
+
+    /// The bot's third company step is a city pick; the value has to survive the same
+    /// normalization and the same cap as the other optional fields, and an over-long one must
+    /// name the field in the error rather than fail as a generic 400.
+    #[test]
+    fn a_company_location_is_trimmed_and_capped() {
+        assert_eq!(
+            normalize_optional(
+                Some("  Hargeisa ".to_string()),
+                MAX_COMPANY_LOCATION_CHARS,
+                "location"
+            )
+            .unwrap(),
+            Some("Hargeisa".to_string())
+        );
+        let long = "x".repeat(MAX_COMPANY_LOCATION_CHARS + 1);
+        let err = normalize_optional(Some(long), MAX_COMPANY_LOCATION_CHARS, "location")
+            .expect_err("an over-long location must be refused");
+        assert!(err.message().contains("location"));
     }
 }

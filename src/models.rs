@@ -235,6 +235,10 @@ pub struct CompanyProfile {
     pub name: String,
     #[serde(default)]
     pub services: Vec<String>,
+    /// Where the company is based, chosen from the Somali city list in the bot. Tender matching
+    /// does not require it, but employers expect it on the profile the portal shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -703,6 +707,8 @@ pub struct DiscordCompanyRequest {
     #[serde(default)]
     pub services: Vec<String>,
     #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
     pub website: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
@@ -730,6 +736,8 @@ pub struct CompanyRequest {
     pub name: String,
     #[serde(default)]
     pub services: Vec<String>,
+    #[serde(default)]
+    pub location: Option<String>,
     #[serde(default)]
     pub website: Option<String>,
     #[serde(default)]

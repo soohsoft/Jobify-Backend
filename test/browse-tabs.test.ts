@@ -135,8 +135,8 @@ test('a blank profile starts the interview instead of searching', async () => {
     (row) =>
       (row as { toJSON: () => { components: { custom_id: string }[] } }).toJSON().components[0]?.custom_id,
   );
-  // Row 0 is the tab pair; the interview's own row sits under it.
-  assert.deepEqual(customIds, ['onb:browse:job', 'onb:name'], 'the first step is live, no extra press needed');
+  // During onboarding the tabs are hidden: the only row is the live first step.
+  assert.deepEqual(customIds, ['onb:name'], 'the first step is live, and no tabs are offered mid-interview');
 });
 
 test('the Tenders tab asks for a company profile instead of a CV list', async () => {
@@ -148,12 +148,12 @@ test('the Tenders tab asks for a company profile instead of a CV list', async ()
   assert.ok(seen.content?.includes('Tenders are matched to a company, not a CV.'), seen.content);
   // The profile prompt, not an empty tender list: nothing is even asked of the matcher.
   assert.deepEqual(calls.kinds, [], 'no tender query runs before a company exists');
-  // Row 0 is always the tab pair; the profile prompt sits under it.
+  // No tabs here: the form is the next step, so it is the only row.
   const customIds = (seen.components ?? []).map(
     (row) =>
       (row as { toJSON: () => { components: { custom_id: string }[] } }).toJSON().components[0]?.custom_id,
   );
-  assert.deepEqual(customIds, ['onb:browse:job', 'company:open']);
+  assert.deepEqual(customIds, ['company:open']);
 });
 
 test('the Tenders tab lists tenders when the company profile exists', async () => {

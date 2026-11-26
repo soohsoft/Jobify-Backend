@@ -98,6 +98,12 @@ function feedRow(job: FeedJob, matchScore?: number | null): RowInput {
 export interface BrowseReply {
   content: string;
   components?: ActionRowBuilder<ButtonBuilder>[];
+  /**
+   * True when the reply is an interview step. Callers that decorate a list with the Jobs/Tenders
+   * tabs must skip them here: offering "Jobs" in the middle of onboarding invites a member to
+   * leave the questions half-answered, and the tabs would push the real step button down.
+   */
+  hideTabs?: boolean;
 }
 
 /**
@@ -117,6 +123,7 @@ export async function startProfileInterview(ctx: BotContext, discordId: string):
   return {
     content: ['**No work area on file yet — four quick questions.**', prompt.content].join('\n\n'),
     components: prompt.components,
+    hideTabs: true,
   };
 }
 
@@ -137,6 +144,8 @@ export async function browseRows(
           'Tell me the company name and the services it offers (for example: construction, logistics, water works) and I will match tenders to those.',
         ].join('\n'),
         components: [companyRow()],
+        // Setting up the company IS the next step: tabs would offer a list that cannot exist yet.
+        hideTabs: true,
       };
     }
   }

@@ -140,9 +140,11 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
       /^(jobs?|vacanc(?:y|ies))$/.test(bare) ? 'job' : /^tenders?$/.test(bare) ? 'tender' : null;
     if (browseKind) {
       const reply = await browseRows(ctx, message.author.id, browseKind);
+      // No tabs while the reply is an interview step (see BrowseReply.hideTabs).
+      const tabs = reply.hideTabs ? [] : [browseTabsRow()];
       await message.reply({
         content: reply.content,
-        components: [browseTabsRow(), ...(reply.components ?? [])],
+        components: [...tabs, ...(reply.components ?? [])],
         allowedMentions: { parse: [] },
       });
       ctx.logger.info('free-text browse', { discordId: message.author.id, kind: browseKind });

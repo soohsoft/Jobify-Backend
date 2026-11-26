@@ -333,10 +333,12 @@ async function browseTab(
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const reply = await browseRows(ctx, interaction.user.id, kind);
   // The tabs ride along with the list, so switching between Jobs and Tenders is always one
-  // press away instead of typing a command again.
+  // press away instead of typing a command again — except during onboarding, where the reply is
+  // a question and the only right button is the next step.
+  const tabs = reply.hideTabs ? [] : [browseTabsRow()];
   await interaction.editReply({
     content: reply.content,
-    components: [browseTabsRow(), ...(reply.components ?? [])],
+    components: [...tabs, ...(reply.components ?? [])],
   });
 }
 

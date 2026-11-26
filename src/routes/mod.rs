@@ -27,20 +27,22 @@ pub type ApiResult =
 pub fn app(state: AppState) -> Router {
     let cors = cors_layer(&state.config.cors_origin);
 
+    // The taxonomy and the feed are public and identical for everyone signed out, so they sit
+    // behind one layer pair: optional auth (a signed-in caller's location is applied) and a
+    // few-second cache for the anonymous crowd.
+    let feed = Router::new()
+        .merge(categories::router())
+        .merge(jobs::public_router())
+        .route_layer(axum_middleware::from_fn(middleware::cache_public_list))
+        .route_layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::optional_auth,
+        ));
+
     let public = Router::new()
         .merge(health::router())
-        // The taxonomy is public: the bot's multi-select and the portal's filters both
-        // render it, and it holds no user data.
-        .merge(categories::router())
         .merge(auth::public_router())
-        // Optional auth on the feed so a signed-in caller can have their profile location
-        // applied, while the same routes stay public for everyone else.
-        .merge(
-            jobs::public_router().route_layer(axum_middleware::from_fn_with_state(
-                state.clone(),
-                middleware::optional_auth,
-            )),
-        );
+        .merge(feed);
 
     let protected = Router::new()
         .merge(auth::verification_router())

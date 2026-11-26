@@ -44,7 +44,7 @@ export async function respond(target: Replyable, payload: InteractionReplyOption
  */
 export function accountLinkRow(): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('account:link').setLabel('Manage my account').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('account:link').setLabel('My Account').setStyle(ButtonStyle.Primary),
   );
 }
 

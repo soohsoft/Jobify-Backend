@@ -220,9 +220,12 @@ test('a digest row links from the row or the embedded job, and one vacancy is se
 test('402 out_of_credits offers the purchase action and never echoes the backend body', () => {
   const copy = assistantFailureCopy(402, 'out_of_credits');
   assert.equal(copy.offerPurchase, true);
-  assert.match(copy.content, /free searches/i);
-  assert.match(copy.content, /account page/);
-  assert.doesNotMatch(copy.content, /Buy credits|\$\d/, 'no purchase CTA and no price in Discord');
+  assert.match(copy.content, /smart searches/i);
+  // The owner's sentence: a price in TEXT, and the action is still a plain account link —
+  // no in-app purchase, which is the part Discord's policy forbids.
+  assert.match(copy.content, /Get unlimited job search/i);
+  assert.match(copy.content, /\$1\/month/);
+  assert.doesNotMatch(copy.content, /credit card|pay now|checkout/i, 'no payment action in chat');
 });
 
 test('429 is "slow down" and 502 is honest about nothing being charged', () => {

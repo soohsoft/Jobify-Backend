@@ -7,11 +7,18 @@ import type {
   ActionRowBuilder,
   ButtonBuilder,
   Client,
+  DMChannel,
   StringSelectMenuBuilder,
 } from 'discord.js';
 
 import type { Backend } from './http.js';
 import type { Logger } from './log.js';
+import {
+  DEFAULT_DM_LIMITS,
+  DiscordRateLimiter,
+  isUnknownChannel,
+  withDiscordRetry,
+} from './ratelimit.js';
 import type { OnboardingSessions } from './onboarding.js';
 import type { Category } from './types.js';
 
@@ -98,10 +105,63 @@ export function createCategoryCache(backend: Backend, ttlMs = 10 * 60_000): () =
   };
 }
 
-export function createDmSender(client: Client): SendDm {
-  return async (discordId, payload) => {
+/**
+ * A DM sender that paces itself.
+ *
+ * Two things matter here and both are about not looking like spam:
+ *
+ * - the DM channel is CACHED per member. `users.fetch()` + `user.send()` opens a channel every
+ *   time, and those channel opens are the request Discord throttles hardest; a digest over a
+ *   thousand members would otherwise do two thousand round trips for one message each.
+ * - the send waits on `DiscordRateLimiter` and retries a 429 for exactly as long as Discord
+ *   says. Replies to a member's own action never come through here, so this adds no delay to a
+ *   conversation — only to the proactive digests.
+ */
+export function createDmSender(
+  client: Client,
+  options: {
+    limiter?: DiscordRateLimiter;
+    logger?: Logger;
+  } = {},
+): SendDm {
+  const limiter = options.limiter ?? new DiscordRateLimiter(DEFAULT_DM_LIMITS);
+  const channels = new Map<string, DMChannel>();
+
+  const openChannel = async (discordId: string): Promise<DMChannel> => {
+    const cached = channels.get(discordId);
+    if (cached) return cached;
     const user = await client.users.fetch(discordId);
-    await user.send(payload);
+    const channel = (await user.createDM()) as DMChannel;
+    channels.set(discordId, channel);
+    return channel;
+  };
+
+  return async (discordId, payload) => {
+    let channel = await openChannel(discordId);
+    await limiter.acquire(discordId);
+    try {
+      await withDiscordRetry(() => channel.send(payload), {
+        attempts: 3,
+        onRetry: (waitMs, err) => {
+          options.logger?.warn('discord: waited out a rate limit', {
+            discordId,
+            waitMs,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        },
+        // A channel that was deleted (or a cache entry that went stale) is not rate limiting:
+        // drop it and open a fresh one before the next attempt.
+        onRetryable: async () => {
+          channels.delete(discordId);
+          channel = await openChannel(discordId);
+        },
+      });
+    } catch (err) {
+      // Keep the cache honest: a channel that failed for a non-retryable reason is discarded so
+      // the next digest starts from a fresh fetch instead of reusing it forever.
+      if (isUnknownChannel(err)) channels.delete(discordId);
+      throw err;
+    }
   };
 }
 

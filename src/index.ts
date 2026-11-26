@@ -65,7 +65,9 @@ async function main(): Promise<void> {
     sessions: new OnboardingSessions(),
     ...(config.freeChannelId ? { freeChannelId: config.freeChannelId } : {}),
     categories: createCategoryCache(backend),
-    sendDm: createDmSender(client),
+    // Proactive sends only: the digest and alert DMs trickle out under Discord's limits, while
+    // answers to a member's own click stay instant (they never pass through here).
+    sendDm: createDmSender(client, { logger }),
     sendChannel: createChannelSender(client),
     guard: new RequestGuard(),
   };

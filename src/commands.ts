@@ -23,8 +23,8 @@ import {
   type RowInput,
 } from './format.js';
 import { BackendError } from './http.js';
-import { educationSummary, experienceLabel } from './onboarding.js';
-import { assistantErrorReply, buyCreditsRow, clampContent, companyRow, profileSetupRow, respond } from './ui.js';
+import { educationSummary, experienceLabel, namePrompt } from './onboarding.js';
+import { assistantErrorReply, buyCreditsRow, clampContent, companyRow, respond } from './ui.js';
 import type { FeedJob, UserEnvelope } from './types.js';
 
 /**
@@ -100,6 +100,26 @@ export interface BrowseReply {
   components?: ActionRowBuilder<ButtonBuilder>[];
 }
 
+/**
+ * Starts the four-question interview for a member whose profile cannot be searched yet, prefilled
+ * from whatever is on file. Exported so the "Change my answers" button and the empty-profile reply
+ * run the same code — the interview must not exist twice.
+ */
+export async function startProfileInterview(ctx: BotContext, discordId: string): Promise<BrowseReply> {
+  const existing = await ctx.backend.getUser(discordId).catch(() => null);
+  ctx.sessions.start(discordId, {
+    previousEducation: existing?.user.education ?? [],
+    name: existing?.user.name ?? undefined,
+    lastPosition: existing?.user.last_position ?? undefined,
+    experienceYears: existing?.user.experience_years ?? undefined,
+  });
+  const prompt = namePrompt();
+  return {
+    content: ['**No work area on file yet — four quick questions.**', prompt.content].join('\n\n'),
+    components: prompt.components,
+  };
+}
+
 export async function browseRows(
   ctx: BotContext,
   discordId: string,
@@ -121,9 +141,9 @@ export async function browseRows(
     }
   }
 
-  // A blank profile cannot be searched: the member gets the way into the four questions, never a
-  // list built from nothing. Checked BEFORE the search so "no profile" and "nothing live" can
-  // never be confused in the reply.
+  // A blank profile cannot be searched: the four questions start here, automatically. Asking for
+  // a button press first is a dead end for exactly the members who have nothing configured yet.
+  // Checked BEFORE the search so "no profile" and "nothing live" can never be confused.
   if (kind === 'job') {
     const me = await ctx.backend.getUser(discordId).catch(() => null);
     const profile = me?.user.match_profile;
@@ -132,15 +152,7 @@ export async function browseRows(
       profile.categories.length === 0 &&
         profile.keywords.length === 0 &&
         profile.locations.length === 0;
-    if (blank) {
-      return {
-        content: [
-          '**You have no work area on file yet.**',
-          'Four quick questions — field, keywords, locations, experience — and I will start matching jobs to you.',
-        ].join('\n'),
-        components: [profileSetupRow()],
-      };
-    }
+    if (blank) return startProfileInterview(ctx, discordId);
   }
 
   const { rows, meta } = await ctx.backend.jobsForUser(discordId, {
@@ -149,13 +161,7 @@ export async function browseRows(
     threshold: 0,
   });
   if (meta.categories.length === 0) {
-    return {
-      content: [
-        '**You have no work area on file yet.**',
-        'Four quick questions — field, keywords, locations, experience — and I will start matching jobs to you.',
-      ].join('\n'),
-      components: [profileSetupRow()],
-    };
+    return startProfileInterview(ctx, discordId);
   }
 
   if (rows.length === 0) {

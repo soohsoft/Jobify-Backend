@@ -122,19 +122,21 @@ test('the Jobs tab answers with the job list, with no interview session', async 
   assert.ok(!seen.followedUp?.includes('expired'), 'a tab is not an interview step');
 });
 
-test('a blank profile gets the setup button, not a search', async () => {
+test('a blank profile starts the interview instead of searching', async () => {
   const { ctx, calls } = makeCtx({ blankProfile: true });
   const { interaction, seen } = makeButton(CID.browseJobs);
 
   await handleInteraction(interaction, ctx);
 
   assert.deepEqual(calls.kinds, [], 'nothing is searched before a profile exists');
-  assert.ok(seen.content?.includes('no work area on file yet'), seen.content);
+  assert.ok(seen.content?.includes('No work area on file yet'), seen.content);
+  assert.ok(seen.content?.includes('What is your name?'), 'the first question is asked, not promised');
   const customIds = (seen.components ?? []).map(
     (row) =>
       (row as { toJSON: () => { components: { custom_id: string }[] } }).toJSON().components[0]?.custom_id,
   );
-  assert.deepEqual(customIds, ['onb:browse:job', 'onb:restart'], 'the tabs plus the way into the four questions');
+  // Row 0 is the tab pair; the interview's own row sits under it.
+  assert.deepEqual(customIds, ['onb:browse:job', 'onb:name'], 'the first step is live, no extra press needed');
 });
 
 test('the Tenders tab asks for a company profile instead of a CV list', async () => {

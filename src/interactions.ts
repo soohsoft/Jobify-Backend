@@ -8,7 +8,7 @@
  */
 import { MessageFlags, type ButtonInteraction, type Interaction, type ModalSubmitInteraction, type StringSelectMenuInteraction, type ActionRowBuilder, type ButtonBuilder } from 'discord.js';
 
-import { alertsPanel, browseRows, handleCommand } from './commands.js';
+import { alertsPanel, browseRows, handleCommand, startProfileInterview } from './commands.js';
 import type { BotContext } from './context.js';
 import {
   CID,
@@ -24,7 +24,6 @@ import {
   fieldModal,
   fieldPrompt,
   nameModal,
-  namePrompt,
   positionModal,
   positionPrompt,
   type OnboardingSession,
@@ -343,25 +342,15 @@ async function browseTab(
 
 async function restartInterview(interaction: ButtonInteraction, ctx: BotContext): Promise<void> {
   await interaction.deferUpdate();
-  const existing = await ctx.backend.getUser(interaction.user.id).catch(() => null);
-  ctx.sessions.start(interaction.user.id, {
-    previousEducation: existing?.user.education ?? [],
-    name: existing?.user.name ?? undefined,
-    lastPosition: existing?.user.last_position ?? undefined,
-    experienceYears: existing?.user.experience_years ?? undefined,
+  // One implementation of "start the interview", shared with the empty-profile reply.
+  const reply = await startProfileInterview(ctx, interaction.user.id);
+  await interaction.editReply({
+    content: `${reply.content}\nYour current answers are filled in where they can be — answering again replaces them.`,
+    components: reply.components,
   });
-  await interaction.editReply(namePromptForRestart());
   ctx.logger.info('onboarding restarted', { discordId: interaction.user.id });
 }
 
-/** The name prompt, with a line saying a re-run replaces what is on file. */
-function namePromptForRestart(): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
-  const prompt = namePrompt();
-  return {
-    content: `${prompt.content}\nYour current answers are filled in where they can be — answering again replaces them.`,
-    components: prompt.components,
-  };
-}
 
 async function alertsButton(interaction: ButtonInteraction, ctx: BotContext, action: string): Promise<void> {
   if (action === 'redo') {

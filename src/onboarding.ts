@@ -391,7 +391,7 @@ export function positionsPrompt(session: OnboardingSession, page = 0): StepPromp
 
   return {
     content: [
-      '**Step 4 of 5 — Which positions do you want notifications for?**',
+      '**Step 4 of 5 — Which sectors are you interested to work in?**',
       '',
       'Pick as many as you like, then press **Done**. Or take **All categories**.',
       '',

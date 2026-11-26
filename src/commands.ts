@@ -139,10 +139,7 @@ export async function browseRows(
     const me = await ctx.backend.getUser(discordId).catch(() => null);
     if (me && me.user.company == null) {
       return {
-        content: [
-          '**Tenders are matched to a company, not a CV.**',
-          'Tell me the company name and the services it offers (for example: construction, logistics, water works) and I will match tenders to those.',
-        ].join('\n'),
+        content: 'Please fill your company information to search relevant tenders for your company.',
         components: [companyRow()],
         // Setting up the company IS the next step: tabs would offer a list that cannot exist yet.
         hideTabs: true,

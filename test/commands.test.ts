@@ -214,7 +214,7 @@ test('a cached /credits answers with the surviving commands instead of failing',
 });
 
 // ---------------------------------------------------------------------------
-// Tenders are matched to a company, not a CV
+// A member with no company is asked to fill one in
 // ---------------------------------------------------------------------------
 
 test('/tenders with no company profile asks for the company instead of listing jobs', async () => {
@@ -225,7 +225,7 @@ test('/tenders with no company profile asks for the company instead of listing j
   assert.equal(calls.browse.length, 0, 'the matcher is not asked before there is a company');
   const reply = replies.at(-1);
   assert.ok(reply);
-  assert.match(reply.content, /Tenders are matched to a company/);
+  assert.match(reply.content, /Please fill your company information/);
   const ids = (reply.components ?? []).flatMap((row) => row.toJSON().components.map((button) => button.custom_id));
   assert.deepEqual(ids, ['company:open']);
 });

@@ -145,7 +145,7 @@ test('the Tenders tab asks for a company profile instead of a CV list', async ()
 
   await handleInteraction(interaction, ctx);
 
-  assert.ok(seen.content?.includes('Tenders are matched to a company, not a CV.'), seen.content);
+  assert.ok(seen.content?.includes('Please fill your company information'), seen.content);
   // The profile prompt, not an empty tender list: nothing is even asked of the matcher.
   assert.deepEqual(calls.kinds, [], 'no tender query runs before a company exists');
   // No tabs here: the form is the next step, so it is the only row.

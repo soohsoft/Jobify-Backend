@@ -24,7 +24,7 @@ import {
 } from './format.js';
 import { BackendError } from './http.js';
 import { educationSummary, experienceLabel, namePrompt } from './onboarding.js';
-import { assistantErrorReply, buyCreditsRow, clampContent, companyRow, respond } from './ui.js';
+import { accountLinkRow, assistantErrorReply, clampContent, companyRow, respond } from './ui.js';
 import type { FeedJob, UserEnvelope } from './types.js';
 
 /**
@@ -49,7 +49,7 @@ export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody
   return [
     withQuery('jobs', 'Search jobs, or list the newest in your fields'),
     withQuery('tenders', 'Search tenders, or list the newest in your fields'),
-    new SlashCommandBuilder().setName('balance').setDescription('How many searches you have left, and how to buy more').toJSON(),
+    new SlashCommandBuilder().setName('balance').setDescription('How many searches you have left').toJSON(),
     new SlashCommandBuilder().setName('account').setDescription('Get a private one-time link to your Jobify account').toJSON(),
   ];
 }
@@ -329,7 +329,7 @@ export async function handleBalance(interaction: ChatInputCommandInteraction, ct
     '',
     'One smart search costs one query. Browsing `/jobs` or `/tenders` without a query, your alerts and the daily digest are free.',
   ].join('\n');
-  await interaction.editReply({ content, components: [buyCreditsRow()] });
+  await interaction.editReply({ content, components: [accountLinkRow()] });
 }
 
 export async function handleAccount(interaction: ChatInputCommandInteraction, ctx: BotContext): Promise<void> {

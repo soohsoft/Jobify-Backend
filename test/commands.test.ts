@@ -167,7 +167,7 @@ test('the kept descriptions are the ones the owner approved', () => {
   assert.equal(byName.get('tenders')?.description, 'Search tenders, or list the newest in your fields');
   assert.equal(byName.get('account')?.description, 'Get a private one-time link to your Jobify account');
   // `/balance` IS `/credits`: the name changed, the sentence did not.
-  assert.equal(byName.get('balance')?.description, 'How many searches you have left, and how to buy more');
+  assert.equal(byName.get('balance')?.description, 'How many searches you have left');
 });
 
 test('jobs and tenders keep their optional query; balance and account take no options', () => {
@@ -186,7 +186,7 @@ test('jobs and tenders keep their optional query; balance and account take no op
 // Routing
 // ---------------------------------------------------------------------------
 
-test('/balance answers with the credits panel and its Buy credits button', async () => {
+test('/balance answers with the credits panel and its account button', async () => {
   const { ctx, calls } = ctxFor();
   const { interaction, replies, deferred } = interactionFor('balance');
   await handleCommand(interaction, ctx);
@@ -198,7 +198,7 @@ test('/balance answers with the credits panel and its Buy credits button', async
   assert.match(reply.content, /Free searches left this period: \*\*23 of 30\*\*/);
   assert.match(reply.content, /Purchased searches: \*\*2\*\*/);
   const ids = (reply.components ?? []).flatMap((row) => row.toJSON().components.map((button) => button.custom_id));
-  assert.deepEqual(ids, ['credits:buy'], 'the buy button keeps its custom id');
+  assert.deepEqual(ids, ['account:link'], 'the button opens the account page, it does not buy');
 });
 
 test('a cached /credits answers with the surviving commands instead of failing', async () => {

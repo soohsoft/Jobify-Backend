@@ -215,6 +215,19 @@ tenders-only member would accumulate job notifications they are never sent.
   (`test/commands.test.ts`);
 - the wall clock in `Africa/Nairobi`, the once-a-day guard (`test/scheduler.test.ts`).
 
+## Money never happens in Discord
+
+The bot shows no price, no amount and no "pay" action. Discord's developer policy does not let a
+bot facilitate the sale of goods or services, and the Play Store / App Store reviews treat a
+payment CTA inside Discord as a violation. So every commerce path is a plain **account link**:
+
+- `/balance` → credits panel + one button, `Manage my account`, custom id `account:link`.
+- `/account` → a one-time (15 min, single use) link to the member's own page.
+- Payment (WaafiPay) and receipts live on the website, in a browser, under our terms.
+
+`test/commands.test.ts` and `test/format.test.ts` pin this: no `Buy credits` and no `$<amount>`
+in any bot string.
+
 ## Project layout
 
 ```

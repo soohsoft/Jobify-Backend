@@ -132,8 +132,9 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
     await interaction.reply({ content: 'Company setup cancelled — nothing was saved.', flags: MessageFlags.Ephemeral });
     return;
   }
-  if (id === 'credits:buy') {
-    await buyCredits(interaction, ctx);
+  // Both ids route here so a message sent before the rename keeps working.
+  if (id === 'account:link' || id === 'credits:buy') {
+    await accountLink(interaction, ctx);
     return;
   }
   if (id.startsWith('alerts:')) {
@@ -484,7 +485,14 @@ async function alertsButton(interaction: ButtonInteraction, ctx: BotContext, act
   }
 }
 
-async function buyCredits(interaction: ButtonInteraction, ctx: BotContext): Promise<void> {
+/**
+ * Opens the member's own page on the website.
+ *
+ * No price, no amount, no "pay" — a bot may not sell goods or services through Discord, and the
+ * app stores will not pass a build whose bot carries a payment CTA. The transaction happens in
+ * the browser, on our domain, with our receipts; Discord only hands over the private link.
+ */
+async function accountLink(interaction: ButtonInteraction, ctx: BotContext): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   try {
     await ctx.backend.upsertUser({
@@ -495,10 +503,10 @@ async function buyCredits(interaction: ButtonInteraction, ctx: BotContext): Prom
     const link = await ctx.backend.mintLink(interaction.user.id, 900);
     await interaction.editReply({
       content: [
-        '**Buying credits happens on your Jobify account page.**',
+        '**Your Jobify account page** — subscription, searches and your company profile.',
         link.url,
         '',
-        'Single use, expires in 15 minutes. Payment is handled there — there is no card entry in Discord.',
+        'Single use, expires in 15 minutes.',
       ].join('\n'),
     });
   } catch (err) {

@@ -221,7 +221,8 @@ test('402 out_of_credits offers the purchase action and never echoes the backend
   const copy = assistantFailureCopy(402, 'out_of_credits');
   assert.equal(copy.offerPurchase, true);
   assert.match(copy.content, /free searches/i);
-  assert.match(copy.content, /Buy credits/);
+  assert.match(copy.content, /account page/);
+  assert.doesNotMatch(copy.content, /Buy credits|\$\d/, 'no purchase CTA and no price in Discord');
 });
 
 test('429 is "slow down" and 502 is honest about nothing being charged', () => {

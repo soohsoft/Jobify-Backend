@@ -34,15 +34,22 @@ export async function respond(target: Replyable, payload: InteractionReplyOption
 }
 
 /**
- * "Buy credits" is an interaction, not a link: the portal has no public pricing page, and a
- * bare link would land an unauthenticated visitor on the sign-in screen. The button mints a
- * one-time portal link and answers privately.
+ * The account link button.
+ *
+ * Deliberately NOT a purchase button. Discord's developer policy does not allow a bot to
+ * facilitate the sale of goods or services, and neither the Play Store nor the App Store
+ * review tolerates a payment CTA inside Discord. So the bot never shows a price, an amount or
+ * a "pay" action: it opens the member's own page on the website, where payment (WaafiPay)
+ * happens in a browser, under our own terms and receipts.
  */
-export function buyCreditsRow(): ActionRowBuilder<ButtonBuilder> {
+export function accountLinkRow(): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('credits:buy').setLabel('Buy credits').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('account:link').setLabel('Manage my account').setStyle(ButtonStyle.Primary),
   );
 }
+
+/** The old name, kept only so an already-deployed import cannot break. */
+export const buyCreditsRow = accountLinkRow;
 
 /**
  * Tenders are matched to a company, not to a CV: name + services are what the matcher scores.

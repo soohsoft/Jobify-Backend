@@ -354,7 +354,7 @@ export function assistantFailureCopy(status: number, code: string): AssistantFai
   if (status === 402 || code === 'out_of_credits') {
     return {
       content:
-        "You've used your free searches for this period and there are no purchased credits left.\nBuy credits on your account page to keep asking — open it with the button below, or with `/account`.",
+        "You've used your free searches for this period.\nYour account page shows your plan and lets you sort it out — open it with the button below, or with `/account`.",
       offerPurchase: true,
     };
   }

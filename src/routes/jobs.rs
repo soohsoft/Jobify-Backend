@@ -1400,7 +1400,9 @@ async fn match_jobs(
                 "queued": queued_count,
                 "country": country_wanted,
                 "duplicatesRemoved": ranked.duplicates_removed,
-                "categories": profile.categories,
+                // The categories the search actually used: what the interview derived plus
+                // whatever the member picked as notification positions.
+                "categories": profile.effective_categories(),
                 "categorySource": profile.category_source,
             }
         })),

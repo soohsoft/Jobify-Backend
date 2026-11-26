@@ -26,6 +26,7 @@ import { handleInteraction } from './interactions.js';
 import { createLogger, errorFields } from './log.js';
 import { handleMessage } from './messages.js';
 import { OnboardingSessions } from './onboarding.js';
+import { DiscordRateLimiter } from './ratelimit.js';
 import { DailyDigestScheduler } from './scheduler.js';
 import { handleMemberJoin } from './welcome.js';
 
@@ -56,8 +57,17 @@ async function main(): Promise<void> {
     partials: [Partials.Channel],
   });
 
+  // ONE pacer for the whole bot: Discord's limits are per bot, not per lane, so the digest and
+  // the replies to members' messages spend from the same bucket.
+  const outbound = new DiscordRateLimiter({
+    burst: config.dmBurst,
+    perSecond: config.dmPerSecond,
+    perUserMs: config.dmPerUserMs,
+  });
+
   const ctx: BotContext = {
     backend,
+    outbound,
     appBaseUrl: config.appBaseUrl,
     digestTz: config.digestTz,
     digestHour: config.digestHour,
@@ -66,8 +76,9 @@ async function main(): Promise<void> {
     ...(config.freeChannelId ? { freeChannelId: config.freeChannelId } : {}),
     categories: createCategoryCache(backend),
     // Proactive sends only: the digest and alert DMs trickle out under Discord's limits, while
-    // answers to a member's own click stay instant (they never pass through here).
-    sendDm: createDmSender(client, { logger }),
+    // answers to a member's own click stay instant (they never pass through here). The pacing
+    // is configurable (DISCORD_DM_PER_SECOND, default 20/s ≈ 5 000 DMs in 4 min).
+    sendDm: createDmSender(client, { logger, limiter: outbound }),
     sendChannel: createChannelSender(client),
     guard: new RequestGuard(),
   };

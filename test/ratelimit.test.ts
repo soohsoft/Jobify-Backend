@@ -131,3 +131,37 @@ test('the readers recognise the shapes discord.js actually throws', () => {
   assert.equal(isUnknownChannel({ code: 10003 }), true);
   assert.equal(isUnknownChannel({ code: 50035 }), false);
 });
+
+test('five thousand sends at 20/s drain in about four minutes, never faster than the bucket', async () => {
+  const clock = virtualClock();
+  const limiter = new DiscordRateLimiter({
+    burst: 5,
+    perSecond: 20,
+    perUserMs: 1_200,
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+
+  const started = clock.now();
+  for (let i = 0; i < 5_000; i += 1) await limiter.acquire(`member-${i}`);
+  const elapsed = clock.now() - started;
+
+  // 5 000 sends / 20 per second = 250 s, less the free burst.
+  assert.ok(elapsed >= 249_000, `too fast for the bucket: ${elapsed} ms`);
+  assert.ok(elapsed <= 252_000, `slower than the bucket allows: ${elapsed} ms`);
+});
+
+test('a member writing three times in a row is answered within a second each', async () => {
+  const clock = virtualClock();
+  const limiter = new DiscordRateLimiter({
+    burst: 25,
+    perSecond: 25,
+    perUserMs: 1_200,
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+
+  const started = clock.now();
+  for (let i = 0; i < 3; i += 1) await limiter.acquire('member-a', 300); // reply gap
+  assert.ok(clock.now() - started <= 900, 'a conversation is not slowed by the digest pacing');
+});

@@ -74,14 +74,14 @@ export class DiscordRateLimiter {
    * The per-member gap is claimed first — so two concurrent sends to the same member queue in
    * arrival order instead of both reading a free slot — and the bot-wide bucket is spent after.
    */
-  async acquire(key: string): Promise<void> {
+  async acquire(key: string, gapMs: number = this.perUserMs): Promise<void> {
     const now = this.now();
     const previous = this.nextForUser.get(key);
     if (previous === undefined) {
-      this.nextForUser.set(key, now + this.perUserMs);
+      this.nextForUser.set(key, now + gapMs);
     } else {
       const userWait = previous - now;
-      this.nextForUser.set(key, previous + this.perUserMs);
+      this.nextForUser.set(key, previous + gapMs);
       if (userWait > 0) await this.sleep(userWait);
     }
     if (this.nextForUser.size > 2_048) this.prune(now);

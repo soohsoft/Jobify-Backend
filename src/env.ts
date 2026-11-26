@@ -17,6 +17,14 @@ export interface Config {
   appBaseUrl: string;
   digestTz: string;
   digestHour: number;
+  /**
+   * Outbound DM pacing. Defaults sit at 20/s bot-wide — a fifth of Discord's documented
+   * ceiling — so a 5 000-member digest finishes in about four minutes.
+   */
+  dmPerSecond: number;
+  dmBurst: number;
+  /** Minimum gap between two DMs to the same member. */
+  dmPerUserMs: number;
   /** A guild channel where plain messages are answered without a mention; unset = mention only. */
   freeChannelId?: string;
 }
@@ -51,6 +59,13 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
+/** Parses a positive integer, falling back to `fallback` and clamping into [min, max]. */
+function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const value = Number.parseInt((raw ?? '').trim(), 10);
+  if (!Number.isInteger(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const hourRaw = env.DIGEST_HOUR?.trim() ?? '8';
   const hour = Number.parseInt(hourRaw, 10);
@@ -67,6 +82,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // any IANA zone works.
     digestTz: env.DIGEST_TZ?.trim() || 'Africa/Nairobi',
     digestHour: hour,
+    // Clamped, not validated: a typo must not either stop the bot or push it into a ban. At
+    // 20/s a 5 000-member run takes ~4 minutes; 25 is the highest we will go, which is still
+    // half of Discord's documented ~50/s.
+    dmPerSecond: clampInt(env.DISCORD_DM_PER_SECOND, 20, 1, 25),
+    dmBurst: clampInt(env.DISCORD_DM_BURST, 5, 1, 10),
+    dmPerUserMs: clampInt(env.DISCORD_DM_USER_GAP_MS, 1_200, 600, 5_000),
     freeChannelId: env.DISCORD_FREE_CHANNEL_ID?.trim() || undefined,
   };
 }

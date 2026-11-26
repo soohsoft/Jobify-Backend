@@ -14,7 +14,7 @@
  */
 import type { Message } from 'discord.js';
 
-import type { BotContext } from './context.js';
+import { REPLY_GAP_MS, type BotContext } from './context.js';
 import { browseRows } from './commands.js';
 import { formatAssistantReply } from './format.js';
 import { browseTabsRow, namePrompt, promptForStep, type OnboardingSession } from './onboarding.js';
@@ -29,6 +29,18 @@ const WELCOME =
  * Starts the interview the same way the join welcome does, carrying forward the answers
  * already on file so the modals are pre-filled rather than empty.
  */
+/**
+ * Replies to a member's own message, spending one slot in the bot-wide pacer.
+ *
+ * The reply still arrives in well under a second for a normal conversation; what the pacer
+ * prevents is five thousand members writing in the same minute turning into five thousand
+ * simultaneous channel writes, which is what Discord punishes.
+ */
+async function reply(message: Message, ctx: BotContext, payload: Parameters<Message['reply']>[0]): Promise<void> {
+  if (ctx.outbound) await ctx.outbound.acquire(message.author.id, REPLY_GAP_MS);
+  await message.reply(payload);
+}
+
 async function startInterview(
   message: Message,
   ctx: BotContext,
@@ -41,7 +53,7 @@ async function startInterview(
     experienceYears: existing.experienceYears ?? undefined,
   });
   const prompt = namePrompt();
-  await message.reply({
+  await reply(message, ctx, {
     content: clampContent(`${WELCOME}\n\n${prompt.content}`),
     components: prompt.components,
     allowedMentions: { parse: [] },
@@ -55,7 +67,7 @@ async function startInterview(
  */
 async function resumeInterview(message: Message, ctx: BotContext, session: OnboardingSession): Promise<void> {
   const prompt = promptForStep(session.step, session);
-  await message.reply({
+  await reply(message, ctx, {
     content: clampContent(`You are part-way through setup — here is where we left off.\n\n${prompt.content}`),
     components: prompt.components,
     allowedMentions: { parse: [] },
@@ -79,7 +91,7 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
     ? message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), ' ').trim()
     : message.content.trim();
   if (text.length === 0) {
-    await message.reply({
+    await reply(message, ctx, {
       content: 'Tell me what you are looking for — a role, a place, or both. For example: `data analyst in Mogadishu`.',
       allowedMentions: { parse: [] },
     });
@@ -87,7 +99,7 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
   }
 
   if (text.length > MAX_INPUT) {
-    await message.reply({
+    await reply(message, ctx, {
       content: `That is a bit long for me to search. Try a shorter question — under ${MAX_INPUT} characters.`,
       allowedMentions: { parse: [] },
     });
@@ -139,12 +151,12 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
     const browseKind =
       /^(jobs?|vacanc(?:y|ies))$/.test(bare) ? 'job' : /^tenders?$/.test(bare) ? 'tender' : null;
     if (browseKind) {
-      const reply = await browseRows(ctx, message.author.id, browseKind);
+      const listing = await browseRows(ctx, message.author.id, browseKind);
       // No tabs while the reply is an interview step (see BrowseReply.hideTabs).
-      const tabs = reply.hideTabs ? [] : [browseTabsRow()];
-      await message.reply({
-        content: reply.content,
-        components: [...tabs, ...(reply.components ?? [])],
+      const tabs = listing.hideTabs ? [] : [browseTabsRow()];
+      await reply(message, ctx, {
+        content: listing.content,
+        components: [...tabs, ...(listing.components ?? [])],
         allowedMentions: { parse: [] },
       });
       ctx.logger.info('free-text browse', { discordId: message.author.id, kind: browseKind });
@@ -161,7 +173,7 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
     if (greeting) {
       const me = await ctx.backend.getUser(message.author.id).catch(() => null);
       const named = me?.user.name ? `, ${me.user.name}` : '';
-      await message.reply({
+      await reply(message, ctx, {
         content:
           `**What would you like to see${named}?**\n` +
           'Tap a tab, or ask me anything — for example `nurse jobs in Mogadishu`.',
@@ -174,7 +186,7 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
 
     const answer = await ctx.backend.assistantQuery(message.author.id, text);
     const content = formatAssistantReply(answer, { appBaseUrl: ctx.appBaseUrl, maxRows: 3 });
-    await message.reply({ content: clampContent(content), allowedMentions: { parse: [] } });
+    await reply(message, ctx, { content: clampContent(content), allowedMentions: { parse: [] } });
     ctx.logger.info('free-text answered', {
       discordId: message.author.id,
       intent: answer.intent,
@@ -186,12 +198,11 @@ export async function handleMessage(message: Message, ctx: BotContext, botId: st
       discordId: message.author.id,
       message: err instanceof Error ? err.message : String(err),
     });
-    await message
-      .reply({
-        content: clampContent(failure.content),
-        ...(failure.components ? { components: failure.components } : {}),
-        allowedMentions: { parse: [] },
-      })
+    await reply(message, ctx, {
+      content: clampContent(failure.content),
+      ...(failure.components ? { components: failure.components } : {}),
+      allowedMentions: { parse: [] },
+    })
       .catch(() => undefined);
   }
 }

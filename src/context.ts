@@ -74,7 +74,24 @@ export class RequestGuard {
   }
 }
 
+/**
+ * The bot-wide outbound pacer.
+ *
+ * One instance is shared by every send the bot makes on its own initiative OR in reply to a
+ * member's message, because Discord's limits are per bot, not per lane: a thousand members
+ * writing at once must not add up to a thousand simultaneous channel writes.
+ */
+export interface OutboundPacer {
+  /** Waits until a send to `key` is allowed. A smaller gap is used for replies. */
+  acquire(key: string, gapMs?: number): Promise<void>;
+}
+
+/** A gap that keeps a member's own conversation responsive while still spacing a crowd. */
+export const REPLY_GAP_MS = 300;
+
 export interface BotContext {
+  /** Optional so tests can build a context without a pacer; production always sets it. */
+  outbound?: OutboundPacer;
   backend: Backend;
   appBaseUrl: string;
   digestTz: string;

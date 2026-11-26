@@ -254,6 +254,59 @@ pub fn canonical_education(raw: &[EducationEntry]) -> Result<Vec<EducationEntry>
     Ok(education)
 }
 
+/// The employer types the interview offers, in the order they are shown.
+pub const EMPLOYER_TYPES: &[&str] = &["ngo", "government", "private"];
+
+/// Validates the member's employer-type choices.
+///
+/// Unknown values are refused by name rather than dropped: the bot can only send these three, so
+/// anything else is a wire bug worth seeing.
+pub fn clean_employer_types(raw: &[String]) -> Result<Vec<String>, AppError> {
+    let mut kept: Vec<String> = Vec::new();
+    for value in raw {
+        let normalized = normalize(value);
+        if normalized.is_empty() {
+            continue;
+        }
+        let canonical = EMPLOYER_TYPES
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == normalized)
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "'{}' is not an employer type. Use one of: {}.",
+                    value.trim(),
+                    EMPLOYER_TYPES.join(", ")
+                ))
+            })?;
+        if !kept.iter().any(|seen| seen == canonical) {
+            kept.push(canonical.to_string());
+        }
+    }
+    Ok(kept)
+}
+
+/// Validates the categories the member asked to be notified about.
+///
+/// Empty means "all of my education categories"; anything present must be a real slug, or the
+/// matcher's filter would silently match nothing.
+pub fn clean_positions(raw: &[String]) -> Result<Vec<String>, AppError> {
+    let mut kept: Vec<String> = Vec::new();
+    for value in raw {
+        let slug = normalize(value);
+        if slug.is_empty() {
+            continue;
+        }
+        let category = crate::categories::Category::from_slug(&slug)
+            .ok_or_else(|| AppError::BadRequest(format!("'{slug}' is not a job category.")))?;
+        let canonical = category.slug().to_string();
+        if !kept.iter().any(|seen| seen == &canonical) {
+            kept.push(canonical);
+        }
+    }
+    Ok(kept)
+}
+
 /// The category slug a stored field maps to, if any.
 pub fn category_for_field(field: &str) -> Option<&'static str> {
     canonical_field(field).ok().and_then(|field| field.category)
@@ -632,5 +685,42 @@ mod tests {
             ..Default::default()
         };
         assert!(should_enable_alerts(true, Some(&off_but_not_by_the_member)));
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use crate::onboarding::{clean_employer_types, clean_positions};
+
+    #[test]
+    fn employer_types_are_the_three_the_menu_offers() {
+        let kept = clean_employer_types(&[
+            "ngo".to_string(),
+            " Government ".to_string(),
+            "NGO".to_string(),
+        ])
+        .expect("the three known values are accepted");
+        assert_eq!(kept, vec!["ngo".to_string(), "government".to_string()]);
+
+        let err = clean_employer_types(&["charity".to_string()]).unwrap_err();
+        assert!(
+            err.message().contains("not an employer type"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn positions_must_be_real_category_slugs() {
+        let kept = clean_positions(&["wash".to_string(), "ict".to_string(), "WASH".to_string()])
+            .expect("real slugs are accepted");
+        assert_eq!(kept, vec!["wash".to_string(), "ict".to_string()]);
+
+        let err = clean_positions(&["pipelines".to_string()]).unwrap_err();
+        assert!(
+            err.message().contains("not a job category"),
+            "{}",
+            err.message()
+        );
     }
 }

@@ -245,6 +245,8 @@ pub fn profile(
         // Somalia-wide: the interview never asks for a city, and the matcher has no location
         // signal to rank on.
         locations: Vec::new(),
+        employer_types: Vec::new(),
+        positions: Vec::new(),
         category_source: source.to_string(),
         facts_key,
         updated_at,

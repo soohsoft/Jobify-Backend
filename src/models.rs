@@ -162,6 +162,18 @@ pub struct MatchProfile {
     /// rather than as a third source.
     #[serde(default)]
     pub category_source: String,
+    /// Where the member wants to work: any of "ngo", "government", "private".
+    ///
+    /// A SOFT signal, not a filter: a job row carries no employer-type field, so this can only
+    /// nudge the score when the organisation name looks like one of the three. Empty = no
+    /// preference recorded.
+    #[serde(default)]
+    pub employer_types: Vec<String>,
+    /// The categories the member asked to be notified about, chosen explicitly after their last
+    /// job. Empty means "follow my education" (the derived `categories`). Non-empty WIDENS the
+    /// gate to the union, so picking a second field never hides the first.
+    #[serde(default)]
+    pub positions: Vec<String>,
     /// Fingerprint of the facts the derivation READ (education, last position, years).
     /// Stored so a re-save of a complete profile with unchanged facts reuses the stored
     /// decision instead of paying for the model again on every partial save. Backend
@@ -170,6 +182,26 @@ pub struct MatchProfile {
     pub facts_key: String,
     #[serde(default)]
     pub updated_at: String,
+}
+
+impl MatchProfile {
+    /// Every category a row may arrive in: the derived ones plus anything the member picked
+    /// explicitly as a notification position. `positions` WIDENS the gate — picking a second
+    /// field must never hide the first.
+    pub fn effective_categories(&self) -> Vec<String> {
+        let mut out = self.categories.clone();
+        for slug in &self.positions {
+            if !out.iter().any(|seen| seen.eq_ignore_ascii_case(slug)) {
+                out.push(slug.clone());
+            }
+        }
+        out
+    }
+
+    /// True when the member has nothing to match on yet.
+    pub fn is_blank(&self) -> bool {
+        self.categories.is_empty() && self.positions.is_empty()
+    }
 }
 
 /// The categories the member was decided to be matched on, for a reader that must not
@@ -191,6 +223,10 @@ pub struct MatchProfileRequest {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub locations: Vec<String>,
+    #[serde(default)]
+    pub employer_types: Vec<String>,
+    #[serde(default)]
+    pub positions: Vec<String>,
 }
 
 /// A user's job-alert subscription and the negative signals that shape it.
@@ -680,6 +716,13 @@ pub struct DiscordProfileRequest {
     pub location: Option<String>,
     #[serde(default)]
     pub sectors: Vec<String>,
+    /// "ngo" / "government" / "private", from the question asked after the last job.
+    #[serde(default)]
+    pub employer_types: Option<Vec<String>>,
+    /// The categories the member chose for notifications. `None` keeps what is on file;
+    /// `Some([])` means "all of my education categories".
+    #[serde(default)]
+    pub positions: Option<Vec<String>>,
     #[serde(default)]
     pub skills: Vec<String>,
     /// "jobs", "tenders" or "both". Omitted by the web client, which keeps "both".

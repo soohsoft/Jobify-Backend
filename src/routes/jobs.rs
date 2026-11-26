@@ -527,7 +527,7 @@ async fn list(
     let limit = query.limit.clamp(1, 100);
     let profile = viewer
         .and_then(|doc| doc.match_profile)
-        .filter(|profile| !profile.categories.is_empty());
+        .filter(|profile| !profile.is_blank());
 
     // De-duplication has to happen BEFORE paging, or page 1 and page 2 can each carry half
     // of the same vacancy and the member still sees it twice. The feed therefore reads one
@@ -1142,6 +1142,9 @@ pub const MATCH_THRESHOLD_DEFAULT: i64 = 70;
 
 const SCORE_BASE: i64 = 20;
 const SCORE_CATEGORY_EXACT: i64 = 10;
+/// A nudge, not a filter: the member's chosen employer type when the organisation name looks
+/// like it. See `employer_type_matches`.
+const SCORE_EMPLOYER_TYPE: i64 = 5;
 const SCORE_KEYWORD_TITLE: i64 = 15;
 const SCORE_KEYWORD_TITLE_MAX: i64 = 30;
 const SCORE_KEYWORD_DESCRIPTION: i64 = 5;
@@ -1156,8 +1159,8 @@ pub fn score_job(job: &JobDoc, profile: &MatchProfile) -> i64 {
     let Some(category) = job.category.as_deref() else {
         return 0;
     };
-    if !profile
-        .categories
+    let gate = profile.effective_categories();
+    if !gate
         .iter()
         .any(|wanted| wanted.eq_ignore_ascii_case(category))
     {
@@ -1184,8 +1187,119 @@ pub fn score_job(job: &JobDoc, profile: &MatchProfile) -> i64 {
         }
     }
     score += in_title + in_description;
+    if employer_type_matches(&job.organization, &profile.employer_types) {
+        score += SCORE_EMPLOYER_TYPE;
+    }
 
     score.clamp(0, SCORE_MAX)
+}
+
+/// True when the row's organisation looks like one of the employer types the member chose.
+///
+/// A job document carries no employer-type field, so this reads the organisation name. It is a
+/// NUDGE worth 5 points, never a filter: an unrecognised name costs nothing, and a wrong guess
+/// can only lift a row that already cleared the category gate.
+fn employer_type_matches(organization: &str, wanted: &[String]) -> bool {
+    if wanted.is_empty() {
+        return false;
+    }
+    let kind = employer_type_of(organization);
+    wanted
+        .iter()
+        .any(|choice| choice.eq_ignore_ascii_case(kind))
+}
+
+/// "government" / "ngo" / "private" from a name, or "" when nothing matches.
+fn employer_type_of(organization: &str) -> &'static str {
+    const GOVERNMENT: &[&str] = &[
+        "ministry",
+        "federal",
+        "government",
+        "authority",
+        "municipal",
+        "city council",
+        "district",
+        "state house",
+        "parliament",
+        "bureau",
+        "administration of",
+    ];
+    const NGO: &[&str] = &[
+        "united nations",
+        " un ",
+        "unicef",
+        "unhcr",
+        "wfp",
+        "who ",
+        "fao",
+        "undp",
+        "unfpa",
+        "unops",
+        "iom",
+        "ocha",
+        "unido",
+        "un women",
+        "world bank",
+        "african union",
+        "eu ",
+        "european union",
+        "nrc",
+        "drc",
+        "irc",
+        "oxfam",
+        "save the children",
+        "care ",
+        "mercy corps",
+        "msf",
+        "medecins",
+        "concern",
+        "action against hunger",
+        "goal",
+        "world vision",
+        "caritas",
+        "red cross",
+        "red crescent",
+        "foundation",
+        "relief",
+        "humanitarian",
+        "ngo",
+        "consortium",
+    ];
+    const PRIVATE: &[&str] = &[
+        "ltd",
+        "limited",
+        " inc",
+        " llc",
+        " plc",
+        "company",
+        "co.",
+        "group",
+        "holdings",
+        "bank",
+        "telecom",
+        "hotel",
+        "university",
+        "college",
+        "school",
+        "hospital",
+        "airlines",
+        "logistics",
+        "construction",
+        "trading",
+        "enterprise",
+        "industries",
+    ];
+    let name = format!(" {} ", organization.to_lowercase());
+    if GOVERNMENT.iter().any(|needle| name.contains(needle)) {
+        return "government";
+    }
+    if NGO.iter().any(|needle| name.contains(needle)) {
+        return "ngo";
+    }
+    if PRIVATE.iter().any(|needle| name.contains(needle)) {
+        return "private";
+    }
+    ""
 }
 
 async fn match_jobs(
@@ -1204,7 +1318,7 @@ async fn match_jobs(
 
     // No profile (or no categories yet) is a normal state on the way in, not an error: the
     // caller branches on `reason` instead of parsing a failure.
-    let Some(profile) = profile.filter(|p| !p.categories.is_empty()) else {
+    let Some(profile) = profile.filter(|p| !p.is_blank()) else {
         return Ok((
             StatusCode::OK,
             Json(json!({
@@ -1456,7 +1570,8 @@ async fn ranked_candidates(
         filter.insert("$and", extra);
     }
 
-    let mut categories = doc! { "$in": &profile.categories };
+    let gate = profile.effective_categories();
+    let mut categories = doc! { "$in": &gate };
     // A rejected category is applied to the query rather than filtered after scoring, so
     // it cannot occupy one of the returned slots.
     if !exclusions.excluded_categories.is_empty() {
@@ -1589,11 +1704,7 @@ pub async fn queue_matches_for_user(
         return Ok(0);
     };
     // No profile means nothing to match on yet: a normal state, not an error.
-    let Some(profile) = user
-        .match_profile
-        .clone()
-        .filter(|p| !p.categories.is_empty())
-    else {
+    let Some(profile) = user.match_profile.clone().filter(|p| !p.is_blank()) else {
         return Ok(0);
     };
     let threshold = state.config.match_threshold;
@@ -1889,6 +2000,72 @@ mod tests {
         serde_json::from_value(value).expect("a minimal job document must deserialize")
     }
 
+    /// A row with the given category and words, to score against a profile.
+    fn job_of(category: &str, title: &str, organization: &str, description: &str) -> JobDoc {
+        job_from(serde_json::json!({
+            "_id": format!("{category}-{}", title.replace(' ', "-")),
+            "title": title,
+            "organization": organization,
+            "description": description,
+            "category": category,
+        }))
+    }
+
+    /// The two answers taken after the last job must reach the matcher: the positions WIDEN the
+    /// gate, and the employer type nudges a row up only when the organisation looks like it.
+    #[test]
+    fn positions_widen_the_gate_and_the_employer_type_only_nudges() {
+        use super::score_job;
+
+        let mut profile = MatchProfile {
+            categories: vec!["ict".to_string()],
+            keywords: vec!["data".to_string()],
+            ..Default::default()
+        };
+
+        let wash = job_of("wash", "Water Officer", "UNICEF", "data collection");
+        let ict = job_of("ict", "Data Officer", "Somali Telecom Ltd", "data");
+
+        // Without positions, the wash row is outside the gate.
+        assert_eq!(score_job(&wash, &profile), 0);
+
+        // Picking it as a position widens the gate; picking the private employer type lifts the
+        // ICT row by the nudge, and costs the wash row nothing.
+        profile.positions = vec!["wash".to_string()];
+        assert!(
+            score_job(&wash, &profile) > 0,
+            "a chosen position is inside the gate"
+        );
+
+        let tuned = MatchProfile {
+            employer_types: vec!["private".to_string()],
+            ..profile.clone()
+        };
+        let untuned = MatchProfile {
+            employer_types: Vec::new(),
+            ..profile.clone()
+        };
+        assert_eq!(
+            score_job(&ict, &tuned) - score_job(&ict, &untuned),
+            super::SCORE_EMPLOYER_TYPE,
+            "the private employer type adds exactly the nudge to the telecom row"
+        );
+
+        // The nudge never becomes a filter: an unrecognised organisation still scores.
+        let unknown = job_of("ict", "Data Officer", "Xamar Analytics", "data");
+        assert!(score_job(&unknown, &profile) > 0);
+    }
+
+    /// The employer-type reader is a heuristic over a name, so pin its three answers.
+    #[test]
+    fn employer_types_are_read_from_the_organisation_name() {
+        use super::employer_type_of;
+        assert_eq!(employer_type_of("Ministry of Health"), "government");
+        assert_eq!(employer_type_of("UNICEF Somalia"), "ngo");
+        assert_eq!(employer_type_of("Hormuud Telecom"), "private");
+        assert_eq!(employer_type_of("Xamar Analytics"), "");
+    }
+
     /// The arithmetic, checked at the boundaries the product turns on: inside a decided
     /// category a row is only as good as the advert's own words, and the top of the scale —
     /// both keyword caps saturated — is exactly the 70 cut-off.
@@ -1908,6 +2085,7 @@ mod tests {
             category_source: "llm".to_string(),
             facts_key: String::new(),
             updated_at: String::new(),
+            ..Default::default()
         };
 
         // 20 base + 10 exact category = 30: in the right field, nothing about the job itself.

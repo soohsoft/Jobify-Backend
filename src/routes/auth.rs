@@ -456,6 +456,15 @@ fn validate_match_profile(body: MatchProfileRequest) -> Result<MatchProfile, App
 
     let keywords = clean_terms(body.keywords, MAX_PROFILE_KEYWORDS, "keyword")?;
     let locations = clean_terms(body.locations, MAX_PROFILE_LOCATIONS, "location")?;
+    // Same validation the bot's profile write uses, so the portal and Discord cannot disagree
+    // about what a position or an employer type is.
+    let employer_types = crate::onboarding::clean_employer_types(&body.employer_types)?;
+    let positions = crate::onboarding::clean_positions(&body.positions)?;
+    if positions.len() > Category::ALL.len() {
+        return Err(AppError::BadRequest(
+            "You picked more positions than there are categories.".to_string(),
+        ));
+    }
 
     // An empty category list is a valid profile that matches nothing: `GET /jobs/match`
     // already answers `meta.reason = "no_match_profile"` for it, which is the same state a
@@ -469,6 +478,8 @@ fn validate_match_profile(body: MatchProfileRequest) -> Result<MatchProfile, App
         categories,
         keywords,
         locations,
+        employer_types,
+        positions,
         category_source: "rules".to_string(),
         facts_key: String::new(),
         updated_at: now_iso(),
@@ -998,6 +1009,8 @@ mod tests {
             categories: categories.iter().map(|v| v.to_string()).collect(),
             keywords: keywords.iter().map(|v| v.to_string()).collect(),
             locations: locations.iter().map(|v| v.to_string()).collect(),
+            employer_types: Vec::new(),
+            positions: Vec::new(),
         }
     }
 
@@ -1081,6 +1094,7 @@ mod tests {
             categories: vec!["ict".to_string()],
             keywords,
             locations: Vec::new(),
+            ..Default::default()
         })
         .unwrap_err();
         assert!(err.message().contains("at most 20 keywords"));
@@ -1090,6 +1104,7 @@ mod tests {
             categories: vec!["ict".to_string()],
             keywords: Vec::new(),
             locations,
+            ..Default::default()
         })
         .unwrap_err();
         assert!(err.message().contains("at most 5 locations"));

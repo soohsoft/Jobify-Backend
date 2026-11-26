@@ -556,13 +556,25 @@ async fn update_profile(
         )
     };
 
-    let profile = crate::profile_llm::profile(
+    let mut profile = crate::profile_llm::profile(
         categories.clone(),
         keywords,
         &category_source,
         facts_key,
         now_iso(),
     );
+
+    // The two preference lists the interview collects after the last job. They are preferences,
+    // not derived facts, so an absent list keeps what is on file and an empty one clears it.
+    let previous_profile = user.match_profile.clone().unwrap_or_default();
+    profile.employer_types = match body.employer_types.as_ref() {
+        Some(list) => onboarding::clean_employer_types(list)?,
+        None => previous_profile.employer_types,
+    };
+    profile.positions = match body.positions.as_ref() {
+        Some(list) => onboarding::clean_positions(list)?,
+        None => previous_profile.positions,
+    };
 
     // `sectors` mirrors the derived categories so the two lists can never disagree.
     set.insert("sectors", &categories);
@@ -964,6 +976,7 @@ mod tests {
             category_source: "rules".to_string(),
             facts_key: String::new(),
             updated_at: String::new(),
+            ..Default::default()
         });
         assert!(onboarding_complete(&user));
 
@@ -1145,6 +1158,8 @@ mod tests {
             experience_years: Some(3),
             location: None,
             sectors: Vec::new(),
+            employer_types: None,
+            positions: None,
             skills: Vec::new(),
             wants: None,
         }

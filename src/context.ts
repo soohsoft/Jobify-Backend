@@ -3,17 +3,29 @@
  * reaching for the Discord client inside handlers) is what lets the command logic be
  * exercised without a gateway in tests.
  */
-import type { ActionRowBuilder, ButtonBuilder, Client } from 'discord.js';
+import type {
+  ActionRowBuilder,
+  ButtonBuilder,
+  Client,
+  StringSelectMenuBuilder,
+} from 'discord.js';
 
 import type { Backend } from './http.js';
 import type { Logger } from './log.js';
 import type { OnboardingSessions } from './onboarding.js';
 import type { Category } from './types.js';
 
+/** Any row a message may carry: buttons, or a select menu (the owner type and the position picker). */
+export type AnyActionRow =
+  | ActionRowBuilder<ButtonBuilder>
+  | ActionRowBuilder<StringSelectMenuBuilder>;
+
 /** A message with buttons: the welcome DM carries the interview's first step. */
 export interface MessagePayload {
   content: string;
-  components?: ActionRowBuilder<ButtonBuilder>[];
+  components?: AnyActionRow[];
+  /** True when the message is an interview step: it must not offer the Jobs/Tenders tabs. */
+  hideTabs?: boolean;
 }
 
 /** What `channel.send` needs for the fallback: the mention is explicit, never parsed from text. */

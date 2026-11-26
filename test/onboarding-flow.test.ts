@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { ButtonInteraction, ModalSubmitInteraction } from 'discord.js';
+import type { ButtonInteraction, ModalSubmitInteraction, StringSelectMenuInteraction } from 'discord.js';
 
 import { RequestGuard, type BotContext } from '../src/context.js';
 import type { Backend } from '../src/http.js';
@@ -289,6 +289,61 @@ async function click(ctx: BotContext, customId: string): Promise<ReturnType<type
   return click;
 }
 
+function fakeSelect(customId: string, values: string[], userId = MEMBER): {
+  interaction: StringSelectMenuInteraction;
+  updates: unknown[];
+  replies: unknown[];
+} {
+  const updates: unknown[] = [];
+  const replies: unknown[] = [];
+  const interaction = {
+    customId,
+    values,
+    user: { id: userId, username: 'sahra', globalName: 'Sahra' },
+    replied: false,
+    deferred: false,
+    isButton: () => false,
+    isChatInputCommand: () => false,
+    isStringSelectMenu: () => true,
+    isModalSubmit: () => false,
+    deferUpdate: async () => {
+      interaction.deferred = true;
+    },
+    update: async (payload: unknown) => {
+      updates.push(payload);
+    },
+    editReply: async (payload: unknown) => {
+      updates.push(payload);
+    },
+    reply: async (payload: unknown) => {
+      replies.push(payload);
+    },
+    followUp: async (payload: unknown) => {
+      replies.push(payload);
+    },
+  };
+  return { interaction: interaction as unknown as StringSelectMenuInteraction, updates, replies };
+}
+
+async function select(
+  ctx: BotContext,
+  customId: string,
+  values: string[],
+): Promise<ReturnType<typeof fakeSelect>> {
+  const menu = fakeSelect(customId, values);
+  await handleInteraction(menu.interaction, ctx);
+  return menu;
+}
+
+/**
+ * The two questions after the years band: where to work, then which positions. Every test that
+ * used to end at the years button now walks through both, because that is the interview.
+ */
+async function finishPreferences(ctx: BotContext): Promise<ReturnType<typeof fakeButton>> {
+  await select(ctx, CID.employer, ['ngo']);
+  return click(ctx, CID.positionsDone);
+}
+
 async function submit(
   ctx: BotContext,
   customId: string,
@@ -349,10 +404,24 @@ test('the happy path: name → bachelor Health → no second degree → position
   assert.ok(renders(position.edits).includes('How much relevant work experience'));
 
   const years = await click(ctx, CID.experience('3-5'));
-  assert.deepEqual(calls.saves[3], { discord_id: MEMBER, experience_years: 3 });
+  assert.ok(renders(years.edits).includes('Where would you like to work?'), 'the owner type comes next');
+  assert.ok(
+    !calls.saves.some((save) => save.experience_years === 3),
+    'the years band is written when the interview finishes, not when it is clicked',
+  );
 
-  // Step 4 — Setup complete, the first digest, and the /jobs hint.
-  const completion = renders(years.edits);
+  const done = await finishPreferences(ctx);
+  assert.deepEqual(
+    calls.saves.find((save) => save.employer_types !== undefined),
+    { discord_id: MEMBER, employer_types: ['ngo'], positions: [] },
+  );
+  assert.ok(
+    calls.saves.some((save) => save.experience_years === 3),
+    'the years band is saved on completion',
+  );
+
+  // Step 5 — Setup complete, the first digest, and the /jobs hint.
+  const completion = renders(done.edits);
   assert.ok(completion.startsWith('**Setup complete**'), completion);
   assert.ok(completion.includes('Sahra Ali'));
   assert.ok(completion.includes('Bachelor — Health and Medicine'));
@@ -470,6 +539,7 @@ test('completion never re-enables alerts: the bot makes no setAlerts call at all
   await click(ctx, CID.another('no'));
   await submit(ctx, CID.positionModal, { position: 'Programme Officer' });
   await click(ctx, CID.experience('1-2'));
+  await finishPreferences(ctx);
 
   assert.deepEqual(calls.alerts, [], 'the backend owns the enable rule, so /stop survives');
   assert.equal(calls.matches, 1);
@@ -494,7 +564,8 @@ test('a member who said /stop is shown alerts off after finishing', async () => 
   await click(ctx, CID.field('health'));
   await click(ctx, CID.another('no'));
   await submit(ctx, CID.positionModal, { position: 'Programme Officer' });
-  const years = await click(ctx, CID.experience('6-10'));
+  await click(ctx, CID.experience('6-10'));
+  const years = await finishPreferences(ctx);
 
   const completion = renders(years.edits);
   assert.ok(completion.startsWith('**Setup complete**'));
@@ -515,7 +586,8 @@ test('when the match read fails the setup still completes', async () => {
   await click(ctx, CID.field('health'));
   await click(ctx, CID.another('no'));
   await submit(ctx, CID.positionModal, { position: 'Programme Officer' });
-  const years = await click(ctx, CID.experience('0'));
+  await click(ctx, CID.experience('0'));
+  const years = await finishPreferences(ctx);
 
   const completion = renders(years.edits);
   assert.ok(completion.startsWith('**Setup complete**'));

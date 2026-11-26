@@ -197,6 +197,10 @@ export interface ProfilePatch {
   education?: EducationEntry[];
   last_position?: string;
   experience_years?: number;
+  /** "ngo" / "government" / "private" — replaces the stored list when present. */
+  employer_types?: string[];
+  /** Category slugs for notifications. `[]` means "all of my education categories". */
+  positions?: string[];
   sectors?: string[];
   skills?: string[];
   wants?: string;

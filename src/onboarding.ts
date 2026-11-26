@@ -21,10 +21,13 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ModalBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   TextInputBuilder,
   TextInputStyle,
 } from 'discord.js';
 
+import type { AnyActionRow, MessagePayload } from './context.js';
 import type { DiscordUser, EducationEntry, MatchRow } from './types.js';
 import { formatRows, MAX_DIGEST_ROWS, noMatchesCopy } from './format.js';
 
@@ -83,7 +86,9 @@ export type Step =
   | 'education_field'
   | 'another_degree'
   | 'position'
-  | 'years';
+  | 'years'
+  | 'employer_types'
+  | 'positions';
 
 export interface OnboardingSession {
   step: Step;
@@ -96,6 +101,10 @@ export interface OnboardingSession {
   name?: string;
   lastPosition?: string;
   experienceYears?: number;
+  /** Where the member wants to work: "ngo", "government", "private". */
+  employerTypes: string[];
+  /** Category slugs the member picked to be notified about; empty = all of their fields. */
+  positions: string[];
 }
 
 /** Custom ids in one place: a typo here would make a button silently do nothing. */
@@ -110,6 +119,10 @@ export const CID = {
   positionOpen: 'onb:position',
   positionModal: 'onb:position:modal',
   experience: (value: string): string => `onb:exp:${value}`,
+  employer: 'onb:employer',
+  positions: (page: number): string => `onb:positions:${page}`,
+  positionsAll: 'onb:positions:all',
+  positionsDone: 'onb:positions:done',
   restart: 'onb:restart',
   // The two tabs the completion message offers. They stay outside the interview: pressing one
   // never touches a session, so an old setup message still works weeks later.
@@ -125,6 +138,8 @@ export class OnboardingSessions {
       step: 'name',
       education: [],
       previousEducation: existing.previousEducation ?? [],
+      employerTypes: existing.employerTypes ?? [],
+      positions: existing.positions ?? [],
     };
     if (existing.name !== undefined) session.name = existing.name;
     if (existing.lastPosition !== undefined) session.lastPosition = existing.lastPosition;
@@ -245,6 +260,152 @@ export function educationPrompt(session: OnboardingSession): {
     );
   }
   return { content: parts.join('\n'), components: rows };
+}
+
+
+// ---------------------------------------------------------------------------
+// After the last job: where to work, and which positions to be notified about
+// ---------------------------------------------------------------------------
+
+/** The three employer types, in the owner's order. Slugs match the backend's `EMPLOYER_TYPES`. */
+export const EMPLOYER_CHOICES: ReadonlyArray<{ slug: string; label: string; description: string }> = [
+  { slug: 'ngo', label: 'Non-Profit Organisations', description: 'UN agencies, international and local NGOs' },
+  { slug: 'government', label: 'Government', description: 'Ministries, agencies, federal and local authorities' },
+  { slug: 'private', label: 'Private Companies', description: 'Businesses, banks, telecoms, consultancies' },
+];
+
+/**
+ * The 28 job categories, in the backend's display order.
+ *
+ * Duplicated here on purpose: the bot keeps no backend taxonomy at boot (it starts before the
+ * backend may be up), and a select menu needs labels and slugs in the same payload. The backend
+ * re-validates every slug, so a drift shows up as a refusal, never as a silently unmatched
+ * profile.
+ */
+export const POSITION_CHOICES: ReadonlyArray<{ slug: string; label: string }> = [
+  { slug: 'health', label: 'Health' },
+  { slug: 'education', label: 'Education' },
+  { slug: 'business_and_finance', label: 'Business & Finance' },
+  { slug: 'ict', label: 'ICT' },
+  { slug: 'energy', label: 'Energy (Electrical & Solar)' },
+  { slug: 'agriculture', label: 'Agriculture' },
+  { slug: 'fishery', label: 'Fishery' },
+  { slug: 'livestock', label: 'Livestock' },
+  { slug: 'engineering_and_construction', label: 'Engineering & Construction' },
+  { slug: 'logistics_and_supply_chain', label: 'Logistics & Supply Chain' },
+  { slug: 'telecommunications_and_media', label: 'Telecommunications & Media' },
+  { slug: 'legal_and_regulatory_services', label: 'Legal & Regulatory Services' },
+  { slug: 'environment_and_climate', label: 'Environment & Climate' },
+  { slug: 'manufacturing_and_production', label: 'Manufacturing & Production' },
+  { slug: 'hospitality_and_tourism', label: 'Hospitality & Tourism' },
+  { slug: 'human_rights_and_advocacy', label: 'Human Rights, Civil Rights & Advocacy' },
+  { slug: 'humanitarian_aid_and_emergency_relief', label: 'Humanitarian Aid & Emergency Relief' },
+  { slug: 'peacebuilding_and_security', label: 'Peacebuilding, Conflict Resolution & Security' },
+  { slug: 'gender_equality_and_social_inclusion', label: 'Gender Equality & Social Inclusion' },
+  { slug: 'youth_and_child_development', label: 'Youth & Child Development' },
+  { slug: 'migration_refugees_and_displaced', label: 'Migration, Refugees & Displaced Persons' },
+  { slug: 'arts_culture_and_heritage', label: 'Arts, Culture & Heritage Preservation' },
+  { slug: 'governance_democracy_and_civic_participation', label: 'Governance, Democracy & Civic Participation' },
+  { slug: 'protection', label: 'Protection' },
+  { slug: 'livelihoods_and_resilience', label: 'Livelihoods & Resilience' },
+  { slug: 'food_security', label: 'Food Security' },
+  { slug: 'shelter_and_non_food_items', label: 'Shelter & Non-Food Items (NFIs)' },
+  { slug: 'wash', label: 'WASH (Water, Sanitation & Hygiene)' },
+];
+
+/** Discord caps a select at 25 options, so 28 categories need two menus of 14. */
+const POSITIONS_PER_PAGE = 14;
+
+/** The employer types, as a multi-select. */
+export function employerPrompt(): StepPrompt {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(CID.employer)
+    .setPlaceholder('Where would you like to work?')
+    .setMinValues(1)
+    .setMaxValues(EMPLOYER_CHOICES.length)
+    .addOptions(
+      EMPLOYER_CHOICES.map((choice) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(choice.label)
+          .setValue(choice.slug)
+          .setDescription(choice.description),
+      ),
+    );
+
+  return {
+    content: [
+      '**Step 3 of 5 — Where would you like to work?**',
+      '',
+      'Pick one or more. This nudges jobs with that kind of employer up your alerts — it never hides the rest.',
+    ].join('\n'),
+    components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+    hideTabs: true,
+  };
+}
+
+/**
+ * The position picker: two 14-option menus (Discord's cap is 25 per select), with the whole
+ * list and a Done button underneath. Selections accumulate in the session; Done writes them.
+ */
+export function positionsPrompt(session: OnboardingSession, page = 0): StepPrompt {
+  const start = page * POSITIONS_PER_PAGE;
+  const slice = POSITION_CHOICES.slice(start, start + POSITIONS_PER_PAGE);
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(CID.positions(page))
+    .setPlaceholder(`Positions ${start + 1}–${start + slice.length} of ${POSITION_CHOICES.length}`)
+    .setMinValues(1)
+    .setMaxValues(slice.length)
+    .addOptions(
+      slice.map((choice) => {
+        const picked = session.positions.includes(choice.slug);
+        const option = new StringSelectMenuOptionBuilder()
+          .setLabel(choice.label.slice(0, 100))
+          .setValue(choice.slug)
+          .setDefault(picked);
+        return option;
+      }),
+    );
+
+  const shown = session.positions.length === 0
+    ? 'Nothing picked yet — press **All categories** to take everything.'
+    : `Picked: ${session.positions
+        .map((slug) => POSITION_CHOICES.find((choice) => choice.slug === slug)?.label ?? slug)
+        .join(', ')}`;
+
+  const pages = Math.ceil(POSITION_CHOICES.length / POSITIONS_PER_PAGE);
+  const buttons = new ActionRowBuilder<ButtonBuilder>();
+  if (page > 0) {
+    buttons.addComponents(
+      new ButtonBuilder().setCustomId(`onb:positions:page:${page - 1}`).setLabel('‹ Previous').setStyle(ButtonStyle.Secondary),
+    );
+  }
+  if (page < pages - 1) {
+    buttons.addComponents(
+      new ButtonBuilder().setCustomId(`onb:positions:page:${page + 1}`).setLabel('More categories ›').setStyle(ButtonStyle.Secondary),
+    );
+  }
+  buttons.addComponents(
+    new ButtonBuilder().setCustomId(CID.positionsAll).setLabel('All categories').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(CID.positionsDone).setLabel('Done ✓').setStyle(ButtonStyle.Success),
+  );
+
+  return {
+    content: [
+      '**Step 4 of 5 — Which positions do you want notifications for?**',
+      '',
+      'Pick as many as you like, then press **Done**. Or take **All categories**.',
+      '',
+      shown,
+    ].join('\n'),
+    components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu), buttons],
+    hideTabs: true,
+  };
+}
+
+export function employerLabels(slugs: string[]): string {
+  return slugs
+    .map((slug) => EMPLOYER_CHOICES.find((choice) => choice.slug === slug)?.label ?? slug)
+    .join(', ');
 }
 
 export function fieldPrompt(level: string): {
@@ -391,7 +552,9 @@ export function experiencePrompt(): { content: string; components: ActionRowBuil
 
 export interface StepPrompt {
   content: string;
-  components: ActionRowBuilder<ButtonBuilder>[];
+  components: AnyActionRow[];
+  /** Interview steps never carry the Jobs/Tenders tabs. */
+  hideTabs?: boolean;
 }
 
 /**
@@ -413,6 +576,10 @@ export function promptForStep(step: Step, session: OnboardingSession): StepPromp
       return positionPrompt();
     case 'years':
       return experiencePrompt();
+    case 'employer_types':
+      return employerPrompt();
+    case 'positions':
+      return positionsPrompt(session);
   }
 }
 

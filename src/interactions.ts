@@ -31,6 +31,8 @@ import {
   experiencePrompt,
   fieldModal,
   fieldPrompt,
+  employerPrompt,
+  positionsPrompt,
   nameModal,
   positionModal,
   positionPrompt,
@@ -248,7 +250,45 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
     return;
   }
 
-  // Step 3b — the years band, and then step 4: done.
+  // Step 4a — paging the position picker.
+  if (id.startsWith('onb:positions:page:')) {
+    const page = Number(id.slice('onb:positions:page:'.length));
+    const session = ctx.sessions.get(interaction.user.id);
+    if (!session || !Number.isFinite(page)) {
+      await expired(interaction);
+      return;
+    }
+    await interaction.deferUpdate();
+    await interaction.editReply(positionsPrompt(session, page));
+    return;
+  }
+
+  // Step 4b — "All categories" takes the whole list.
+  if (id === CID.positionsAll) {
+    const session = ctx.sessions.get(interaction.user.id);
+    if (!session) {
+      await expired(interaction);
+      return;
+    }
+    await interaction.deferUpdate();
+    session.positions = [];
+    await finishInterview(interaction, ctx, session);
+    return;
+  }
+
+  // Step 4c — Done writes whatever was picked (empty means "follow my education").
+  if (id === CID.positionsDone) {
+    const session = ctx.sessions.get(interaction.user.id);
+    if (!session) {
+      await expired(interaction);
+      return;
+    }
+    await interaction.deferUpdate();
+    await finishInterview(interaction, ctx, session);
+    return;
+  }
+
+  // Step 3b — the years band, and then step 4: the two preference questions.
   if (id.startsWith('onb:exp:')) {
     const band = id.slice('onb:exp:'.length);
     const years = experienceYearsFromBand(band);
@@ -258,7 +298,8 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
     }
     await interaction.deferUpdate();
     session.experienceYears = years;
-    await completeInterview(interaction, ctx, session, years);
+    session.step = 'employer_types';
+    await interaction.editReply(employerPrompt());
   }
 }
 
@@ -309,6 +350,27 @@ function experienceYearsFromBand(band: string): number | null {
  * skips it for anyone who switched alerts off. Re-enabling from the bot would quietly undo that.
  * The matches are the backend's own scored rows (max 5), rendered by the digest formatter.
  */
+async function finishInterview(
+  interaction: ButtonInteraction,
+  ctx: BotContext,
+  session: OnboardingSession,
+): Promise<void> {
+  const years = session.experienceYears ?? 0;
+  try {
+    // Written before the completion card is drawn, so the first digest and `/jobs` already
+    // honour the two answers above.
+    await ctx.backend.saveProfile({
+      discord_id: interaction.user.id,
+      employer_types: session.employerTypes,
+      positions: session.positions,
+    });
+  } catch (err) {
+    await stepFailed(interaction, ctx, err);
+    return;
+  }
+  await completeInterview(interaction, ctx, session, years);
+}
+
 async function completeInterview(
   interaction: ButtonInteraction,
   ctx: BotContext,
@@ -457,6 +519,37 @@ async function handleSelect(interaction: StringSelectMenuInteraction, ctx: BotCo
     await companyCitySelect(interaction, ctx, interaction.values[0] ?? '');
     return;
   }
+
+  // Step 3 of the interview — where to work. Multi-select; moves straight on.
+  if (interaction.customId === CID.employer) {
+    const session = ctx.sessions.get(interaction.user.id);
+    if (!session) {
+      await expired(interaction);
+      return;
+    }
+    session.employerTypes = interaction.values.filter((value) =>
+      ['ngo', 'government', 'private'].includes(value),
+    );
+    session.step = 'positions';
+    await interaction.update(positionsPrompt(session));
+    return;
+  }
+
+  // Step 4 — the position picker. Selections accumulate across pages and menus; the member
+  // presses Done when they are finished, so this only redraws with what is picked so far.
+  if (interaction.customId.startsWith('onb:positions:')) {
+    const session = ctx.sessions.get(interaction.user.id);
+    if (!session) {
+      await expired(interaction);
+      return;
+    }
+    const page = Number(interaction.customId.slice('onb:positions:'.length)) || 0;
+    const merged = new Set([...session.positions, ...interaction.values]);
+    session.positions = [...merged];
+    await interaction.update(positionsPrompt(session, page));
+    return;
+  }
+
   await expired(interaction);
 }
 

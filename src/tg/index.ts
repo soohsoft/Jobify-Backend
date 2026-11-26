@@ -26,10 +26,12 @@ export interface TgConfig {
   perSecond: number;
 }
 
-function required(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`${name} is required to run the Telegram bot`);
-  return value;
+function required(...names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  throw new Error(`${names.join(' or ')} is required to run the Telegram bot`);
 }
 
 export function loadTgConfig(): TgConfig {
@@ -37,7 +39,9 @@ export function loadTgConfig(): TgConfig {
   return {
     token: required('TELEGRAM_BOT_TOKEN'),
     backendBaseUrl: (process.env.BACKEND_BASE_URL ?? 'http://127.0.0.1:3000').replace(/\/+$/, ''),
-    internalApiKey: required('INTERNAL_API_KEY'),
+    // The Discord bot's env calls this SCRAPER_INTERNAL_API_KEY; accept either name so one
+    // file can serve both fronts.
+    internalApiKey: required('INTERNAL_API_KEY', 'SCRAPER_INTERNAL_API_KEY'),
     appBaseUrl: (process.env.APP_BASE_URL ?? 'https://jobify.soohsoft.com').replace(/\/+$/, ''),
     digestTz: process.env.DIGEST_TZ ?? 'Africa/Nairobi',
     digestHour: Number.isFinite(hour) && hour >= 0 && hour <= 23 ? hour : 8,

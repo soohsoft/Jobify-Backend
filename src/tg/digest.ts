@@ -1,0 +1,143 @@
+/**
+ * The Telegram digest: the same queue the Discord digest drains, delivered into Telegram chats.
+ *
+ * The backend owns everything that matters — who has new matches, which rows are pending, the
+ * score. This module only renders them and records the outcome, so a member on Telegram and a
+ * member on Discord receive the same jobs on the same day.
+ */
+import type { Backend } from '../http.js';
+import type { Logger } from '../log.js';
+import type { Delivery } from '../types.js';
+import type { TelegramClient } from './client.js';
+import { MAX_DIGEST_ROWS } from '../format.js';
+
+export interface TgDigestDeps {
+  bot: TelegramClient;
+  backend: Pick<Backend, 'refreshMatches' | 'deliveries' | 'markSent' | 'markFailed'>;
+  logger: Logger;
+  /** How many rows one chat receives per day, matching the Discord cap. */
+  maxPerDm?: number;
+}
+
+export interface TgDigestReport {
+  refreshedQueued: number;
+  pending: number;
+  dms: number;
+  sent: number;
+  failed: number;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function row(delivery: Delivery, index: number): string {
+  const job = delivery.job;
+  const title = escapeHtml(job?.title ?? delivery.title);
+  const org = job?.organization ?? '';
+  const where = job?.location ? ` — ${escapeHtml(job.location)}` : '';
+  const deadline = job?.deadline ? ` · closes ${job.deadline.slice(0, 10)}` : '';
+  const linked = delivery.url ? `<a href="${delivery.url}">${title}</a>` : title;
+  const score = typeof delivery.matchScore === 'number' ? ` · ${Math.round(delivery.matchScore)}%` : '';
+  return `${index}. ${linked}\n   ${escapeHtml(org)}${where}${deadline}${score}`;
+}
+
+/**
+ * Builds the message body. The `$1` line is a footer on a real job message — the shape that
+ * stays inside Telegram's rules and inside the member's consent to receive job alerts.
+ */
+export function tgDigestText(deliveries: Delivery[], total: number): string {
+  const shown = deliveries.slice(0, MAX_DIGEST_ROWS);
+  const more = total - shown.length;
+  const head =
+    total === 1 ? '<b>1 new job for you</b>' : `<b>${total} new jobs for you</b>`;
+  const tail = more > 0 ? `\n<i>…and ${more} more in My Jobs.</i>` : '';
+  return [
+    head,
+    '',
+    ...shown.map((delivery, index) => row(delivery, index + 1)),
+    tail,
+    '',
+    'Never miss a job. Daily Jobs Notifications just for $1/month.',
+    'Subscription now → My Account',
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+}
+
+export async function runTgDigest(deps: TgDigestDeps): Promise<TgDigestReport> {
+  const report: TgDigestReport = { refreshedQueued: 0, pending: 0, dms: 0, sent: 0, failed: 0 };
+  const limit = deps.maxPerDm ?? MAX_DIGEST_ROWS;
+
+  try {
+    const refreshed = await deps.backend.refreshMatches();
+    report.refreshedQueued = refreshed.queuedTotal;
+  } catch (err) {
+    deps.logger.warn('telegram digest: refresh failed', { err: String(err) });
+  }
+
+  let deliveries: Delivery[] = [];
+  try {
+    deliveries = await deps.backend.deliveries(200);
+  } catch (err) {
+    deps.logger.warn('telegram digest: queue read failed', { err: String(err) });
+    return report;
+  }
+  report.pending = deliveries.length;
+
+  const byUser = new Map<string, Delivery[]>();
+  for (const delivery of deliveries) {
+    const bucket = byUser.get(delivery.userId);
+    if (bucket) bucket.push(delivery);
+    else byUser.set(delivery.userId, [delivery]);
+  }
+
+  const sent: string[] = [];
+  const failures: Array<{ id: string; reason: string }> = [];
+
+  for (const [userId, rows] of byUser) {
+    const chatId = Number(userId);
+    if (!Number.isFinite(chatId)) {
+      // A Discord id in the Telegram queue: not ours to send.
+      for (const item of rows) failures.push({ id: item.notificationId, reason: 'not_a_telegram_id' });
+      continue;
+    }
+    const batch = rows.slice(0, limit);
+    const deferred = rows.slice(limit);
+    try {
+      await deps.bot.sendMessage(chatId, tgDigestText(batch, rows.length), [
+        [
+          { text: 'My Jobs', callback_data: 'browse:job' },
+          { text: 'My Tenders', callback_data: 'browse:tender' },
+        ],
+        [{ text: 'My Account', callback_data: 'account:link' }],
+      ]);
+      report.dms += 1;
+      for (const item of batch) sent.push(item.notificationId);
+      // Over the daily cap: leave them pending rather than dropping them.
+      for (const item of deferred) report.pending -= 0;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      deps.logger.warn('telegram digest: send failed', { chatId, reason });
+      for (const item of rows) failures.push({ id: item.notificationId, reason: reason.slice(0, 120) });
+    }
+  }
+
+  if (sent.length > 0) {
+    try {
+      report.sent = await deps.backend.markSent(sent);
+    } catch (err) {
+      deps.logger.warn('telegram digest: markSent failed', { err: String(err) });
+    }
+  }
+  if (failures.length > 0) {
+    try {
+      await deps.backend.markFailed(failures);
+    } catch (err) {
+      deps.logger.warn('telegram digest: markFailed failed', { err: String(err) });
+    }
+    report.failed = failures.length;
+  }
+
+  return report;
+}

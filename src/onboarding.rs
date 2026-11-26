@@ -104,6 +104,33 @@ pub const FIELDS: &[FieldSpec] = &[
         label: "Other",
         category: None,
     },
+    // The academic faculties the bot offers first (owner's list). The older, more job-shaped
+    // labels above stay because they are already stored on existing profiles — a re-save has to
+    // canonicalise to the same string it was written with.
+    FieldSpec {
+        label: "Management",
+        category: Some("business_and_finance"),
+    },
+    FieldSpec {
+        label: "Computing",
+        category: Some("ict"),
+    },
+    FieldSpec {
+        label: "Social Science",
+        category: Some("humanitarian_aid_and_emergency_relief"),
+    },
+    FieldSpec {
+        label: "Economics",
+        category: Some("business_and_finance"),
+    },
+    FieldSpec {
+        label: "Accounting",
+        category: Some("business_and_finance"),
+    },
+    FieldSpec {
+        label: "Health and Medicine",
+        category: Some("health"),
+    },
 ];
 
 /// The label used for the free-text escape hatch. An "Other" entry stores the member's own
@@ -373,6 +400,35 @@ mod tests {
         let err = canonical_level("university").unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
         assert!(err.message().contains("university"));
+    }
+
+    #[test]
+    fn the_academic_faculties_the_bot_offers_map_to_real_categories() {
+        // The nine labels the bot puts on screen. Law / Education / Engineering already existed
+        // under the same spelling; the rest are additive, so an old profile keeps canonicalising.
+        let expected = [
+            ("Management", "business_and_finance"),
+            ("Computing", "ict"),
+            ("Social Science", "humanitarian_aid_and_emergency_relief"),
+            ("Economics", "business_and_finance"),
+            ("Law", "legal_and_regulatory_services"),
+            ("Education", "education"),
+            ("Engineering", "engineering_and_construction"),
+            ("Accounting", "business_and_finance"),
+            ("Health and Medicine", "health"),
+        ];
+        for (label, category) in expected {
+            let field = canonical_field(label).unwrap();
+            assert_eq!(field.stored, label);
+            assert_eq!(field.category, Some(category), "{label} maps elsewhere");
+            assert!(
+                crate::categories::Category::from_slug(category).is_some(),
+                "{category} is not a real category"
+            );
+        }
+        // A master's programme uses the same labels, so the union dedupes rather than double-counts.
+        let cats = categories(&[entry("bachelor", "Computing"), entry("master", "Computing")]);
+        assert_eq!(cats, vec!["ict".to_string()]);
     }
 
     #[test]

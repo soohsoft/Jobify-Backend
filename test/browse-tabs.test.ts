@@ -32,7 +32,7 @@ interface Fake {
 }
 
 /** An onboarded member whose company profile is still missing — the tender tab's hard case. */
-function makeCtx(options: { company?: boolean; rows?: unknown[] } = {}): {
+function makeCtx(options: { company?: boolean; rows?: unknown[]; blankProfile?: boolean } = {}): {
   ctx: BotContext;
   calls: { kinds: string[] };
 } {
@@ -42,6 +42,17 @@ function makeCtx(options: { company?: boolean; rows?: unknown[] } = {}): {
       user: {
         name: 'Dayib',
         categories: ['ict'],
+        // The browse reply now gates on the profile before it searches, so the fixture has to
+        // look like a real one: `blankProfile` is the empty case the gate exists for.
+        match_profile: options.blankProfile
+          ? { categories: [], keywords: [], locations: [], category_source: '', updated_at: '2026-11-26T00:00:00Z' }
+          : {
+              categories: ['ict'],
+              keywords: ['Rust'],
+              locations: [],
+              category_source: 'llm',
+              updated_at: '2026-11-26T00:00:00Z',
+            },
         company: options.company === false ? null : { name: 'SOOHSOFT LTD', services: ['networking'] },
       },
     }),
@@ -109,6 +120,21 @@ test('the Jobs tab answers with the job list, with no interview session', async 
   assert.equal(seen.deferred, true, 'the press is acknowledged before the backend call');
   assert.ok(seen.content?.includes('Nothing live in your fields right now (ict).'), seen.content);
   assert.ok(!seen.followedUp?.includes('expired'), 'a tab is not an interview step');
+});
+
+test('a blank profile gets the setup button, not a search', async () => {
+  const { ctx, calls } = makeCtx({ blankProfile: true });
+  const { interaction, seen } = makeButton(CID.browseJobs);
+
+  await handleInteraction(interaction, ctx);
+
+  assert.deepEqual(calls.kinds, [], 'nothing is searched before a profile exists');
+  assert.ok(seen.content?.includes('no work area on file yet'), seen.content);
+  const customIds = (seen.components ?? []).map(
+    (row) =>
+      (row as { toJSON: () => { components: { custom_id: string }[] } }).toJSON().components[0]?.custom_id,
+  );
+  assert.deepEqual(customIds, ['onb:browse:job', 'onb:restart'], 'the tabs plus the way into the four questions');
 });
 
 test('the Tenders tab asks for a company profile instead of a CV list', async () => {

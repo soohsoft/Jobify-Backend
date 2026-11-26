@@ -24,7 +24,7 @@ import {
 } from './format.js';
 import { BackendError } from './http.js';
 import { educationSummary, experienceLabel } from './onboarding.js';
-import { assistantErrorReply, buyCreditsRow, clampContent, companyRow, respond } from './ui.js';
+import { assistantErrorReply, buyCreditsRow, clampContent, companyRow, profileSetupRow, respond } from './ui.js';
 import type { FeedJob, UserEnvelope } from './types.js';
 
 /**
@@ -121,6 +121,28 @@ export async function browseRows(
     }
   }
 
+  // A blank profile cannot be searched: the member gets the way into the four questions, never a
+  // list built from nothing. Checked BEFORE the search so "no profile" and "nothing live" can
+  // never be confused in the reply.
+  if (kind === 'job') {
+    const me = await ctx.backend.getUser(discordId).catch(() => null);
+    const profile = me?.user.match_profile;
+    const blank =
+      !profile ||
+      profile.categories.length === 0 &&
+        profile.keywords.length === 0 &&
+        profile.locations.length === 0;
+    if (blank) {
+      return {
+        content: [
+          '**You have no work area on file yet.**',
+          'Four quick questions — field, keywords, locations, experience — and I will start matching jobs to you.',
+        ].join('\n'),
+        components: [profileSetupRow()],
+      };
+    }
+  }
+
   const { rows, meta } = await ctx.backend.jobsForUser(discordId, {
     limit: MAX_BROWSE_ROWS,
     kind,
@@ -128,8 +150,11 @@ export async function browseRows(
   });
   if (meta.categories.length === 0) {
     return {
-      content:
-        'I do not have a work area for you yet — send me a message and I will ask you four quick questions.',
+      content: [
+        '**You have no work area on file yet.**',
+        'Four quick questions — field, keywords, locations, experience — and I will start matching jobs to you.',
+      ].join('\n'),
+      components: [profileSetupRow()],
     };
   }
 

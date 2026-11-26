@@ -55,6 +55,20 @@ export function companyRow(): ActionRowBuilder<ButtonBuilder> {
   );
 }
 
+/**
+ * Shown when a member asks for jobs before any profile exists. The button starts the four
+ * questions (`CID.restart` handler) instead of telling them to "send me a message" — an empty
+ * profile cannot be searched, so the reply has to be the way in, not a dead end.
+ */
+export function profileSetupRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('onb:restart')
+      .setLabel('Set up my profile')
+      .setStyle(ButtonStyle.Primary),
+  );
+}
+
 export function companyModal(): ModalBuilder {
   return new ModalBuilder()
     .setCustomId('company:submit')

@@ -204,6 +204,25 @@ async function handleButton(interaction: ButtonInteraction, ctx: BotContext): Pr
     return;
   }
 
+  // Step 2c-bis — "do you have a Master's?" Straight to the programme, no level question.
+  if (id.startsWith('onb:master:')) {
+    const answer = id.slice('onb:master:'.length);
+    if (answer !== 'yes' && answer !== 'no') {
+      await expired(interaction);
+      return;
+    }
+    await interaction.deferUpdate();
+    if (answer === 'yes' && session.education.length < MAX_EDUCATION) {
+      session.pendingLevel = 'master';
+      session.step = 'education_field';
+      await interaction.editReply(fieldPrompt('master'));
+      return;
+    }
+    session.step = 'position';
+    await interaction.editReply(positionPrompt());
+    return;
+  }
+
   // Step 2c — "another degree?"
   if (id.startsWith('onb:another:')) {
     const answer = id.slice('onb:another:'.length);

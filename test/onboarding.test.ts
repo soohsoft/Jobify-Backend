@@ -103,15 +103,30 @@ test('a re-run shows what is on file and says the next answer replaces it', () =
   assert.ok(prompt.content.includes('replaces'));
 });
 
-test('only degree levels are asked for a field, and all thirteen answers are buttons', () => {
+test('only degree levels are asked for a field, and the nine faculties plus Other are buttons', () => {
   assert.deepEqual(DEGREE_LEVELS, ['bachelor', 'master', 'phd']);
   const prompt = fieldPrompt('master');
   const ids = rows(prompt.components).flat();
   assert.equal(ids.length, FIELD_OPTIONS.length);
-  assert.equal(ids.length, 13);
+  assert.equal(ids.length, 10);
+  assert.deepEqual(
+    FIELD_OPTIONS.slice(0, 9).map((option) => option.label),
+    [
+      'Management',
+      'Computing',
+      'Social Science',
+      'Economics',
+      'Law',
+      'Education',
+      'Engineering',
+      'Accounting',
+      'Health and Medicine',
+    ],
+    'the owner\'s nine faculties, in this order',
+  );
   assert.deepEqual(ids, FIELD_OPTIONS.map((option) => CID.field(option.key)));
   assert.ok(ids.includes(CID.field('other')), 'Other is a button that opens a modal');
-  assert.ok(prompt.content.includes('Master'));
+  assert.ok(prompt.content.includes('Master’s programme'), 'a master is asked as a programme');
 });
 
 test('the another-degree question drops the Yes button at the cap', () => {
@@ -119,8 +134,9 @@ test('the another-degree question drops the Yes button at the cap', () => {
   const session = sessions.start('1');
   session.education = [{ level: 'bachelor', field: 'Health' }];
 
+  // After a bachelor the prompt is the Master's question — the Yes button is the way into it.
   const first = anotherPrompt(session);
-  assert.deepEqual(rows(first.components).flat(), [CID.another('yes'), CID.another('no')]);
+  assert.deepEqual(rows(first.components).flat(), [CID.master('yes'), CID.master('no')]);
 
   session.education = Array.from({ length: MAX_EDUCATION }, () => ({ level: 'bachelor', field: 'Health' }));
   const atCap = anotherPrompt(session);

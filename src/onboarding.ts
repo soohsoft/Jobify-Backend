@@ -53,18 +53,15 @@ export const DEGREE_LEVELS = ['bachelor', 'master', 'phd'];
  * becomes part of a custom id.
  */
 export const FIELD_OPTIONS: Array<{ key: string; label: string }> = [
-  { key: 'health', label: 'Health' },
-  { key: 'education', label: 'Education' },
-  { key: 'business', label: 'Business administration' },
-  { key: 'finance', label: 'Finance & accounting' },
-  { key: 'ict', label: 'ICT' },
-  { key: 'engineering', label: 'Engineering' },
-  { key: 'agriculture', label: 'Agriculture' },
+  { key: 'management', label: 'Management' },
+  { key: 'computing', label: 'Computing' },
+  { key: 'social_science', label: 'Social Science' },
+  { key: 'economics', label: 'Economics' },
   { key: 'law', label: 'Law' },
-  { key: 'logistics', label: 'Logistics & procurement' },
-  { key: 'social', label: 'Social science & development' },
-  { key: 'wash', label: 'WASH' },
-  { key: 'nutrition', label: 'Nutrition' },
+  { key: 'education', label: 'Education' },
+  { key: 'engineering', label: 'Engineering' },
+  { key: 'accounting', label: 'Accounting' },
+  { key: 'health_medicine', label: 'Health and Medicine' },
   { key: 'other', label: 'Other' },
 ];
 
@@ -109,6 +106,7 @@ export const CID = {
   field: (key: string): string => `onb:field:${key}`,
   fieldModal: 'onb:field:modal',
   another: (value: 'yes' | 'no'): string => `onb:another:${value}`,
+  master: (value: 'yes' | 'no'): string => `onb:master:${value}`,
   positionOpen: 'onb:position',
   positionModal: 'onb:position:modal',
   experience: (value: string): string => `onb:exp:${value}`,
@@ -256,15 +254,18 @@ export function fieldPrompt(level: string): {
   const buttons = FIELD_OPTIONS.map((option) =>
     new ButtonBuilder().setCustomId(CID.field(option.key)).setLabel(option.label).setStyle(ButtonStyle.Secondary),
   );
-  const rows = [
-    new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(0, 5)),
-    new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(5, 10)),
-    new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(10)),
-  ];
+  // Five per row is Discord's ceiling, and an empty row is a payload error — a 10-option list
+  // must produce exactly two rows, not three with a blank one.
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+  for (let index = 0; index < buttons.length; index += 5) {
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(index, index + 5)));
+  }
+  // A master's is asked as a programme, not as a field, because that is how the degree reads.
+  const question = level === 'master' ? 'Which Master\u2019s programme did you take?' : `Which field is your ${educationLabel(level)} in?`;
   return {
     content: stepHeader(
       2,
-      `Which field is your ${educationLabel(level)} in?`,
+      question,
       'This is what your matches are filtered by. "Other" asks you to type it, and becomes keywords instead.',
     ),
     components: rows,
@@ -287,10 +288,20 @@ export function fieldModal(): ModalBuilder {
     );
 }
 
+/**
+ * The question after a degree is added.
+ *
+ * After a BACHELOR the owner wants the specific question — "do you have a Master's?" — because
+ * that is the only degree a bachelor holder can add next; "do you have another degree?" made them
+ * answer a level question they had already answered implicitly. Any other level keeps the general
+ * prompt, which can still add a PhD.
+ */
 export function anotherPrompt(session: OnboardingSession): {
   content: string;
   components: ActionRowBuilder<ButtonBuilder>[];
 } {
+  if (asksForMasters(session)) return mastersPrompt(session);
+
   const atLimit = session.education.length >= MAX_EDUCATION;
   const hint = atLimit
     ? `That is ${MAX_EDUCATION} degrees, which is the maximum. Next: your last job.`
@@ -304,6 +315,29 @@ export function anotherPrompt(session: OnboardingSession): {
   row.addComponents(new ButtonBuilder().setCustomId(CID.another('no')).setLabel('No, that is all').setStyle(ButtonStyle.Primary));
   return {
     content: stepHeader(2, 'Do you have another degree?', hint),
+    components: [row],
+  };
+}
+
+/** True when the last degree added was a bachelor and no master's is on file yet. */
+export function asksForMasters(session: OnboardingSession): boolean {
+  const last = session.education[session.education.length - 1];
+  if (!last || last.level !== 'bachelor') return false;
+  if (session.education.length >= MAX_EDUCATION) return false;
+  return !session.education.some((entry) => entry.level === 'master');
+}
+
+/** "Do you have a Master's?" — the one question that follows a bachelor. */
+export function mastersPrompt(session: OnboardingSession): {
+  content: string;
+  components: ActionRowBuilder<ButtonBuilder>[];
+} {
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(CID.master('yes')).setLabel('Yes, a Master\'s').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(CID.master('no')).setLabel('No').setStyle(ButtonStyle.Primary),
+  );
+  return {
+    content: stepHeader(2, 'Do you have a Master\’s degree?', `Added: ${educationSummary(session.education)}`),
     components: [row],
   };
 }

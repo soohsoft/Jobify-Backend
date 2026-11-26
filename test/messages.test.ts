@@ -258,7 +258,7 @@ test('a member mid-interview is re-prompted at their current step, not sent to t
   const content = second.replies[0]?.content ?? '';
   assert.ok(content.includes('Step 2 of 4'));
   assert.ok(content.includes('Bachelor'), 'the prompt names the level whose field is being asked');
-  assert.ok(componentIds(second.replies[0]).includes(CID.field('health')));
+  assert.ok(componentIds(second.replies[0]).includes(CID.field('health_medicine')));
   assert.ok(!componentIds(second.replies[0]).some((id) => id.startsWith('onb:sectors')));
 });
 

@@ -327,15 +327,16 @@ test('the happy path: name → bachelor Health → no second degree → position
   assert.equal(sessions.get(MEMBER)?.step, 'education_field');
   assert.equal(sessions.get(MEMBER)?.pendingLevel, 'bachelor');
 
-  const field = await click(ctx, CID.field('health'));
+  const field = await click(ctx, CID.field('health_medicine'));
   assert.deepEqual(
     calls.saves[1],
-    { discord_id: MEMBER, education: [{ level: 'bachelor', field: 'Health' }] },
+    { discord_id: MEMBER, education: [{ level: 'bachelor', field: 'Health and Medicine' }] },
     'the whole list is sent, with the canonical label the backend maps to a category',
   );
-  assert.ok(renders(field.edits).includes('Do you have another degree?'));
+  // After a bachelor the owner wants the specific question, not "another degree?".
+  assert.ok(renders(field.edits).includes('Do you have a Master’s degree?'));
 
-  const noSecond = await click(ctx, CID.another('no'));
+  const noSecond = await click(ctx, CID.master('no'));
   assert.ok(renders(noSecond.edits).includes('What was your last job?'));
   assert.equal(sessions.get(MEMBER)?.step, 'position');
 
@@ -354,7 +355,7 @@ test('the happy path: name → bachelor Health → no second degree → position
   const completion = renders(years.edits);
   assert.ok(completion.startsWith('**Setup complete**'), completion);
   assert.ok(completion.includes('Sahra Ali'));
-  assert.ok(completion.includes('Bachelor — Health'));
+  assert.ok(completion.includes('Bachelor — Health and Medicine'));
   assert.ok(completion.includes('Senior Programme Officer'));
   assert.ok(completion.includes('3–5 years'));
   assert.equal(completion.match(/\/jobs\/job-/g)?.length, 5, 'five rows, the digest ceiling');
@@ -373,22 +374,23 @@ test('two degrees accumulate in one list and both fields reach the backend', asy
   await submit(ctx, CID.nameModal, { name: 'Sahra Ali' });
 
   await click(ctx, CID.education('bachelor'));
-  await click(ctx, CID.field('health'));
-  await click(ctx, CID.another('yes'));
-  await click(ctx, CID.education('master'));
-  await click(ctx, CID.field('business'));
+  await click(ctx, CID.field('health_medicine'));
+  // "Yes, a Master's" goes straight to the programme — no level question in between.
+  const masters = await click(ctx, CID.master('yes'));
+  assert.ok(renders(masters.edits).includes('Which Master’s programme did you take?'));
+  await click(ctx, CID.field('management'));
   const last = await click(ctx, CID.another('no'));
 
   const educationSaves = calls.saves.filter((save) => save.education !== undefined);
   assert.deepEqual(educationSaves.map((save) => save.education), [
-    [{ level: 'bachelor', field: 'Health' }],
+    [{ level: 'bachelor', field: 'Health and Medicine' }],
     [
-      { level: 'bachelor', field: 'Health' },
-      { level: 'master', field: 'Business administration' },
+      { level: 'bachelor', field: 'Health and Medicine' },
+      { level: 'master', field: 'Management' },
     ],
   ]);
   assert.equal(user.education.length, 2, 'the second save replaces the list with both degrees');
-  assert.equal(user.education[1]?.field, 'Business administration');
+  assert.equal(user.education[1]?.field, 'Management');
   assert.ok(renders(last.edits).includes('What was your last job?'));
 });
 

@@ -210,7 +210,7 @@ test('an already onboarded member gets the plain welcome and no interview', asyn
   const row = payload.components?.[0]?.toJSON().components as { label?: string }[];
   assert.deepEqual(
     row.map((button) => button.label),
-    ['Jobs', 'Tenders'],
+    ['My Jobs', 'My Tenders'],
     'the plain welcome offers the two tabs, not the interview',
   );
 });

@@ -58,7 +58,7 @@ export function plainWelcome(member: JoinMember): MessagePayload {
         welcomeLines(nameFor(member)),
         '',
         'Your profile is already set up, so I will keep sending your daily matches.',
-        'Tap **Jobs** or **Tenders** to see what is live — `/account` opens your portal.',
+        'Tap **My Jobs** or **My Tenders** to see what is live — `/account` opens your portal.',
       ].join('\n'),
     ),
     // The two tabs, on a greeting that is not an interview: a returning member should never

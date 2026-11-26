@@ -226,7 +226,7 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
   assert.ok(prompt.content.includes('**Programme Officer 1** — '), prompt.content);
   assert.ok(prompt.content.includes('**Programme Officer 5** — '), prompt.content);
   assert.ok(!prompt.content.includes('% match'), 'the list view drops the match label');
-  assert.ok(prompt.content.includes('**Jobs** and **Tenders** below open the full list'));
+  assert.ok(prompt.content.includes('**My Jobs** and **My Tenders** below open the full list'));
   // Row one is the shared tab pair, row two the re-run, so the tabs are never mistaken for
   // a third option in the same row.
   const row = (index: number) =>
@@ -234,8 +234,8 @@ test('the completion message says Setup complete, repeats the answers, shows fiv
       (button) => [button.custom_id, button.label],
     );
   assert.deepEqual(row(0), [
-    [CID.browseJobs, 'Jobs'],
-    [CID.browseTenders, 'Tenders'],
+    [CID.browseJobs, 'My Jobs'],
+    [CID.browseTenders, 'My Tenders'],
   ]);
   assert.deepEqual(row(1), [[CID.restart, 'Change my answers']]);
 });

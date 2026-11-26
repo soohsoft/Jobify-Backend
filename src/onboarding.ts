@@ -637,8 +637,8 @@ export function watchingLine(profile: DiscordUser['match_profile']): string | nu
  */
 export function browseTabsRow(): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(CID.browseJobs).setLabel('Jobs').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(CID.browseTenders).setLabel('Tenders').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(CID.browseJobs).setLabel('My Jobs').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(CID.browseTenders).setLabel('My Tenders').setStyle(ButtonStyle.Primary),
   );
 }
 
@@ -697,8 +697,8 @@ export function completionPrompt(input: CompletionInput): {
   // The tabs are the real invitation; "these five" only makes sense when there are five.
   const tabsLine =
     input.matches.length > 0
-      ? '**Jobs** and **Tenders** below open the full list — not just these five.'
-      : '**Jobs** and **Tenders** below open the full list at any time.';
+      ? '**My Jobs** and **My Tenders** below open the full list — not just these five.'
+      : '**My Jobs** and **My Tenders** below open the full list at any time.';
   lines.push('', tabsLine);
 
   return {

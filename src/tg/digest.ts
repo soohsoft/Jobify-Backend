@@ -97,11 +97,10 @@ export async function runTgDigest(deps: TgDigestDeps): Promise<TgDigestReport> {
 
   for (const [userId, rows] of byUser) {
     const chatId = Number(userId);
-    if (!Number.isFinite(chatId)) {
-      // A Discord id in the Telegram queue: not ours to send.
-      for (const item of rows) failures.push({ id: item.notificationId, reason: 'not_a_telegram_id' });
-      continue;
-    }
+    // Discord snowflakes are ~1e17; Telegram ids are ~1e9-1e10. A row above the split belongs
+    // to the Discord digest, so it is LEFT PENDING here — marking it failed would silently eat
+    // a Discord member's notification.
+    if (!Number.isFinite(chatId) || chatId > 1e12) continue;
     const batch = rows.slice(0, limit);
     const deferred = rows.slice(limit);
     try {

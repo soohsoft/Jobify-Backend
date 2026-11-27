@@ -340,12 +340,12 @@ export async function handleAccount(interaction: ChatInputCommandInteraction, ct
     '**Your Jobify account link**',
     link.url,
     '',
-    'Valid for 15 minutes and single use. The page it opens manages payment and your company profile.',
+    'Valid for 10 minutes — open it as often as you like inside that window. The page manages payment and your company profile.',
   ].join('\n');
   try {
     await ctx.sendDm(interaction.user.id, message);
     await interaction.editReply({
-      content: 'I sent the link to your DMs. It expires in 15 minutes and can only be used once.',
+      content: 'I sent the link to your DMs. It stays valid for 10 minutes.',
     });
   } catch {
     // The link is a credential, so the fallback is a private (ephemeral) reply, never the
@@ -354,7 +354,7 @@ export async function handleAccount(interaction: ChatInputCommandInteraction, ct
     await interaction.editReply({
       content: [
         'I could not DM you — this server may block direct messages from bots.',
-        `Here is the link privately instead (expires in 15 minutes, single use):\n${link.url}`,
+        `Here is the link privately instead (valid for 10 minutes):\n${link.url}`,
         'To get these in a DM next time, allow direct messages for this server.',
       ].join('\n'),
     });

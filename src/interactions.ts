@@ -506,7 +506,7 @@ async function accountLink(interaction: ButtonInteraction, ctx: BotContext): Pro
         '**Your Jobify account page** — subscription, searches and your company profile.',
         link.url,
         '',
-        'Single use, expires in 15 minutes.',
+        'Valid for 10 minutes.',
       ].join('\n'),
     });
   } catch (err) {

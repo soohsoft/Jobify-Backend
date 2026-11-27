@@ -258,7 +258,7 @@ export class Backend {
     return this.request('GET', `/internal/discord/link/${encodeURIComponent(userId)}`);
   }
 
-  async mintLink(discordId: string, ttlSeconds = 900): Promise<LinkToken> {
+  async mintLink(discordId: string, ttlSeconds = 600): Promise<LinkToken> {
     return this.request('POST', '/internal/discord/link-token', {
       body: { discord_id: discordId, ttl_seconds: ttlSeconds },
     });

@@ -571,10 +571,10 @@ export class TgBot {
   private async sendAccount(chatId: number, userId: number): Promise<void> {
     try {
       await this.backend.upsertUser({ discord_id: String(userId), username: `tg_${userId}` });
-      const link = await this.backend.mintLink(String(userId), 900);
+      const link = await this.backend.mintLink(String(userId), 600);
       await this.bot.sendMessage(
         chatId,
-        `<b>Your Jobify account page</b> — subscription, searches and your company profile.\n\n${link.url}\n\nSingle use, expires in 15 minutes.`,
+        `<b>Your Jobify account page</b> — subscription, searches and your company profile.\n\n${link.url}\n\nValid for 10 minutes.`,
       );
     } catch (err) {
       await this.fail(chatId, err);

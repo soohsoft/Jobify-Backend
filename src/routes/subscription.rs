@@ -11,6 +11,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use futures_util::TryStreamExt;
 use mongodb::bson::doc;
 use serde_json::{Value, json};
 
@@ -28,6 +29,10 @@ pub fn protected_router() -> Router<AppState> {
     Router::new()
         .route("/subscription", get(get_subscription))
         .route("/subscription/start", post(start_subscription))
+        // One read for the whole account page: plan, credits, the unpaid bill and the
+        // ledger behind it. Three round trips for one screen invited three ideas of the
+        // same account; this is the single shape the portal renders.
+        .route("/billing", get(get_billing))
 }
 
 /// The caller's subscription, normalized for reading.
@@ -96,6 +101,55 @@ async fn get_subscription(
     Ok((
         StatusCode::OK,
         Json(json!({ "status": "success", "data": payload(&subscription) })),
+    ))
+}
+
+/// `GET /billing` — everything the account page shows, in one answer.
+///
+/// `history` is the payments ledger newest-first: what was charged, its reference and
+/// whether it settled. `pending` is the one unpaid row the member can act on, or null.
+async fn get_billing(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> ApiResult {
+    let subscription = subscription_for(&state, &user.id).await?;
+    let credits = crate::credits::snapshot(&state, &user.id).await?;
+
+    let mut cursor = state
+        .payments()
+        .find(doc! { "user_id": &user.id })
+        .sort(doc! { "created_at": -1 })
+        .limit(24)
+        .await?;
+    let mut history: Vec<Value> = Vec::new();
+    let mut pending: Option<Value> = None;
+    while let Some(payment) = cursor.try_next().await? {
+        let row = json!({
+            "id": payment.id,
+            "reference": payment.reference,
+            "amount_usd": payment.amount_usd,
+            "status": payment.status,
+            "provider": payment.provider,
+            "created_at": payment.created_at,
+        });
+        if pending.is_none() && payment.status == "pending" {
+            pending = Some(row.clone());
+        }
+        history.push(row);
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": {
+                "subscription": payload(&subscription),
+                "credits": serde_json::to_value(&credits).unwrap_or(Value::Null),
+                "pending": pending,
+                "history": history,
+            },
+            "meta": { "gateway_wired": false }
+        })),
     ))
 }
 

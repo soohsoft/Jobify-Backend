@@ -286,7 +286,7 @@ test('the digest footer sells the $1 plan but never replaces the jobs', async ()
   assert.match(text, /1 new job for you/);
   assert.match(text, /WASH Officer/);
   assert.match(text, /Closing Date: 2 Dec 2026/);
-  assert.match(text, /Posted By: UNICEF/);
+  assert.doesNotMatch(text, /Posted By/);
   assert.ok(text.indexOf('Never miss a job') > text.indexOf('WASH Officer'), 'jobs first, offer last');
   assert.match(text, /\/balance/);
   assert.doesNotMatch(text, /My Account/, 'the link is only offered by /balance');

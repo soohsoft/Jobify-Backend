@@ -39,7 +39,5 @@ export function jobBlock(
   if (where) lines.push(`   ${where}`);
   const closes = closingDate(job.deadline);
   if (closes) lines.push(`   Closing Date: ${closes}`);
-  const postedBy = (job.source_name ?? '').trim();
-  if (postedBy) lines.push(`   Posted By: ${escapeHtml(postedBy)}`);
   return lines.join('\n');
 }

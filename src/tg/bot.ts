@@ -535,13 +535,15 @@ export class TgBot {
       return;
     }
     if (!envelope.user.company) {
+      // Straight into the first question: a "Start" button between the tap and the question
+      // is one tap of nothing, and the question is the answer they tapped for.
       const session = this.sessions.start(userId);
       session.step = 'company_name';
       await this.bot.sendMessage(
         chatId,
-        'Please fill your company information to search relevant tenders for your company.',
-        [[{ text: 'Start', callback_data: CID.companyOpen }]],
+        '<b>Please fill your company information to search relevant tenders for your company.</b>',
       );
+      await this.sendStep(chatId, companyNamePrompt());
       return;
     }
     await this.sendJobs(chatId, userId, 'tender');

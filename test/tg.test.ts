@@ -254,11 +254,11 @@ test('/stop turns alerts off', async () => {
   assert.deepEqual(alerts, [{ enabled: false }]);
 });
 
-test('/tenders asks for company information before searching', async () => {
+test('/tenders goes straight to the company name question, with no Start button', async () => {
   const { calls, handler, message } = harness();
   await handler.handle(message('/tenders'));
-  assert.match(lastText(calls), /company information/i);
-  assert.deepEqual(flat(lastKeyboard(calls)), ['company:open']);
+  assert.match(lastText(calls), /What is the company name/);
+  assert.equal(lastKeyboard(calls).length, 0, 'a typed answer, not a button');
 });
 
 test('the digest footer sells the $1 plan but never replaces the jobs', async () => {

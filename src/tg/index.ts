@@ -75,22 +75,52 @@ async function main(): Promise<void> {
   const me = await bot.call<{ id: number; username?: string }>('getMe', {});
   logger.info('telegram bot ready', { username: me.username ?? String(me.id), perSecond: config.perSecond });
 
-  // One digest a day at DIGEST_HOUR local time; the same local-clock rule as the Discord
-  // scheduler, so the two fronts cannot drift apart.
+  // TWO triggers, one drain:
+  //
+  // 1. the daily slot at DIGEST_HOUR, the same local-clock rule as Discord, so the two fronts
+  //    cannot drift apart;
+  // 2. a two-minute ticker that drains the queue the moment a scrape has queued something.
+  //    That is what makes a fresh posting reach a member in minutes instead of at 08:00 —
+  //    the scraper writes jobs, the matcher queues them, and this sends them.
+  //
+  // A member is messaged at most once every QUIET_HOURS, so three scrape cycles a day cannot
+  // turn into three notifications.
+  const QUIET_HOURS = Number(process.env.TELEGRAM_QUIET_HOURS ?? 5);
+  const quietMs = (Number.isFinite(QUIET_HOURS) ? QUIET_HOURS : 5) * 60 * 60_000;
+  const lastSent = new Map<string, number>();
   let lastRunDate = '';
+
+  const drain = async (reason: 'slot' | 'queue'): Promise<void> => {
+    const report = await runTgDigest({
+      bot,
+      backend,
+      logger,
+      shouldNotify: (userId) => {
+        const sentAt = lastSent.get(userId) ?? 0;
+        return Date.now() - sentAt >= quietMs;
+      },
+      onDelivered: (userId) => lastSent.set(userId, Date.now()),
+    });
+    if (report.dms > 0 || report.sent > 0) logger.info('telegram digest', { reason, ...report });
+  };
+
   const tick = async (): Promise<void> => {
     const now = new Date();
-    if (!isDigestDue(localClock(now, config.digestTz), config.digestHour, lastRunDate)) return;
-    lastRunDate = localClock(now, config.digestTz).date;
+    const due = isDigestDue(localClock(now, config.digestTz), config.digestHour, lastRunDate);
     try {
-      const report = await runTgDigest({ bot, backend, logger });
-      logger.info('telegram digest', { ...report });
+      if (due) {
+        lastRunDate = localClock(now, config.digestTz).date;
+        await drain('slot');
+      } else {
+        await drain('queue');
+      }
     } catch (err) {
       logger.error('telegram digest failed', { err: String(err) });
     }
   };
-  const timer = setInterval(() => void tick(), 60_000);
+  const timer = setInterval(() => void tick(), 120_000);
   timer.unref();
+  void tick();
 
   const controller = new AbortController();
   const shutdown = (signal: string): void => {

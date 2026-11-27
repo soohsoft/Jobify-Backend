@@ -13,6 +13,7 @@ import { Backend } from '../http.js';
 import type { Logger } from '../log.js';
 import type { FeedJob, UserEnvelope } from '../types.js';
 import { TelegramClient, type InlineKeyboard, type TgUpdate } from './client.js';
+import { jobBlock } from './format.js';
 import {
   CID,
   EMPLOYERS,
@@ -512,18 +513,13 @@ export class TgBot {
         );
         return;
       }
-      const lines = list.rows.map((row, index) => this.renderRow(row.job, index + 1));
+      const lines = list.rows.map((row, index) =>
+        jobBlock(row.job, index + 1, `${this.config.appBaseUrl}/jobs/${row.job._id}`),
+      );
       await this.bot.sendMessage(chatId, [`<b>${title}</b> — ${list.rows.length} live`, '', ...lines].join('\n'), browseKeyboard());
     } catch (err) {
       await this.fail(chatId, err);
     }
-  }
-
-  private renderRow(job: FeedJob, index: number): string {
-    const where = job.location ? ` — ${html(job.location)}` : '';
-    const closes = job.deadline ? ` · closes ${job.deadline.slice(0, 10)}` : '';
-    const url = job.url ?? `${this.config.appBaseUrl}/jobs/${job._id}`;
-    return `${index}. <a href="${url}">${html(job.title)}</a>\n   ${html(job.organization)}${where}${closes}`;
   }
 
   private async sendTenders(chatId: number, userId: number): Promise<void> {

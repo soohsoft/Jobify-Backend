@@ -276,6 +276,7 @@ test('the digest footer sells the $1 plan but never replaces the jobs', async ()
           title: 'WASH Officer',
           organization: 'UNICEF',
           location: 'Mogadishu',
+          source_name: 'UNICEF',
           deadline: '2026-12-02T00:00:00Z',
         },
       },
@@ -284,7 +285,8 @@ test('the digest footer sells the $1 plan but never replaces the jobs', async ()
   );
   assert.match(text, /1 new job for you/);
   assert.match(text, /WASH Officer/);
-  assert.match(text, /closes 2026-12-02/);
+  assert.match(text, /Closing Date: 2 Dec 2026/);
+  assert.match(text, /Posted By: UNICEF/);
   assert.ok(text.indexOf('Never miss a job') > text.indexOf('WASH Officer'), 'jobs first, offer last');
   assert.match(text, /\/balance/);
   assert.doesNotMatch(text, /My Account/, 'the link is only offered by /balance');

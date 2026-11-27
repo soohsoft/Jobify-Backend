@@ -140,6 +140,8 @@ export interface FeedJob {
   _id: string;
   title: string;
   organization: string;
+  /** The board it was posted on ("Somali Jobs"); shown as "Posted By". */
+  source_name?: string | null;
   location?: string | null;
   deadline?: string | null;
   category?: string | null;

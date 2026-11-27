@@ -10,6 +10,7 @@ import type { Logger } from '../log.js';
 import type { Delivery } from '../types.js';
 import type { TelegramClient } from './client.js';
 import { MAX_DIGEST_ROWS } from '../format.js';
+import { escapeHtml, jobBlock } from './format.js';
 
 export interface TgDigestDeps {
   bot: TelegramClient;
@@ -17,6 +18,10 @@ export interface TgDigestDeps {
   logger: Logger;
   /** How many rows one chat receives per day, matching the Discord cap. */
   maxPerDm?: number;
+  /** False when this member was messaged recently; the rows stay queued for the next cycle. */
+  shouldNotify?: (userId: string) => boolean;
+  /** Called after a member's digest was delivered, so the caller can record the time. */
+  onDelivered?: (userId: string) => void;
 }
 
 export interface TgDigestReport {
@@ -27,19 +32,13 @@ export interface TgDigestReport {
   failed: number;
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 function row(delivery: Delivery, index: number): string {
-  const job = delivery.job;
-  const title = escapeHtml(job?.title ?? delivery.title);
-  const org = job?.organization ?? '';
-  const where = job?.location ? ` — ${escapeHtml(job.location)}` : '';
-  const deadline = job?.deadline ? ` · closes ${job.deadline.slice(0, 10)}` : '';
-  const linked = delivery.url ? `<a href="${delivery.url}">${title}</a>` : title;
-  const score = typeof delivery.matchScore === 'number' ? ` · ${Math.round(delivery.matchScore)}%` : '';
-  return `${index}. ${linked}\n   ${escapeHtml(org)}${where}${deadline}${score}`;
+  if (delivery.job) return jobBlock(delivery.job, index, delivery.url ?? undefined);
+  // A queued row without the embedded job: render what the queue carried.
+  const title = delivery.url
+    ? `<a href="${escapeHtml(delivery.url)}">${escapeHtml(delivery.title)}</a>`
+    : escapeHtml(delivery.title);
+  return `${index}. ${title}`;
 }
 
 /**
@@ -98,6 +97,7 @@ export async function runTgDigest(deps: TgDigestDeps): Promise<TgDigestReport> {
   for (const [userId, rows] of byUser) {
     // The queue is keyed by user id; the chat identity lives on the link record, the same way
     // the Discord digest resolves it. A member with no link is left pending, never failed.
+    if (deps.shouldNotify && !deps.shouldNotify(userId)) continue;
     let chatId = Number.NaN;
     try {
       const link = await deps.backend.linkForUser(userId);
@@ -119,6 +119,7 @@ export async function runTgDigest(deps: TgDigestDeps): Promise<TgDigestReport> {
         ],
       ]);
       report.dms += 1;
+      deps.onDelivered?.(userId);
       for (const item of batch) sent.push(item.notificationId);
       // Over the daily cap: leave them pending rather than dropping them.
       for (const item of deferred) report.pending -= 0;

@@ -502,6 +502,20 @@ impl WalletDoc {
     }
 }
 
+/// A wallet movement that is NOT a subscription charge: top-ups land here, so the ledger can
+/// show money in as well as money out.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WalletTxnDoc {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    /// Positive for a top-up. Subscription charges stay in `payments`.
+    pub amount_usd: f64,
+    pub kind: String,
+    pub reference: String,
+    pub created_at: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PaymentDoc {
     #[serde(rename = "_id")]

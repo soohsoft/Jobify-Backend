@@ -225,10 +225,12 @@ async fn get_billing(
     let mut history: Vec<Value> = Vec::new();
     let mut pending: Option<Value> = None;
     while let Some(payment) = cursor.try_next().await? {
+        // Money OUT: a subscription charge, negative in the ledger.
         let row = json!({
             "id": payment.id,
             "reference": payment.reference,
             "amount_usd": payment.amount_usd,
+            "kind": "subscription",
             "status": payment.status,
             "provider": payment.provider,
             "created_at": payment.created_at,
@@ -238,6 +240,33 @@ async fn get_billing(
         }
         history.push(row);
     }
+
+    // Money IN: wallet top-ups, positive in the same ledger.
+    let mut txns = state
+        .wallet_txns()
+        .find(doc! { "user_id": &user.id })
+        .sort(doc! { "created_at": -1 })
+        .limit(24)
+        .await?;
+    while let Some(txn) = txns.try_next().await? {
+        history.push(json!({
+            "id": txn.id,
+            "reference": txn.reference,
+            "amount_usd": txn.amount_usd,
+            "kind": "topup",
+            "status": "paid",
+            "provider": "waafipay",
+            "created_at": txn.created_at,
+        }));
+    }
+
+    // One timeline, newest first.
+    history.sort_by(|a, b| {
+        let left = a.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let right = b.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        right.cmp(left)
+    });
+    history.truncate(24);
 
     Ok((
         StatusCode::OK,

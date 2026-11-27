@@ -14,7 +14,7 @@ use axum::{
 use mongodb::bson::{Document, doc};
 use mongodb::options::ReturnDocument;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::credits;
 use crate::error::AppError;
@@ -52,6 +52,9 @@ pub fn internal_router() -> Router<AppState> {
         .route("/internal/discord/users", post(upsert_user))
         .route("/internal/discord/profile", post(update_profile))
         .route("/internal/discord/link-token", post(mint_link_token))
+        // Credits a member's wallet. Operator-only for now: WaafiPay will call the same
+        // bookkeeping once its callback lands, so the ledger has one shape from day one.
+        .route("/internal/wallet/topup", post(wallet_topup))
         .route("/internal/discord/user/{discord_id}", get(get_user))
         // The member's current matches. The bot has no bearer token, so the Bearer-only
         // `GET /jobs/match` is unreachable from Discord; this delegates to the same matcher.
@@ -625,6 +628,60 @@ async fn update_profile(
 }
 
 // ---------------------------------------------------------------------------
+/// `POST /internal/wallet/topup` — adds money to a member's wallet and records it as a
+/// top-up transaction, so the account page's ledger shows money in as well as money out.
+async fn wallet_topup(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult {
+    let discord_id = snowflake(
+        body.get("discord_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    )?;
+    let amount = body
+        .get("amount_usd")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    if !(amount.is_finite() && amount > 0.0) {
+        return Err(AppError::BadRequest(
+            "amount_usd must be a positive number".to_string(),
+        ));
+    }
+
+    let link = link_for(&state, &discord_id).await?;
+    let now = now_iso();
+
+    state
+        .wallets()
+        .update_one(
+            doc! { "_id": &link.user_id },
+            doc! {
+                "$inc": { "balance_usd": amount },
+                "$set": { "updated_at": &now },
+                "$setOnInsert": { "auto_deduct": false },
+            },
+        )
+        .upsert(true)
+        .await?;
+
+    let reference = format!("JOBIFY-TOPUP-{}", &uuid_id()[..8]);
+    let txn = crate::models::WalletTxnDoc {
+        id: uuid_id(),
+        user_id: link.user_id.clone(),
+        amount_usd: amount,
+        kind: "topup".to_string(),
+        reference: reference.clone(),
+        created_at: now,
+    };
+    state.wallet_txns().insert_one(&txn).await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": { "amount_usd": amount, "reference": reference, "user_id": link.user_id }
+        })),
+    ))
+}
+
 // POST /internal/discord/link-token
 // ---------------------------------------------------------------------------
 

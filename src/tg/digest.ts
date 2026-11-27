@@ -13,7 +13,7 @@ import { MAX_DIGEST_ROWS } from '../format.js';
 
 export interface TgDigestDeps {
   bot: TelegramClient;
-  backend: Pick<Backend, 'refreshMatches' | 'deliveries' | 'markSent' | 'markFailed'>;
+  backend: Pick<Backend, 'refreshMatches' | 'deliveries' | 'linkForUser' | 'markSent' | 'markFailed'>;
   logger: Logger;
   /** How many rows one chat receives per day, matching the Discord cap. */
   maxPerDm?: number;
@@ -96,7 +96,15 @@ export async function runTgDigest(deps: TgDigestDeps): Promise<TgDigestReport> {
   const failures: Array<{ id: string; reason: string }> = [];
 
   for (const [userId, rows] of byUser) {
-    const chatId = Number(userId);
+    // The queue is keyed by user id; the chat identity lives on the link record, the same way
+    // the Discord digest resolves it. A member with no link is left pending, never failed.
+    let chatId = Number.NaN;
+    try {
+      const link = await deps.backend.linkForUser(userId);
+      chatId = Number(link.discord_id);
+    } catch {
+      continue;
+    }
     // Discord snowflakes are ~1e17; Telegram ids are ~1e9-1e10. A row above the split belongs
     // to the Discord digest, so it is LEFT PENDING here — marking it failed would silently eat
     // a Discord member's notification.

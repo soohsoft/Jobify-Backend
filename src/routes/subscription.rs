@@ -269,8 +269,21 @@ async fn get_billing(
         }));
     }
 
-    // A bill is only "due" while the month is not covered; an active plan owes nothing.
-    if subscription.status == SUBSCRIPTION_ACTIVE {
+    // A bill is only "due" while the month is not covered; an active plan owes nothing, and
+    // any bill left waiting from before the plan was paid is closed rather than shown.
+    if subscription.status == SUBSCRIPTION_ACTIVE && pending.is_some() {
+        state
+            .payments()
+            .update_many(
+                doc! { "user_id": &user.id, "status": "pending" },
+                doc! { "$set": { "status": "void", "updated_at": now_iso() } },
+            )
+            .await?;
+        for row in history.iter_mut() {
+            if row.get("status").and_then(|v| v.as_str()) == Some("pending") {
+                row["status"] = json!("void");
+            }
+        }
         pending = None;
     }
 

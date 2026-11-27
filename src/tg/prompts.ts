@@ -324,7 +324,7 @@ export function completionText(input: {
       ? `I found <b>${input.matches}</b> matching jobs for you.`
       : 'Nothing live matches your answers this minute — I check again every day and will message you the moment something does.',
     '',
-    'Never miss a job. Daily Jobs Notifications just for $1/month.\nSubscription now → My Account',
+    'Never miss a job. Daily Jobs Notifications just for $1/month.\nSubscription now → /balance',
   ].join('\n');
 }
 
@@ -334,6 +334,6 @@ export function browseKeyboard(): InlineKeyboard {
       { text: 'My Jobs', callback_data: CID.browseJobs },
       { text: 'My Tenders', callback_data: CID.browseTenders },
     ],
-    [{ text: 'My Account', callback_data: CID.account }],
+    // No My Account here on purpose: the account link lives behind /balance only.
   ];
 }

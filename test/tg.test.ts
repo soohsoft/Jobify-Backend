@@ -180,7 +180,7 @@ test('the full interview saves name, degrees, position, employer types and secto
 
   assert.match(lastText(calls), /Setup complete/);
   assert.match(lastText(calls), /Never miss a job/);
-  assert.deepEqual(flat(lastKeyboard(calls)), ['browse:job', 'browse:tender', 'account:link']);
+  assert.deepEqual(flat(lastKeyboard(calls)), ['browse:job', 'browse:tender'], 'no account button on the tabs');
 });
 
 test('Bachelor asks for a Master’s, and Yes collects the Master’s field', async () => {
@@ -286,7 +286,8 @@ test('the digest footer sells the $1 plan but never replaces the jobs', async ()
   assert.match(text, /WASH Officer/);
   assert.match(text, /closes 2026-12-02/);
   assert.ok(text.indexOf('Never miss a job') > text.indexOf('WASH Officer'), 'jobs first, offer last');
-  assert.match(text, /My Account/);
+  assert.match(text, /\/balance/);
+  assert.doesNotMatch(text, /My Account/, 'the link is only offered by /balance');
 });
 
 test('an expired button tells the member to restart instead of silently doing nothing', async () => {

@@ -59,7 +59,7 @@ export function tgDigestText(deliveries: Delivery[], total: number): string {
     tail,
     '',
     'Never miss a job. Daily Jobs Notifications just for $1/month.',
-    'Subscription now → My Account',
+    'Subscription now → /balance',
   ]
     .filter((line) => line !== '')
     .join('\n');
@@ -110,7 +110,6 @@ export async function runTgDigest(deps: TgDigestDeps): Promise<TgDigestReport> {
           { text: 'My Jobs', callback_data: 'browse:job' },
           { text: 'My Tenders', callback_data: 'browse:tender' },
         ],
-        [{ text: 'My Account', callback_data: 'account:link' }],
       ]);
       report.dms += 1;
       for (const item of batch) sent.push(item.notificationId);

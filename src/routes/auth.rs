@@ -250,10 +250,11 @@ async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) ->
 /// `POST /auth/magic` — the ONLY way into the web portal, and the only session endpoint
 /// that is neither a password nor a signup.
 ///
-/// Single use is enforced by the database, not by a read-then-write: the exchange is one
-/// `find_one_and_update` whose filter requires `used_at: null` and an unexpired
-/// `expires_at`. Two parallel exchanges with the same token therefore cannot both match —
-/// the loser sees `None` and gets the same 400 as an unknown token.
+/// The link is a 10-minute window, not a single use: members open it, go back to Telegram,
+/// and re-open it — a token that died on the first tap felt broken. The database still
+/// decides expiry, in one `find_one_and_update` that requires an unexpired `expires_at` and
+/// stamps `used_at` with the latest use for the audit trail. A token past its window gets the
+/// same 400 as an unknown one.
 ///
 /// Every failure answers with the SAME message and status. The endpoint is public, so
 /// distinguishing "never existed" from "expired" from "already used" would tell an attacker
@@ -272,7 +273,8 @@ async fn magic_link(
         ));
     }
 
-    let invalid = || AppError::BadRequest("This link has expired or was already used".to_string());
+    let invalid =
+        || AppError::BadRequest("This link has expired. Ask the bot for a new one.".to_string());
 
     let raw = body.token.trim();
     if raw.is_empty() {
@@ -286,7 +288,6 @@ async fn magic_link(
         .find_one_and_update(
             doc! {
                 "_id": links::token_fingerprint(raw),
-                "used_at": null,
                 "expires_at": { "$gt": now },
             },
             doc! { "$set": { "used_at": now } },

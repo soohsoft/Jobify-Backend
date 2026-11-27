@@ -36,7 +36,9 @@ use super::subscription::subscription_for;
 
 /// A portal link is a convenience, not a credential: 15 minutes by default, and never
 /// longer than an hour.
-pub const DEFAULT_LINK_TTL_SECS: i64 = 900;
+/// Ten minutes. Long enough to open the link on a phone, short enough that a forwarded
+/// message stops working quickly.
+pub const DEFAULT_LINK_TTL_SECS: i64 = 600;
 pub const MIN_LINK_TTL_SECS: i64 = 300;
 pub const MAX_LINK_TTL_SECS: i64 = 3600;
 

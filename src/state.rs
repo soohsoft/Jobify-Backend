@@ -102,6 +102,10 @@ impl AppState {
         self.db.collection("payments")
     }
 
+    pub fn wallets(&self) -> mongodb::Collection<crate::models::WalletDoc> {
+        self.db.collection("wallets")
+    }
+
     /// The query ledger. Read and written by `user_id` only — the collection holds both
     /// string and ObjectId `_id`s and this model never deserializes `_id`.
     pub fn credits(&self) -> mongodb::Collection<crate::models::CreditDoc> {

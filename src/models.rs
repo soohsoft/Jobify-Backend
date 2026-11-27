@@ -477,6 +477,31 @@ impl SubscriptionDoc {
 /// A payment attempt in the shape the collection already holds (nine legacy rows). New
 /// rows add `provider`; legacy rows have no such field, so it is optional and every
 /// existing document is left exactly as it is.
+/// The member's prepaid wallet, in USD.
+///
+/// One row per user, created on first read. `auto_deduct` is the rule the account page sells:
+/// when the month is due and the wallet covers it, the subscription renews itself instead of
+/// waiting for the member to come back and pay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletDoc {
+    #[serde(rename = "_id")]
+    pub user_id: String,
+    pub balance_usd: f64,
+    pub auto_deduct: bool,
+    pub updated_at: String,
+}
+
+impl WalletDoc {
+    pub fn empty_for(user_id: &str) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            balance_usd: 0.0,
+            auto_deduct: false,
+            updated_at: crate::util::now_iso(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PaymentDoc {
     #[serde(rename = "_id")]

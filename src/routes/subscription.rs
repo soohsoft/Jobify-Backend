@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::models::{
-    PaymentDoc, SUBSCRIPTION_ACTIVE, SUBSCRIPTION_AMOUNT_USD, SUBSCRIPTION_EXPIRED, SubscriptionDoc,
+    PaymentDoc, SUBSCRIPTION_ACTIVE, SUBSCRIPTION_AMOUNT_USD, SUBSCRIPTION_EXPIRED,
+    SubscriptionDoc, WalletDoc,
 };
 use crate::state::AppState;
 use crate::util::{now_iso, uuid_id};
@@ -33,6 +34,7 @@ pub fn protected_router() -> Router<AppState> {
         // ledger behind it. Three round trips for one screen invited three ideas of the
         // same account; this is the single shape the portal renders.
         .route("/billing", get(get_billing))
+        .route("/wallet/auto-deduct", post(set_auto_deduct))
 }
 
 /// The caller's subscription, normalized for reading.
@@ -104,6 +106,102 @@ async fn get_subscription(
     ))
 }
 
+/// The member's wallet, created empty on first read so the page never shows "unknown".
+async fn wallet_for(state: &AppState, user_id: &str) -> Result<WalletDoc, AppError> {
+    if let Some(wallet) = state.wallets().find_one(doc! { "_id": user_id }).await? {
+        return Ok(wallet);
+    }
+    let wallet = WalletDoc::empty_for(user_id);
+    let _ = state.wallets().insert_one(&wallet).await;
+    Ok(wallet)
+}
+
+/// The rule the wallet exists for: when the month is due and the balance covers it, renew
+/// without asking. Returns the wallet after any charge, and whether a charge happened.
+async fn auto_renew_from_wallet(
+    state: &AppState,
+    user_id: &str,
+) -> Result<(WalletDoc, bool), AppError> {
+    let mut wallet = wallet_for(state, user_id).await?;
+    let subscription = subscription_for(state, user_id).await?;
+    if !should_charge_wallet(&subscription.status, wallet.auto_deduct, wallet.balance_usd) {
+        return Ok((wallet, false));
+    }
+
+    let now = chrono::Utc::now();
+    let period_end = now + chrono::Duration::days(30);
+    wallet.balance_usd = (wallet.balance_usd - SUBSCRIPTION_AMOUNT_USD).max(0.0);
+    wallet.updated_at = now_iso();
+    state
+        .wallets()
+        .update_one(
+            doc! { "_id": user_id },
+            doc! { "$set": { "balance_usd": wallet.balance_usd, "updated_at": &wallet.updated_at } },
+        )
+        .await?;
+
+    let payment = PaymentDoc {
+        id: uuid_id(),
+        user_id: user_id.to_string(),
+        amount_usd: SUBSCRIPTION_AMOUNT_USD,
+        tokens: 0,
+        status: "paid".to_string(),
+        reference: format!("JOBIFY-WALLET-{}", &uuid_id()[..8]),
+        provider_ref: String::new(),
+        provider: Some("wallet".to_string()),
+        created_at: now_iso(),
+        updated_at: now_iso(),
+    };
+    state.payments().insert_one(&payment).await?;
+
+    let mut renewed = subscription;
+    renewed.status = SUBSCRIPTION_ACTIVE.to_string();
+    renewed.period_start = Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    renewed.period_end = Some(period_end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    renewed.amount_usd = SUBSCRIPTION_AMOUNT_USD;
+    renewed.auto_renew = true;
+    renewed.provider = Some("wallet".to_string());
+    state
+        .subscriptions()
+        .replace_one(doc! { "_id": user_id }, &renewed)
+        .upsert(true)
+        .await?;
+
+    tracing::info!(user_id = %user_id, "subscription renewed from wallet balance");
+    Ok((wallet, true))
+}
+
+/// The whole auto-deduct rule, as a pure decision: charge only when the month is actually due,
+/// the switch is on, and the balance covers it (a cent short is not a payment).
+fn should_charge_wallet(status: &str, auto_deduct: bool, balance_usd: f64) -> bool {
+    let due = status == SUBSCRIPTION_EXPIRED || status == "none";
+    due && auto_deduct && balance_usd + 1e-9 >= SUBSCRIPTION_AMOUNT_USD
+}
+
+/// The auto-deduct switch on the account page.
+async fn set_auto_deduct(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult {
+    let enabled = body
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let mut wallet = wallet_for(&state, &user.id).await?;
+    wallet.auto_deduct = enabled;
+    wallet.updated_at = now_iso();
+    state
+        .wallets()
+        .replace_one(doc! { "_id": &user.id }, &wallet)
+        .upsert(true)
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": { "auto_deduct": wallet.auto_deduct } })),
+    ))
+}
+
 /// `GET /billing` — everything the account page shows, in one answer.
 ///
 /// `history` is the payments ledger newest-first: what was charged, its reference and
@@ -112,6 +210,9 @@ async fn get_billing(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
 ) -> ApiResult {
+    // The wallet rule runs on read: a member who left auto-deduct on is renewed the moment
+    // they look at the page, not only when a background job happens to run.
+    let (wallet, charged) = auto_renew_from_wallet(&state, &user.id).await?;
     let subscription = subscription_for(&state, &user.id).await?;
     let credits = crate::credits::snapshot(&state, &user.id).await?;
 
@@ -147,6 +248,11 @@ async fn get_billing(
                 "credits": serde_json::to_value(&credits).unwrap_or(Value::Null),
                 "pending": pending,
                 "history": history,
+                "wallet": {
+                    "balance_usd": wallet.balance_usd,
+                    "auto_deduct": wallet.auto_deduct,
+                    "renewed_now": charged,
+                },
             },
             "meta": { "gateway_wired": false }
         })),
@@ -233,6 +339,18 @@ async fn start_subscription(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wallet_only_pays_when_due_switched_on_and_covered() {
+        assert!(should_charge_wallet("expired", true, 1.0));
+        assert!(should_charge_wallet("none", true, 5.5));
+        // A cent short is not a payment.
+        assert!(!should_charge_wallet("expired", true, 0.99));
+        // Already active: the month is not due.
+        assert!(!should_charge_wallet("active", true, 10.0));
+        // Switch off: nothing is taken even with money there.
+        assert!(!should_charge_wallet("expired", false, 10.0));
+    }
 
     #[test]
     fn days_left_rounds_up_and_never_goes_negative() {

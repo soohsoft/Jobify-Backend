@@ -926,6 +926,8 @@ async fn ingest_jobs(
 
     let received = jobs.len() as u64;
     let mut persisted = 0u64;
+    let mut created = 0u64;
+    let mut updated = 0u64;
     let mut failed = 0u64;
 
     for input in jobs {
@@ -1049,7 +1051,17 @@ async fn ingest_jobs(
             .upsert(true)
             .await
         {
-            Ok(_) => persisted += 1,
+            Ok(result) => {
+                // `upserted_id` distinguishes a listing the feed has never carried from one
+                // that was already stored and merely had its fields refreshed — the two are
+                // different facts and the scraper's log should not blur them.
+                if result.upserted_id.is_some() {
+                    created += 1;
+                } else {
+                    updated += 1;
+                }
+                persisted += 1;
+            }
             Err(err) => {
                 tracing::warn!(
                     source = %input.source,
@@ -1066,7 +1078,13 @@ async fn ingest_jobs(
         StatusCode::OK,
         Json(json!({
             "status": "success",
-            "data": { "received": received, "persisted": persisted, "failed": failed }
+            "data": {
+                "received": received,
+                "persisted": persisted,
+                "created": created,
+                "updated": updated,
+                "failed": failed
+            }
         })),
     ))
 }

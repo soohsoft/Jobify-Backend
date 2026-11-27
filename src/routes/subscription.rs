@@ -154,6 +154,15 @@ async fn auto_renew_from_wallet(
     };
     state.payments().insert_one(&payment).await?;
 
+    // The month is paid: any bill that was still waiting for the member is no longer owed.
+    state
+        .payments()
+        .update_many(
+            doc! { "user_id": user_id, "status": "pending" },
+            doc! { "$set": { "status": "void", "updated_at": now_iso() } },
+        )
+        .await?;
+
     let mut renewed = subscription;
     renewed.status = SUBSCRIPTION_ACTIVE.to_string();
     renewed.period_start = Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
@@ -258,6 +267,11 @@ async fn get_billing(
             "provider": "waafipay",
             "created_at": txn.created_at,
         }));
+    }
+
+    // A bill is only "due" while the month is not covered; an active plan owes nothing.
+    if subscription.status == SUBSCRIPTION_ACTIVE {
+        pending = None;
     }
 
     // One timeline, newest first.

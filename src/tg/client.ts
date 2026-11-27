@@ -168,8 +168,19 @@ export class TelegramClient {
     });
   }
 
+  /**
+   * Acknowledges a button tap. Telegram expires a callback query after a few minutes, so a tap
+   * on an old message answers `query is too old` — that is not an error worth failing an update
+   * over, and rethrowing it aborted the step the member actually asked for.
+   */
   async answerCallback(id: string, text?: string): Promise<void> {
-    await this.call('answerCallbackQuery', { callback_query_id: id, ...(text ? { text } : {}) });
+    try {
+      await this.call('answerCallbackQuery', { callback_query_id: id, ...(text ? { text } : {}) });
+    } catch (err) {
+      const description = err instanceof TelegramError ? err.description : '';
+      if (/query is too old|query ID is invalid/i.test(description)) return;
+      throw err;
+    }
   }
 
   async setCommands(commands: Array<{ command: string; description: string }>): Promise<void> {

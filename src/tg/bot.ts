@@ -634,7 +634,7 @@ export class TgBot {
 
       const sections: string[] = [];
       if (matched.rows.length > 0) sections.push(frame(`Matched ${noun}`, block(matched.rows)));
-      if (related.length > 0) sections.push(frame('Other Sectors Selected', block(related)));
+      if (related.length > 0) sections.push(frame('Other Sectors', block(related)));
       await this.bot.sendMessage(chatId, sections.join('\n\n'), browseKeyboard());
     } catch (err) {
       await this.fail(chatId, err);

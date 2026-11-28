@@ -260,9 +260,9 @@ test('My Jobs shows matched rows and, separately, related positions', async () =
   await handler.handle(message('/jobs'));
   const text = lastText(calls);
   assert.match(text, /Matched Jobs/, 'the first frame is the matched list');
-  assert.match(text, /Other Sectors/, 'rows admitted by the picked sectors get their own frame');
+  assert.match(text, /Others Interested/, 'rows admitted by the picked sectors get their own frame');
   const matchedAt = text.indexOf('Matched Jobs');
-  const relatedAt = text.indexOf('Other Sectors');
+  const relatedAt = text.indexOf('Others Interested');
   assert.ok(matchedAt < relatedAt, 'matched comes first');
   assert.ok(text.indexOf('WASH Officer') < relatedAt, 'the matched row sits in the first frame');
   assert.ok(text.indexOf('Finance Officer') > relatedAt, 'the related row sits in the second');

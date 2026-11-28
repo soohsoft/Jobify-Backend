@@ -1228,13 +1228,13 @@ pub fn score_job(job: &JobDoc, profile: &MatchProfile) -> i64 {
         score += SCORE_CATEGORY_EXACT;
     }
 
-    let title = job.title.to_lowercase();
-    let description = job.description.to_lowercase();
+    let title = matchable(&job.title);
+    let description = matchable(&job.description);
 
     let mut in_title = 0;
     let mut in_description = 0;
     for keyword in &profile.keywords {
-        let keyword = keyword.trim().to_lowercase();
+        let keyword = matchable(keyword);
         if keyword.is_empty() {
             continue;
         }
@@ -1258,6 +1258,30 @@ pub fn score_job(job: &JobDoc, profile: &MatchProfile) -> i64 {
     }
 
     score.clamp(0, SCORE_MAX)
+}
+
+/// Text prepared for keyword matching: lowercase, `&` spelled out, and the spelling variants
+/// that separate a member's answer from an advert collapsed to one form.
+///
+/// A member writes "Monitoring and Evaluation" while the board prints "Monitoring & Evaluation",
+/// and models emit "programme" where Somali boards print "program"; without this the keyword
+/// silently misses and a genuine match scores 55 instead of 70.
+fn matchable(text: &str) -> String {
+    let lowered = text.to_lowercase().replace('&', " and ");
+    let mut normalised = String::with_capacity(lowered.len());
+    for word in lowered.split_whitespace() {
+        let canonical = match word {
+            "programme" | "programmes" | "programs" => "program",
+            "organisation" | "organisations" => "organization",
+            "centre" | "centres" => "center",
+            other => other,
+        };
+        if !normalised.is_empty() {
+            normalised.push(' ');
+        }
+        normalised.push_str(canonical);
+    }
+    normalised
 }
 
 /// True when the row's organisation looks like one of the employer types the member chose.
@@ -2117,6 +2141,29 @@ mod tests {
 
     /// The two answers taken after the last job must reach the matcher: the positions WIDEN the
     /// gate, and the employer type nudges a row up only when the organisation looks like it.
+    #[test]
+    fn spelling_and_ampersand_variants_still_match() {
+        use super::score_job;
+
+        let profile = MatchProfile {
+            categories: vec!["business_and_finance".to_string()],
+            keywords: vec![
+                "monitoring and evaluation".to_string(),
+                "programme management".to_string(),
+            ],
+            ..Default::default()
+        };
+        // "&" where the member wrote "and", and "Program" where the model wrote "Programme".
+        let row = job_from(serde_json::json!({
+            "_id": "job-mne",
+            "title": "Monitoring & Evaluation Associate – Program Management Unit",
+            "description": "",
+            "category": "business_and_finance",
+        }));
+        // 20 base + 25 category + 15 + 15 title keywords.
+        assert_eq!(score_job(&row, &profile), 75);
+    }
+
     #[test]
     fn a_sector_widened_row_gets_no_education_bonus() {
         use super::{MATCH_THRESHOLD_DEFAULT, score_job};

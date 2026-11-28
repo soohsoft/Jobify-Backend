@@ -1215,7 +1215,18 @@ pub fn score_job(job: &JobDoc, profile: &MatchProfile) -> i64 {
         return 0;
     }
 
-    let mut score = SCORE_BASE + SCORE_CATEGORY_EXACT;
+    // The gate is `categories ∪ positions`: a row can be admitted by a SECTOR the member ticked
+    // without being in the category their education maps to. Only the latter earns the
+    // education bonus — paying it on every admitted row is what let a Management/NGO profile
+    // "match" surgeon and nutrition posts (25 + 10 + keywords ≈ 65 with no health background).
+    let mut score = SCORE_BASE;
+    if profile
+        .categories
+        .iter()
+        .any(|wanted| wanted.eq_ignore_ascii_case(category))
+    {
+        score += SCORE_CATEGORY_EXACT;
+    }
 
     let title = job.title.to_lowercase();
     let description = job.description.to_lowercase();
@@ -2106,6 +2117,35 @@ mod tests {
 
     /// The two answers taken after the last job must reach the matcher: the positions WIDEN the
     /// gate, and the employer type nudges a row up only when the organisation looks like it.
+    #[test]
+    fn a_sector_widened_row_gets_no_education_bonus() {
+        use super::{MATCH_THRESHOLD_DEFAULT, score_job};
+
+        // Management graduate, no health background, who ticked the health sector for
+        // notifications: a surgeon post must stay far below the cut-off.
+        let profile = MatchProfile {
+            categories: vec!["business_and_finance".to_string()],
+            keywords: vec!["programme management".to_string()],
+            positions: vec!["health".to_string()],
+            ..Default::default()
+        };
+        let surgeon = job_of(
+            "health",
+            "Consultant Surgeon",
+            "Ministry of Health",
+            "Reporting to the hospital director.",
+        );
+        let score = score_job(&surgeon, &profile);
+        assert!(
+            score < MATCH_THRESHOLD_DEFAULT,
+            "a picked sector must not buy the education bonus: {score}"
+        );
+        assert!(
+            score <= 35,
+            "base 20 + sector 10 + one description keyword 5: {score}"
+        );
+    }
+
     #[test]
     fn positions_widen_the_gate_and_the_employer_type_only_nudges() {
         use super::score_job;

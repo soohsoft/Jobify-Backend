@@ -21,7 +21,7 @@ interface Sent {
   reply_markup?: { inline_keyboard: InlineKeyboard };
 }
 
-function harness() {
+function harness(options: { onboardingComplete?: boolean } = {}) {
   const calls: Sent[] = [];
   const saved: Array<Record<string, unknown>> = [];
   const alerts: Array<{ enabled: boolean }> = [];
@@ -68,7 +68,7 @@ function harness() {
         credits: { remaining_this_period: 3, monthly_allowance: 5, balance: 2 },
         alerts: {},
         subscription_status: 'trial',
-        onboarding_complete: true,
+        onboarding_complete: options.onboardingComplete ?? true,
         alerts_enabled: true,
       };
     },
@@ -252,6 +252,12 @@ test('/stop turns alerts off', async () => {
   const { alerts, handler, message } = harness();
   await handler.handle(message('/stop'));
   assert.deepEqual(alerts, [{ enabled: false }]);
+});
+
+test('My Jobs from an unfinished profile opens the interview, not an empty list', async () => {
+  const { calls, handler, tap } = harness({ onboardingComplete: false });
+  await handler.handle(tap('browse:job'));
+  assert.match(lastText(calls), /Step 1 of 5 — What is your name/);
 });
 
 test('/tenders goes straight to the company name question, with no Start button', async () => {

@@ -513,6 +513,18 @@ export class TgBot {
   // -------------------------------------------------------------------------
 
   private async sendJobs(chatId: number, userId: number, kind: 'job' | 'tender'): Promise<void> {
+    // Nothing can match before the interview is answered, so a tap on My Jobs from an empty
+    // profile goes to the interview instead of an empty list that looks like our fault.
+    try {
+      const envelope = await this.backend.getUser(String(userId));
+      if (!envelope.onboarding_complete) {
+        await this.startInterview(chatId, userId);
+        return;
+      }
+    } catch (err) {
+      await this.fail(chatId, err);
+      return;
+    }
     try {
       const list = await this.backend.jobsForUser(String(userId), { limit: 10, kind });
       const title = kind === 'job' ? 'My Jobs' : 'My Tenders';

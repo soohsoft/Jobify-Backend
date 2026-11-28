@@ -581,6 +581,16 @@ async fn update_profile(
         None => previous_profile.positions,
     };
 
+    // A member who skips the sector screen would otherwise finish the interview with an empty
+    // `positions` list — and then score 40 on rows whose category they already qualify for,
+    // never reaching the cut-off, i.e. "no jobs found" for a perfectly answered profile. The
+    // derived categories are the honest default: they are what the matcher was going to query
+    // anyway, and the member can override them on the sector screen at any time.
+    if complete_now && profile.positions.is_empty() {
+        // The derivation already caps categories at three, so this is at most three sectors.
+        profile.positions = categories.clone();
+    }
+
     // `sectors` mirrors the derived categories so the two lists can never disagree.
     set.insert("sectors", &categories);
     set.insert("skills", &skills);

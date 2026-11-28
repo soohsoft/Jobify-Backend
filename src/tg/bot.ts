@@ -386,13 +386,21 @@ export class TgBot {
 
     if (data === CID.positionsAll) {
       if (!session) return this.expired(queryId, chatId);
-      session.positions = [];
+      // "All" means every sector, not "no filter": an empty list would leave the member with
+      // no picked sector at all, and the matcher would then rank them below the cut-off.
+      session.positions = POSITIONS.map((position) => position.slug);
       await this.finishInterview(queryId, chatId, messageId, session);
       return;
     }
 
     if (data === CID.positionsDone) {
       if (!session) return this.expired(queryId, chatId);
+      // Done with nothing picked is not an answer: the sector list is what the matcher ranks
+      // on, and an empty one produces "no jobs" for a member who finished the interview.
+      if (session.positions.length === 0) {
+        await this.bot.answerCallback(queryId, 'Pick at least one sector — or tap All.');
+        return;
+      }
       await this.finishInterview(queryId, chatId, messageId, session);
       return;
     }

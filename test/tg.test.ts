@@ -151,7 +151,7 @@ test('the full interview saves name, degrees, position, employer types and secto
   assert.match(lastText(calls), /Do you have a Master's degree/);
   await handler.handle(tap('onb:master:no'));
 
-  assert.match(lastText(calls), /What job are you looking for/);
+  assert.match(lastText(calls), /List the last three positions you worked/);
   await handler.handle(message('WASH Officer'));
 
   await handler.handle(tap('onb:yrs:3'));

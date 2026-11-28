@@ -232,7 +232,7 @@ export function anotherPrompt(education: Array<{ level: string; field: string }>
 
 export function positionPrompt(): { text: string; keyboard: InlineKeyboard } {
   return {
-    text: '<b>Step 3 of 5 — What job are you looking for?</b>\n\nType the title, for example <i>WASH Officer</i> or <i>Data Analyst</i>.',
+    text: '<b>Step 3 of 5 — List the last three positions you worked?</b>\n\nSeparate them with commas, most recent first.\n<i>For example: WASH Officer, Field Assistant, Data Clerk</i>',
     keyboard: [],
   };
 }

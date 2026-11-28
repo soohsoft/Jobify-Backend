@@ -129,8 +129,11 @@ export class TgBot {
         return;
       }
       case 'position': {
-        if (text.length < 2 || text.length > 80) {
-          await this.bot.sendMessage(chatId, 'Send the job title — 2 to 80 characters.');
+        if (text.length < 2 || text.length > 160) {
+          await this.bot.sendMessage(
+            chatId,
+            'Send the positions — 2 to 160 characters, separated by commas.',
+          );
           return;
         }
         session.lastPosition = text;

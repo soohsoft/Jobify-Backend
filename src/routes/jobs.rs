@@ -1156,18 +1156,28 @@ fn default_match_limit() -> u64 {
 // the alert refresh all score through `score_job`, so no two surfaces can disagree.
 
 /// Default cut-off, overridden by `MATCH_THRESHOLD`.
-pub const MATCH_THRESHOLD_DEFAULT: i64 = 70;
+///
+/// 60 with the weights below means: right field (20 + 25) plus ONE piece of real evidence —
+/// a title keyword (15), or a picked sector (10) with a description keyword (5). Two title
+/// keywords clear it comfortably. What does not clear it: a posting that merely sits in the
+/// degree's category with nothing about the job itself, which is the row that used to be
+/// listed next to a genuine match.
+pub const MATCH_THRESHOLD_DEFAULT: i64 = 60;
 
 const SCORE_BASE: i64 = 20;
-const SCORE_CATEGORY_EXACT: i64 = 10;
+/// The member's education, expressed as the category the degree maps to. This is the base of
+/// a match: it is knowledge, not a preference.
+const SCORE_CATEGORY_EXACT: i64 = 25;
 /// A nudge, not a filter: the member's chosen employer type when the organisation name looks
 /// like it. See `employer_type_matches`.
 const SCORE_EMPLOYER_TYPE: i64 = 5;
-/// The member picked this very sector in "which sectors do you want to be notified about?".
-/// That is an explicit subscription, not a hint, so a row in a picked sector clears the
-/// threshold on its own (20 + 10 + 40 = 70). Keywords then rank above the cut-off rather than
-/// deciding whether the member hears about their own chosen sector at all.
-const SCORE_POSITION_EXACT: i64 = 40;
+/// The member picked this sector in "which sectors do you want to be notified about?".
+///
+/// That answer is a NOTIFICATION preference, not evidence about the job, so it is a nudge
+/// worth 10 — never a gate and never enough on its own (a bare row in a picked sector scores
+/// 20 + 25 + 10 = 55, below the cut-off). What decides a match is the member's education
+/// (the category) and the positions they have actually worked (the keywords).
+const SCORE_POSITION_EXACT: i64 = 10;
 const SCORE_KEYWORD_TITLE: i64 = 15;
 const SCORE_KEYWORD_TITLE_MAX: i64 = 30;
 const SCORE_KEYWORD_DESCRIPTION: i64 = 5;
@@ -2047,11 +2057,13 @@ mod tests {
     /// in that sector must clear the cut-off even when no keyword appears in its title. Without
     /// this, an ICT member heard nothing because ICT postings rarely repeat the keyword list.
     #[test]
-    fn a_picked_sector_clears_the_threshold_by_itself() {
+    fn a_picked_sector_is_a_nudge_not_a_pass() {
         use super::{MATCH_THRESHOLD_DEFAULT, score_job};
 
+        // A picked sector is a notification preference, so it must not carry a row over the
+        // cut-off by itself: 20 base + 25 category + 10 sector = 55.
         let profile = MatchProfile {
-            categories: vec!["computing".to_string()],
+            categories: vec!["ict".to_string()],
             keywords: vec!["ict officer".to_string()],
             positions: vec!["ict".to_string()],
             ..Default::default()
@@ -2063,9 +2075,18 @@ mod tests {
             "Protect the payment system.",
         );
         assert!(
-            score_job(&plain, &profile) >= MATCH_THRESHOLD_DEFAULT,
-            "a picked sector is enough on its own"
+            score_job(&plain, &profile) < MATCH_THRESHOLD_DEFAULT,
+            "a picked sector alone is not evidence about the job"
         );
+
+        // Education plus ONE keyword from a position actually worked does clear it.
+        let titled = job_of(
+            "ict",
+            "ICT Officer",
+            "FEDERAL GOVERNMENT OF SOMALIA",
+            "Protect the payment system.",
+        );
+        assert!(score_job(&titled, &profile) >= MATCH_THRESHOLD_DEFAULT);
     }
 
     /// The two answers taken after the last job must reach the matcher: the positions WIDEN the
@@ -2145,7 +2166,7 @@ mod tests {
             ..Default::default()
         };
 
-        // 20 base + 10 exact category = 30: in the right field, nothing about the job itself.
+        // 20 base + 25 exact category = 45: in the right field, nothing about the job itself.
         // This is the row that used to be listed beside a real IT role.
         let bare = job_from(serde_json::json!({
             "_id": "job-1",
@@ -2153,29 +2174,27 @@ mod tests {
             "description": "",
             "category": "ict",
         }));
-        assert_eq!(score_job(&bare, &profile), 30);
+        assert_eq!(score_job(&bare, &profile), 45);
         assert!(score_job(&bare, &profile) < MATCH_THRESHOLD_DEFAULT);
 
-        // 20 + 10 + 30: two title keywords saturate the title cap — real evidence, still
-        // short of the cut-off on its own.
+        // 20 + 25 + 30: two title keywords saturate the title cap.
         let titled = job_from(serde_json::json!({
             "_id": "job-2",
             "title": "Data Analyst",
             "description": "",
             "category": "ict",
         }));
-        assert_eq!(score_job(&titled, &profile), 60);
-        assert!(score_job(&titled, &profile) < MATCH_THRESHOLD_DEFAULT);
+        assert_eq!(score_job(&titled, &profile), 75);
+        assert!(score_job(&titled, &profile) >= MATCH_THRESHOLD_DEFAULT);
 
-        // 20 + 10 + 30 + 10 = 70: both caps saturated. This is the highest score a profile
-        // with no locations can produce, and it lands exactly on the default cut-off.
+        // 20 + 25 + 30 + 10 = 85: both caps saturated.
         let saturated = job_from(serde_json::json!({
             "_id": "job-3",
             "title": "Data Analyst",
             "description": "SQL reporting dashboards",
             "category": "ict",
         }));
-        assert_eq!(score_job(&saturated, &profile), 70);
+        assert_eq!(score_job(&saturated, &profile), 85);
         assert!(score_job(&saturated, &profile) >= MATCH_THRESHOLD_DEFAULT);
     }
 
@@ -2271,10 +2290,10 @@ mod tests {
         }));
         assert_eq!(
             score_job(&job, &profile),
-            70,
-            "30 title keywords + 10 description keywords is the whole scale"
+            85,
+            "20 base + 25 category + 30 title + 10 description is the whole scale without a sector pick"
         );
-        assert_eq!(score_job(&job, &profile), MATCH_THRESHOLD_DEFAULT);
+        assert!(score_job(&job, &profile) >= MATCH_THRESHOLD_DEFAULT);
     }
 
     /// The bot's one call: same rows and shape as `/jobs/match`, addressed by snowflake, and
@@ -2370,10 +2389,10 @@ mod tests {
         assert_eq!(rows.len(), 1, "rows: {body}");
         assert_eq!(rows[0]["job"]["_id"], "job-901");
         assert_eq!(
-            rows[0]["matchScore"], 70,
-            "base 20 + exact category 10 + two title keywords 30 + two description keywords 10"
+            rows[0]["matchScore"], 85,
+            "base 20 + exact category 25 + two title keywords 30 + two description keywords 10"
         );
-        assert_eq!(body["meta"]["threshold"], 70);
+        assert_eq!(body["meta"]["threshold"], 60);
         assert_eq!(body["meta"]["queued"], 0, "a read never queues");
 
         let _ = db.drop().await;
@@ -2487,7 +2506,7 @@ mod tests {
         .unwrap();
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bot["meta"]["reason"], "ok");
-        assert_eq!(bot["meta"]["threshold"], 70);
+        assert_eq!(bot["meta"]["threshold"], 60);
         assert_eq!(
             bot["meta"]["considered"], 2,
             "the wash row never enters: the category is the gate"
@@ -2497,8 +2516,8 @@ mod tests {
         assert_eq!(rows.len(), 1, "rows: {bot}");
         assert_eq!(rows[0]["job"]["_id"], "job-strong");
         assert_eq!(
-            rows[0]["matchScore"], 70,
-            "20 base + 10 category + 30 title keywords + 10 description keywords"
+            rows[0]["matchScore"], 85,
+            "20 base + 25 category + 30 title keywords + 10 description keywords"
         );
 
         // 2. A member with nothing above the cut-off: an honest empty list, not a 404.
@@ -2516,7 +2535,7 @@ mod tests {
         .unwrap();
         assert_eq!(status, StatusCode::OK);
         assert_eq!(weak["meta"]["reason"], "below_threshold");
-        assert_eq!(weak["meta"]["threshold"], 70);
+        assert_eq!(weak["meta"]["threshold"], 60);
         assert_eq!(weak["meta"]["considered"], 2);
         assert_eq!(weak["meta"]["total"], 0);
         assert_eq!(weak["data"].as_array().unwrap().len(), 0);
@@ -2538,7 +2557,7 @@ mod tests {
         .unwrap();
         assert_eq!(portal["meta"]["reason"], "below_threshold");
         assert_eq!(portal["meta"]["qualified"], 0);
-        assert_eq!(portal["meta"]["threshold"], 70);
+        assert_eq!(portal["meta"]["threshold"], 60);
         assert_eq!(portal["data"].as_array().unwrap().len(), 0);
 
         // 4. Queueing: a sub-70 row is never written, so the digest cannot send one.
@@ -2564,7 +2583,7 @@ mod tests {
             .await
             .unwrap()
             .expect("the strong match must be queued");
-        assert_eq!(stored.match_score, Some(70));
+        assert_eq!(stored.match_score, Some(85));
 
         // 5. The feed keeps every live row — browsing is not matching — and reports the same
         //    0–100, so a 30% row cannot look like a 70% one.
@@ -2600,10 +2619,10 @@ mod tests {
             })
             .collect();
         assert_eq!(scores.len(), 3, "the feed is not cut off: {feed}");
-        assert_eq!(scores["job-strong"], 70);
+        assert_eq!(scores["job-strong"], 85);
         assert_eq!(
-            scores["job-weak"], 35,
-            "in the category, one keyword buried in the description"
+            scores["job-weak"], 50,
+            "in the category (20 + 25), one keyword buried in the description (5)"
         );
         assert_eq!(
             scores["job-wash"], 0,

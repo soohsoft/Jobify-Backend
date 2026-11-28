@@ -1030,9 +1030,18 @@ async fn ingest_jobs(
         // The kind is a DESTINATION, not a stored field. A tender is upserted into its own
         // collection; anything else is a job. The upsert key (external_id, source) is the
         // same in both, so re-ingesting one listing stays idempotent wherever it lives.
-        let collection = match canonical_kind(&input.kind) {
+        let scope = canonical_kind(&input.kind);
+        let collection = match scope {
             FeedScope::Tenders => state.tenders(),
             _ => state.jobs(),
+        };
+        // A listing has exactly ONE home. Re-ingesting the same (external_id, source) with a
+        // different kind would otherwise leave a copy behind in the other collection — which is
+        // how tenders ended up in the job feed — so the row is removed from the collection it
+        // no longer belongs to, in the same pass that stores it here.
+        let other = match scope {
+            FeedScope::Tenders => state.jobs(),
+            _ => state.tenders(),
         };
 
         // `kind` is removed rather than merely not written: a row ingested before the split
@@ -1052,6 +1061,12 @@ async fn ingest_jobs(
             .await
         {
             Ok(result) => {
+                let _ = other
+                    .delete_many(doc! {
+                        "external_id": &input.external_id,
+                        "source": &input.source,
+                    })
+                    .await;
                 // `upserted_id` distinguishes a listing the feed has never carried from one
                 // that was already stored and merely had its fields refreshed — the two are
                 // different facts and the scraper's log should not blur them.

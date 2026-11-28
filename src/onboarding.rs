@@ -24,7 +24,13 @@ pub const MAX_EDUCATION_ENTRIES: usize = 4;
 
 /// A last position contributes at most this many search terms. A long job title otherwise
 /// floods the keyword list and every keyword is scored against every candidate row.
-pub const MAX_POSITION_TERMS: usize = 4;
+/// The interview now asks for the last three positions, comma-separated, so each one may
+/// contribute a few words without the keyword list turning into noise.
+pub const MAX_POSITION_TERMS: usize = 3;
+
+/// How many of the listed positions are matched on. A member may type more; only the most
+/// recent three are scored, because a job held a decade ago should not outvote the last one.
+pub const MAX_POSITIONS: usize = 3;
 
 /// The levels the interview offers, in ascending order. Stored verbatim as `education.level`.
 pub const LEVELS: &[&str] = &[
@@ -368,6 +374,17 @@ pub fn other_text(field: &str) -> Option<String> {
     }
 }
 
+/// The answer to "list the last three positions" is one field: titles separated by commas,
+/// semicolons, slashes or newlines. The first three keep their order (most recent first).
+fn split_positions(text: &str) -> Vec<String> {
+    text.split([',', ';', '/', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .take(MAX_POSITIONS)
+        .map(str::to_string)
+        .collect()
+}
+
 fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .map(|word| word.trim().to_ascii_lowercase())
@@ -399,8 +416,10 @@ pub fn match_keywords(
     let mut terms: Vec<String> = Vec::new();
 
     if let Some(position) = last_position {
-        for word in words(position).into_iter().take(MAX_POSITION_TERMS) {
-            add_term(&mut terms, &word);
+        for one in split_positions(position) {
+            for word in words(&one).into_iter().take(MAX_POSITION_TERMS) {
+                add_term(&mut terms, &word);
+            }
         }
     }
 
@@ -611,6 +630,21 @@ mod tests {
         .unwrap();
         assert_eq!(highest_level(&education), Some("master"));
         assert_eq!(highest_level(&[]), None);
+    }
+
+    #[test]
+    #[test]
+    fn three_comma_separated_positions_all_contribute_keywords() {
+        let keywords = match_keywords(Some("WASH Officer, Field Assistant, Data Clerk"), &[], &[]);
+        for expected in ["wash", "officer", "field", "assistant", "data", "clerk"] {
+            assert!(
+                keywords.contains(&expected.to_string()),
+                "missing {expected} in {keywords:?}"
+            );
+        }
+        // A fourth position is not scored: the last three are what the interview asked for.
+        let capped = match_keywords(Some("Aaa Bbb, Ccc Ddd, Eee Fff, Ggg Hhh"), &[], &[]);
+        assert!(!capped.contains(&"ggg".to_string()), "{capped:?}");
     }
 
     #[test]

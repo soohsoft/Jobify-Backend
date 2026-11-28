@@ -73,7 +73,18 @@ function harness(options: { onboardingComplete?: boolean } = {}) {
     },
     async getUser() {
       return {
-        user: { company: null },
+        user: {
+          company: null,
+          match_profile: {
+            categories: ['business_and_finance'],
+            keywords: [],
+            locations: [],
+            category_source: 'llm',
+            updated_at: '',
+            positions: ['health'],
+            employer_types: ['ngo'],
+          },
+        },
         credits: { remaining_this_period: 3, monthly_allowance: 5, balance: 2 },
         alerts: {},
         subscription_status: 'trial',
@@ -249,12 +260,32 @@ test('My Jobs shows matched rows and, separately, related positions', async () =
   await handler.handle(message('/jobs'));
   const text = lastText(calls);
   assert.match(text, /Matched Jobs/, 'the first frame is the matched list');
-  assert.match(text, /Related Position/, 'rows admitted by the picked sectors get their own frame');
+  assert.match(text, /Other sectors you select/, 'rows admitted by the picked sectors get their own frame');
   const matchedAt = text.indexOf('Matched Jobs');
-  const relatedAt = text.indexOf('Related Position');
+  const relatedAt = text.indexOf('Other sectors you select');
   assert.ok(matchedAt < relatedAt, 'matched comes first');
   assert.ok(text.indexOf('WASH Officer') < relatedAt, 'the matched row sits in the first frame');
   assert.ok(text.indexOf('Finance Officer') > relatedAt, 'the related row sits in the second');
+});
+
+test('/sectors reopens the picker with the stored picks and saves only that answer', async () => {
+  const { calls, saved, handler, message, tap } = harness();
+  await handler.handle(message('/sectors'));
+  assert.match(lastText(calls), /Which other sectors/);
+  // The picker starts from what is stored, not from an empty list.
+  assert.ok(
+    lastKeyboard(calls)
+      .flat()
+      .some((button) => (button.text ?? '').startsWith('✓ ')),
+    'the stored sector comes back ticked',
+  );
+  // Adding a sector on top of the stored one: the picker is a toggle, so tapping the stored
+  // sector would switch it OFF, and `Done` refuses an empty list on purpose.
+  await handler.handle(tap('onb:pos:wash'));
+  await handler.handle(tap('onb:pos:done'));
+  const written = saved[saved.length - 1] as { positions?: string[]; name?: unknown };
+  assert.deepEqual(written.positions, ['health', 'wash']);
+  assert.equal(written.name, undefined, 'an edit must not rewrite the whole profile');
 });
 
 test('/balance shows searches left and offers My Account', async () => {

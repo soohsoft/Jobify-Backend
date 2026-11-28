@@ -13,6 +13,10 @@ export interface MatchProfile {
   /** "llm" or "rules" — recorded by the backend, never chosen here. */
   category_source: string;
   updated_at: string;
+  /** Sectors the member asked to be notified about (the "other sectors" answer). */
+  positions?: string[];
+  /** `ngo` / `government` / `private` — a nudge on ranking, never a filter. */
+  employer_types?: string[];
 }
 
 export interface AlertPrefs {

@@ -14,6 +14,14 @@ import type { Logger } from '../log.js';
 import type { FeedJob, UserEnvelope } from '../types.js';
 import { TelegramClient, type InlineKeyboard, type TgUpdate } from './client.js';
 import { frame, jobBlock } from './format.js';
+
+/**
+ * The floor for the "other sectors" block: base (20) + picked sector (10) is 30, which is a row
+ * admitted purely because a sector was ticked. 35 means at least one word of the member's work
+ * history (or their education's category) is present, so the list stays related rather than
+ * merely permitted.
+ */
+const RELATED_MIN_SCORE = 35;
 import {
   CID,
   EMPLOYERS,
@@ -191,10 +199,13 @@ export class TgBot {
       case 'stop':
         await this.stop(chatId, userId);
         return;
+      case 'sectors':
+        await this.editSectors(chatId, userId);
+        return;
       case 'help':
         await this.bot.sendMessage(
           chatId,
-          '<b>Jobify</b>\n/start — set up your profile\n/jobs — jobs matched to you\n/tenders — tenders for your company\n/balance — searches left\n/account — link to your account\n/stop — stop notifications',
+          '<b>Jobify</b>\n/start — set up your profile\n/jobs — jobs matched to you\n/tenders — tenders for your company\n/sectors — change the other sectors you follow\n/balance — searches left\n/account — link to your account\n/stop — stop notifications',
         );
         return;
       default:
@@ -460,6 +471,29 @@ export class TgBot {
     await this.expired(queryId, chatId);
   }
 
+  /**
+   * `/sectors` — reopen the sector picker with the member's current picks.
+   *
+   * The preference lives on the profile, so the screen has to start from what is stored: an
+   * empty picker would silently wipe the sectors they chose during onboarding.
+   */
+  private async editSectors(chatId: number, userId: number): Promise<void> {
+    let envelope: UserEnvelope;
+    try {
+      envelope = await this.backend.getUser(String(userId));
+    } catch (err) {
+      await this.fail(chatId, err);
+      return;
+    }
+    const session = this.sessions.start(userId);
+    session.step = 'positions';
+    session.editSectors = true;
+    session.positions = [...(envelope.user.match_profile?.positions ?? [])];
+    session.employerTypes = [...(envelope.user.match_profile?.employer_types ?? [])];
+    const prompt = positionsPrompt(session);
+    await this.bot.sendMessage(chatId, prompt.text, prompt.keyboard);
+  }
+
   private async finishInterview(
     queryId: string,
     chatId: number,
@@ -467,6 +501,43 @@ export class TgBot {
     session: TgSession,
   ): Promise<void> {
     const userId = chatId;
+
+    // /sectors is an edit of one answer: it writes the sector list and stops there, because
+    // re-sending the interview's completion card would claim the profile was just created.
+    if (session.editSectors) {
+      try {
+        await this.backend.saveProfile({
+          discord_id: String(userId),
+          positions: session.positions,
+        });
+      } catch (err) {
+        await this.bot.answerCallback(queryId);
+        return this.fail(chatId, err);
+      }
+      this.sessions.clear(userId);
+      await this.bot.answerCallback(queryId, 'Sectors updated');
+      let matches = 0;
+      try {
+        const list = await this.backend.jobsForUser(String(userId), { limit: 10, kind: 'job' });
+        matches = list.rows.length;
+      } catch {
+        // A read failure must not make a successful save look broken.
+      }
+      const text = [
+        '<b>Sectors updated ✓</b>',
+        '',
+        `${session.positions.length} sector(s) followed — ${matches} job(s) match now.`,
+        '',
+        'Tap My Jobs to see them, or /sectors again to change them.',
+      ].join('\n');
+      if (messageId) {
+        await this.bot.editMessage(chatId, messageId, text, browseKeyboard());
+      } else {
+        await this.bot.sendMessage(chatId, text, browseKeyboard());
+      }
+      return;
+    }
+
     try {
       await this.backend.saveProfile({
         discord_id: String(userId),
@@ -536,8 +607,12 @@ export class TgBot {
         threshold: 0,
       });
       const matchedIds = new Set(matched.rows.map((row) => row.job._id));
+      // A sector the member ticked widens what they CAN see, but a row that is only in the
+      // list because of that tick — not in their education's category, and sharing none of
+      // their worked-position words — scores 30 and has no business in front of them. That is
+      // how a Management/NGO member was shown surgery and nutrition posts.
       const related = everything.rows
-        .filter((row) => !matchedIds.has(row.job._id))
+        .filter((row) => !matchedIds.has(row.job._id) && row.matchScore >= RELATED_MIN_SCORE)
         .slice(0, 8);
       const noun = kind === 'job' ? 'Jobs' : 'Tenders';
       const block = (rows: typeof matched.rows) =>
@@ -559,7 +634,7 @@ export class TgBot {
 
       const sections: string[] = [];
       if (matched.rows.length > 0) sections.push(frame(`Matched ${noun}`, block(matched.rows)));
-      if (related.length > 0) sections.push(frame('Related Position', block(related)));
+      if (related.length > 0) sections.push(frame('Other sectors you select', block(related)));
       await this.bot.sendMessage(chatId, sections.join('\n\n'), browseKeyboard());
     } catch (err) {
       await this.fail(chatId, err);

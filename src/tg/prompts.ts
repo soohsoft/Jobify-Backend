@@ -35,6 +35,12 @@ export interface TgSession {
   positionsPage: number;
   /** True when finished: the completion card should offer the tabs. */
   completed?: boolean;
+  /**
+   * Set by /sectors: the member is editing ONE answer, not onboarding again, so the picker
+   * saves the sector list and stops instead of walking the whole interview or re-sending the
+   * completion card.
+   */
+  editSectors?: boolean;
   companyName?: string;
   companyServices?: string;
   updatedAt: number;

@@ -354,7 +354,7 @@ export function assistantFailureCopy(status: number, code: string): AssistantFai
   if (status === 402 || code === 'out_of_credits') {
     return {
       content:
-        "You've used your smart searches for this period.\n**Get unlimited job search — subscribe $1/month.** Press **My Account** below (or `/account`) and pay with WaafiPay: EVC, ZAAD or eDahab. Browsing and your job alerts stay free.",
+        "You've used your smart searches for this period.\n**Get unlimited job search — subscribe $1/month.** Press **My Account** below (or `/account`) and pay with WaafiPay: EVC, ZAAD, SAHAL or JEEB. Browsing and your job alerts stay free.",
       offerPurchase: true,
     };
   }

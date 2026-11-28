@@ -210,10 +210,13 @@ export function anotherPrompt(education: Array<{ level: string; field: string }>
   text: string;
   keyboard: InlineKeyboard;
 } {
+  // The field is stored as a slug; the member must never see `ict` where they tapped
+  // "Computing".
   const added = education
     .map((entry) => {
       const level = LEVELS.find((item) => item.key === entry.level)?.label ?? entry.level;
-      return `• ${level}${entry.field ? ` — ${entry.field}` : ''}`;
+      const field = FIELDS.find((item) => item.key === entry.field)?.label ?? entry.field;
+      return `• ${level}${field ? ` — ${field}` : ''}`;
     })
     .join('\n');
   return {
@@ -248,7 +251,7 @@ export function employerPrompt(session: TgSession): { text: string; keyboard: In
     callback_data: CID.employer(employer.slug),
   }));
   return {
-    text: '<b>Where would you like to work?</b>\n\nTap one or more, then Done.',
+    text: '<b>Step 5 of 5 — Where would you like to work?</b>\n\nTap one or more, then Done.',
     keyboard: [...buttons.map((button) => [button]), [{ text: 'Done ✓', callback_data: CID.employerDone }]],
   };
 }
@@ -275,7 +278,7 @@ export function positionsPrompt(session: TgSession): { text: string; keyboard: I
     .join(', ');
   return {
     text: [
-      '<b>Which sectors are you interested to get notified about?</b>',
+      '<b>Step 5 of 5 — Which sectors are you interested to get notified about?</b>',
       '',
       'Tap as many as you like, then Done. Or All.',
       '',

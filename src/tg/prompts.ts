@@ -278,7 +278,7 @@ export function positionsPrompt(session: TgSession): { text: string; keyboard: I
     .join(', ');
   return {
     text: [
-      '<b>Step 5 of 5 — Which sectors are you interested to get notified about?</b>',
+      '<b>Step 5 of 5 — Which other sectors are you interested to get notified about?</b>',
       '',
       'Tap as many as you like, then Done. Or All.',
       '',

@@ -44,23 +44,32 @@ function harness(options: { onboardingComplete?: boolean } = {}) {
       saved.push(patch);
       return { user: {} };
     },
-    async jobsForUser() {
-      return {
-        rows: [
-          {
-            job: {
-              _id: 'job1',
-              title: 'WASH Officer',
-              organization: 'UNICEF',
-              location: 'Mogadishu',
-              deadline: '2026-12-02T00:00:00Z',
-              url: 'https://example.org/job1',
-            },
-            matchScore: 85,
-          },
-        ],
-        meta: {},
+    async jobsForUser(_id: string, options: { threshold?: number } = {}) {
+      const matched = {
+        job: {
+          _id: 'job1',
+          title: 'WASH Officer',
+          organization: 'UNICEF',
+          location: 'Mogadishu',
+          deadline: '2026-12-02T00:00:00Z',
+          url: 'https://example.org/job1',
+        },
+        matchScore: 85,
       };
+      const related = {
+        job: {
+          _id: 'job2',
+          title: 'Finance Officer',
+          organization: 'Islamic Relief',
+          location: 'Mogadishu',
+          deadline: '2026-12-09T00:00:00Z',
+          url: 'https://example.org/job2',
+        },
+        matchScore: 45,
+      };
+      // The real backend returns only rows over the cut-off unless `threshold: 0` asks for
+      // everything the member's areas admit — that second read is where related rows come from.
+      return { rows: options.threshold === 0 ? [matched, related] : [matched], meta: {} };
     },
     async getUser() {
       return {
@@ -165,7 +174,7 @@ test('the full interview saves name, degrees, position, employer types and secto
   await handler.handle(tap('onb:emp:government'));
   await handler.handle(tap('onb:emp:done'));
 
-  assert.match(lastText(calls), /Which sectors are you interested to get notified about/);
+  assert.match(lastText(calls), /Which other sectors are you interested to get notified about/);
   await handler.handle(tap('onb:pos:wash'));
   await handler.handle(tap('onb:pos:ict'));
   await handler.handle(tap('onb:pos:done'));
@@ -216,7 +225,7 @@ test('the sector picker pages through 28 sectors and keeps picks across pages', 
   await handler.handle(tap('onb:yrs:6'));
   await handler.handle(tap('onb:emp:done'));
 
-  assert.match(lastText(calls), /Which sectors/);
+  assert.match(lastText(calls), /Which other sectors/);
   assert.ok(flat(lastKeyboard(calls)).includes('onb:posp:1'), 'More pages exist');
   await handler.handle(tap('onb:pos:health'));
   await handler.handle(tap('onb:posp:1'));
@@ -229,10 +238,23 @@ test('/jobs lists matches with a link back to the job', async () => {
   const { calls, handler, message } = harness();
   await handler.handle(message('/jobs'));
   const text = lastText(calls);
-  assert.match(text, /My Jobs/);
+  assert.match(text, /Matched Jobs/);
   assert.match(text, /WASH Officer/);
   assert.match(text, /UNICEF/);
   assert.match(text, /href="https:\/\/example.org\/job1"/);
+});
+
+test('My Jobs shows matched rows and, separately, related positions', async () => {
+  const { calls, handler, message } = harness();
+  await handler.handle(message('/jobs'));
+  const text = lastText(calls);
+  assert.match(text, /Matched Jobs/, 'the first frame is the matched list');
+  assert.match(text, /Related Position/, 'rows admitted by the picked sectors get their own frame');
+  const matchedAt = text.indexOf('Matched Jobs');
+  const relatedAt = text.indexOf('Related Position');
+  assert.ok(matchedAt < relatedAt, 'matched comes first');
+  assert.ok(text.indexOf('WASH Officer') < relatedAt, 'the matched row sits in the first frame');
+  assert.ok(text.indexOf('Finance Officer') > relatedAt, 'the related row sits in the second');
 });
 
 test('/balance shows searches left and offers My Account', async () => {

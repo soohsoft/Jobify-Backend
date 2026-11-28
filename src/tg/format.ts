@@ -25,6 +25,18 @@ export function closingDate(deadline?: string | null): string {
   return `${Number(day)} ${name} ${year}`;
 }
 
+/**
+ * A titled block: `───────  Matched Jobs  ───────`, the rows, then a closing rule.
+ *
+ * Telegram renders no horizontal rule, so the frame is drawn in box characters — the same
+ * convention the Discord list uses — and the member can see where one list ends and the next
+ * begins without reading a heading.
+ */
+export function frame(title: string, body: string): string {
+  const rule = (label: string) => `───────  ${label}  ───────`;
+  return [rule(title), '', body, rule('End')].join('\n');
+}
+
 /** The four-line block for one posting. `index` is 1-based; 0 renders no number. */
 export function jobBlock(
   job: Pick<FeedJob, 'title' | 'organization' | 'location' | 'deadline' | 'url' | 'source_name'>,

@@ -13,7 +13,7 @@ import { Backend } from '../http.js';
 import type { Logger } from '../log.js';
 import type { FeedJob, UserEnvelope } from '../types.js';
 import { TelegramClient, type InlineKeyboard, type TgUpdate } from './client.js';
-import { jobBlock } from './format.js';
+import { frame, jobBlock } from './format.js';
 import {
   CID,
   EMPLOYERS,
@@ -526,20 +526,41 @@ export class TgBot {
       return;
     }
     try {
-      const list = await this.backend.jobsForUser(String(userId), { limit: 10, kind });
-      const title = kind === 'job' ? 'My Jobs' : 'My Tenders';
-      if (list.rows.length === 0) {
+      // Two reads of the same matcher: the cut-off decides what is a MATCH, and `threshold=0`
+      // returns everything the member's areas admit — the difference is the RELATED list, the
+      // rows that come from the sectors they picked without clearing the bar.
+      const matched = await this.backend.jobsForUser(String(userId), { limit: 10, kind });
+      const everything = await this.backend.jobsForUser(String(userId), {
+        limit: 30,
+        kind,
+        threshold: 0,
+      });
+      const matchedIds = new Set(matched.rows.map((row) => row.job._id));
+      const related = everything.rows
+        .filter((row) => !matchedIds.has(row.job._id))
+        .slice(0, 8);
+      const noun = kind === 'job' ? 'Jobs' : 'Tenders';
+      const block = (rows: typeof matched.rows) =>
+        rows
+          .map((row, index) =>
+            jobBlock(row.job, index + 1, `${this.config.appBaseUrl}/jobs/${row.job._id}`),
+          )
+          .join('\n\n');
+
+      if (matched.rows.length === 0 && related.length === 0) {
+        const title = kind === 'job' ? 'My Jobs' : 'My Tenders';
         await this.bot.sendMessage(
           chatId,
-          `<b>${title}</b>\n\nNothing live matches you this minute — I check again every day and will message you the moment something does.`,
+          `Nothing live matches you this minute — I check again every day and will message you the moment something does.\n\n<b>${title}</b>`,
           browseKeyboard(),
         );
         return;
       }
-      const lines = list.rows.map((row, index) =>
-        jobBlock(row.job, index + 1, `${this.config.appBaseUrl}/jobs/${row.job._id}`),
-      );
-      await this.bot.sendMessage(chatId, [`<b>${title}</b> — ${list.rows.length} live`, '', ...lines].join('\n'), browseKeyboard());
+
+      const sections: string[] = [];
+      if (matched.rows.length > 0) sections.push(frame(`Matched ${noun}`, block(matched.rows)));
+      if (related.length > 0) sections.push(frame('Related Position', block(related)));
+      await this.bot.sendMessage(chatId, sections.join('\n\n'), browseKeyboard());
     } catch (err) {
       await this.fail(chatId, err);
     }
